@@ -1,0 +1,51 @@
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+logs/
+firebase-debug.log
+firebase-debug.*.log
+
+# Environment and secrets
+.env
+.env.*
+*.local
+serviceAccountKey.json
+**/serviceAccountKey.json
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node / Firebase
+node_modules/
+**/node_modules/
+.firebase/
+seniorproject-backend/functions/lib/
+seniorproject-backend/functions/.runtimeconfig.json
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+**/build/
+coverage/
+**/coverage/
+
+# Generated or local AI artifacts
+seniorproject-backend/devices/ai_ready_dataset_60_days.csv
+seniorproject-backend/devices/models/smart_energy_ai_metrics.json
+seniorproject-backend/ai_scenario_validation_results*.json

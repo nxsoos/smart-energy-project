@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "237804589333",
+    "firebase_url": "https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "seniorproject-energy",
+    "storage_bucket": "seniorproject-energy.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:237804589333:android:d0ec2b647310e7974bd91c",
+        "android_client_info": {
+          "package_name": "com.example.smart_energy_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDWx14BTQG5w_N6AkqZZsbs9wzONcvMq7g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
