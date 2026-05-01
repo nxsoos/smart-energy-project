@@ -9,6 +9,9 @@ class SensorData {
   final int aqi;
   final int smokeRaw;
   final int lightRaw;
+  final int soundRaw;
+  final int noise;
+  final String noiseStatus;
   final String lightStatus;
   final String smokeStatus;
   final bool ahtOk;
@@ -24,6 +27,9 @@ class SensorData {
     this.aqi = 0,
     this.smokeRaw = 0,
     this.lightRaw = 0,
+    this.soundRaw = 0,
+    this.noise = 0,
+    this.noiseStatus = 'Unknown',
     this.lightStatus = 'Unknown',
     this.smokeStatus = 'Unknown',
     this.ahtOk = false,
@@ -41,6 +47,9 @@ class SensorData {
       aqi: (json['aqi'] as num?)?.toInt() ?? 0,
       smokeRaw: (json['smokeRaw'] as num?)?.toInt() ?? 0,
       lightRaw: (json['lightRaw'] as num?)?.toInt() ?? 0,
+      soundRaw: (json['soundRaw'] as num?)?.toInt() ?? 0,
+      noise: (json['noise'] as num?)?.toInt() ?? 0,
+      noiseStatus: (json['noiseStatus'] as String?) ?? 'Unknown',
       lightStatus: (json['lightStatus'] as String?) ?? 'Unknown',
       smokeStatus: (json['smokeStatus'] as String?) ?? 'Unknown',
       ahtOk: (json['ahtOk'] as bool?) ?? false,
@@ -59,6 +68,9 @@ class SensorData {
       'aqi': aqi,
       'smokeRaw': smokeRaw,
       'lightRaw': lightRaw,
+      'soundRaw': soundRaw,
+      'noise': noise,
+      'noiseStatus': noiseStatus,
       'lightStatus': lightStatus,
       'smokeStatus': smokeStatus,
       'ahtOk': ahtOk,

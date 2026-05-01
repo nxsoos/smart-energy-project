@@ -28,7 +28,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   static const int _alertDedupCooldownMs = 5 * 60 * 1000;
   static const int _historicalAlertMaxAgeMs = 10 * 60 * 1000;
-  static const int _sensorFeedStaleThresholdMs = 60 * 1000;
+  static const int _sensorFeedStaleThresholdMs = 2 * 60 * 1000;
 
   final FirebaseRealtimeService _firebaseRealtimeService =
       FirebaseRealtimeService();
@@ -43,6 +43,13 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Alert> _alerts = [];
   final Set<String> _seenAlertIds = <String>{};
   final Map<String, int> _lastShownAlertBySignature = <String, int>{};
+  final Set<String> _pendingDeviceCommands = <String>{};
+  final Map<String, String> _deviceCommandErrors = <String, String>{};
+  final Map<String, StreamSubscription<DeviceCommandState>>
+  _commandStatusSubscriptions =
+      <String, StreamSubscription<DeviceCommandState>>{};
+  final Map<String, StreamSubscription<bool?>> _deviceSwitchSubscriptions =
+      <String, StreamSubscription<bool?>>{};
   StreamSubscription<Alert>? _alertsSubscription;
   Timer? _sensorFreshnessTimer;
   late int _alertsListenerStartedAtMs;
@@ -56,7 +63,13 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _initializeMockData();
     _sensorFreshnessTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted) {
+      if (!mounted) {
+        return;
+      }
+
+      if (widget.enableRealtimeSync) {
+        _refreshData(showErrorSnackBar: false, updateLoading: false);
+      } else {
         setState(() {});
       }
     });
@@ -75,6 +88,12 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _activeRequestToken?.cancel('Screen disposed');
     _alertsSubscription?.cancel();
+    for (final subscription in _commandStatusSubscriptions.values) {
+      subscription.cancel();
+    }
+    for (final subscription in _deviceSwitchSubscriptions.values) {
+      subscription.cancel();
+    }
     _sensorFreshnessTimer?.cancel();
     super.dispose();
   }
@@ -226,30 +245,179 @@ class _HomeScreenState extends State<HomeScreen> {
     _currentTariff = ElectricityPricing.costPerKWh;
   }
 
-  void _toggleDevice(Device device, bool value) {
-    setState(() {
-      final index = _devices.indexOf(device);
-      _devices[index] = device.copyWith(
-        isOn: value,
-        currentPower: value ? device.currentPower : 0.0,
-      );
-    });
-    // TODO: Send API request to control device
+  bool _isControllableBreaker(String deviceId) {
+    return deviceId == 'breaker_01' || deviceId == 'breaker_02';
   }
 
-  Future<void> _refreshData({bool showErrorSnackBar = true}) async {
-    if (mounted) {
+  Future<void> _toggleDevice(Device device, bool value) async {
+    if (!_isControllableBreaker(device.id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${device.name} is not command-enabled.')),
+      );
+      return;
+    }
+
+    await _sendDeviceCommand(device.id, value ? 'turn_on' : 'turn_off');
+  }
+
+  Future<void> _sendDeviceCommand(String deviceId, String action) async {
+    setState(() {
+      _pendingDeviceCommands.add(deviceId);
+      _deviceCommandErrors.remove(deviceId);
+    });
+
+    try {
+      await _firebaseRealtimeService.sendDeviceCommand(deviceId, action);
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${action == 'turn_on' ? 'Turn on' : 'Turn off'} command sent.',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _pendingDeviceCommands.remove(deviceId);
+        _deviceCommandErrors[deviceId] =
+            'Could not send command. Please try again.';
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not send device command.')),
+      );
+    }
+  }
+
+  void _syncDeviceListeners(List<Device> devices) {
+    final activeDeviceIds = devices
+        .map((device) => device.id)
+        .where(_isControllableBreaker)
+        .toSet();
+
+    for (final deviceId in _commandStatusSubscriptions.keys.toList()) {
+      if (!activeDeviceIds.contains(deviceId)) {
+        _commandStatusSubscriptions.remove(deviceId)?.cancel();
+      }
+    }
+
+    for (final deviceId in _deviceSwitchSubscriptions.keys.toList()) {
+      if (!activeDeviceIds.contains(deviceId)) {
+        _deviceSwitchSubscriptions.remove(deviceId)?.cancel();
+      }
+    }
+
+    for (final deviceId in activeDeviceIds) {
+      _commandStatusSubscriptions.putIfAbsent(
+        deviceId,
+        () => _firebaseRealtimeService
+            .watchLatestCommandStatus(deviceId)
+            .listen(
+              (state) => _handleCommandStateChanged(deviceId, state),
+              onError: (_) {
+                if (!mounted) {
+                  return;
+                }
+
+                setState(() {
+                  _pendingDeviceCommands.remove(deviceId);
+                  _deviceCommandErrors[deviceId] =
+                      'Command status listener failed.';
+                });
+              },
+            ),
+      );
+
+      _deviceSwitchSubscriptions.putIfAbsent(
+        deviceId,
+        () => _firebaseRealtimeService
+            .watchDeviceSwitchStatus(deviceId)
+            .listen((isOn) => _updateDeviceSwitchState(deviceId, isOn)),
+      );
+    }
+  }
+
+  void _handleCommandStateChanged(String deviceId, DeviceCommandState state) {
+    if (!mounted || state.status.isEmpty) {
+      return;
+    }
+
+    if (state.isPending) {
+      setState(() {
+        _pendingDeviceCommands.add(deviceId);
+        _deviceCommandErrors.remove(deviceId);
+      });
+      return;
+    }
+
+    final wasPending = _pendingDeviceCommands.contains(deviceId);
+    if (!wasPending) {
+      return;
+    }
+
+    if (state.isDone) {
+      setState(() {
+        _pendingDeviceCommands.remove(deviceId);
+        _deviceCommandErrors.remove(deviceId);
+      });
+      _refreshData(showErrorSnackBar: false, updateLoading: false);
+      return;
+    }
+
+    if (state.isFailed) {
+      final error = state.error?.trim().isNotEmpty == true
+          ? state.error!.trim()
+          : 'Device command failed.';
+
+      setState(() {
+        _pendingDeviceCommands.remove(deviceId);
+        _deviceCommandErrors[deviceId] = error;
+      });
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
+    }
+  }
+
+  void _updateDeviceSwitchState(String deviceId, bool? isOn) {
+    if (!mounted || isOn == null) {
+      return;
+    }
+
+    final index = _devices.indexWhere((device) => device.id == deviceId);
+    if (index == -1 || _devices[index].isOn == isOn) {
+      return;
+    }
+
+    setState(() {
+      _devices[index] = _devices[index].copyWith(isOn: isOn);
+    });
+  }
+
+  Future<void> _refreshData({
+    bool showErrorSnackBar = true,
+    bool updateLoading = true,
+  }) async {
+    if (mounted && updateLoading) {
       setState(() {
         _isLoading = true;
         _loadError = null;
       });
     }
 
-    try {
-      _activeRequestToken?.cancel('New refresh started');
-      final cancelToken = CancelToken();
-      _activeRequestToken = cancelToken;
+    _activeRequestToken?.cancel('New refresh started');
+    final cancelToken = CancelToken();
+    _activeRequestToken = cancelToken;
 
+    try {
       final dashboardData = await _firebaseRealtimeService.fetchDashboardData(
         cancelToken: cancelToken,
       );
@@ -262,14 +430,31 @@ class _HomeScreenState extends State<HomeScreen> {
         _currentReading = dashboardData.reading;
         _sensorData = dashboardData.sensors;
         _devices = dashboardData.devices;
+        _pendingDeviceCommands
+          ..clear()
+          ..addAll(dashboardData.pendingDeviceCommands);
+        _deviceCommandErrors
+          ..clear()
+          ..addAll(dashboardData.deviceCommandErrors);
         _currentTariff = dashboardData.tariffBhdPerKwh;
         _aiDashboard = dashboardData.aiDashboard;
         _aiDailySummary = dashboardData.aiDailySummary;
         _aiRecommendation = dashboardData.aiRecommendation;
         _aiAlert = dashboardData.aiAlert;
       });
-    } catch (_) {
+
+      try {
+        _syncDeviceListeners(dashboardData.devices);
+      } catch (_) {
+        // The dashboard data is loaded through REST. Native Firebase listeners
+        // can be unavailable on local/dev builds without breaking the dashboard.
+      }
+    } catch (error) {
       if (!mounted) {
+        return;
+      }
+
+      if (_isRequestCancellation(error)) {
         return;
       }
 
@@ -286,19 +471,28 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       }
     } finally {
-      if (mounted) {
+      if (mounted && updateLoading) {
         setState(() {
           _isLoading = false;
         });
       }
-      _activeRequestToken = null;
+      if (identical(_activeRequestToken, cancelToken)) {
+        _activeRequestToken = null;
+      }
     }
+  }
+
+  bool _isRequestCancellation(Object error) {
+    return error is DioException && error.type == DioExceptionType.cancel;
   }
 
   @override
   Widget build(BuildContext context) {
     final totalCost = _currentReading.calculateCost(_currentTariff);
     final isSensorFeedWorking = _isSensorFeedWorking;
+    final averageCurrent = _currentReading.current > 0
+        ? _currentReading.current
+        : 0.0;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -413,7 +607,20 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
 
               // Energy Metrics
-              _buildSectionTitle('Energy Overview'),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildSectionTitle('Energy Overview'),
+                  Text(
+                    'Live Firebase data',
+                    style: TextStyle(
+                      color: Colors.grey[600],
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -429,7 +636,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: MetricCard(
-                      title: 'Today',
+                      title: 'Energy Today',
                       value: _currentReading.energyToday.toStringAsFixed(2),
                       unit: 'kWh',
                       icon: Icons.calendar_today,
@@ -464,12 +671,36 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
 
               const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: MetricCard(
+                      title: 'Voltage',
+                      value: _currentReading.voltage.toStringAsFixed(1),
+                      unit: 'V',
+                      icon: Icons.electrical_services,
+                      color: Colors.blue,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: MetricCard(
+                      title: 'Current',
+                      value: averageCurrent.toStringAsFixed(2),
+                      unit: 'A',
+                      icon: Icons.cable,
+                      color: Colors.teal,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
               MetricCard(
-                title: 'Voltage',
-                value: _currentReading.voltage.toStringAsFixed(1),
-                unit: 'V',
-                icon: Icons.electrical_services,
-                color: Colors.blue,
+                title: 'Total Energy',
+                value: _currentReading.energyTotal.toStringAsFixed(2),
+                unit: 'kWh',
+                icon: Icons.stacked_line_chart,
+                color: Colors.deepPurple,
               ),
 
               const SizedBox(height: 24),
@@ -674,6 +905,17 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ? AppColors.energySafe
                                 : AppColors.energyDanger,
                           ),
+                          _buildStatusChip(
+                            icon: Icons.graphic_eq,
+                            label: isSensorFeedWorking
+                                ? _noiseLabel()
+                                : 'Noise sensor issue',
+                            color: !isSensorFeedWorking
+                                ? AppColors.energyDanger
+                                : _sensorData.noise == 1
+                                ? AppColors.energyWarning
+                                : Colors.blueGrey,
+                          ),
                         ],
                       ),
                       const SizedBox(height: 16),
@@ -734,6 +976,18 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ? Colors.blueGrey
                                 : AppColors.energyDanger,
                           ),
+                          _buildSensorStatCard(
+                            icon: Icons.graphic_eq,
+                            title: 'Noise',
+                            value: isSensorFeedWorking
+                                ? '${_noiseLabel()} (${_sensorData.soundRaw})'
+                                : 'Offline',
+                            color: !isSensorFeedWorking
+                                ? AppColors.energyDanger
+                                : _sensorData.noise == 1
+                                ? AppColors.energyWarning
+                                : Colors.blueGrey,
+                          ),
                         ],
                       ),
                     ],
@@ -764,6 +1018,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: DeviceCard(
                     device: device,
                     onToggle: (value) => _toggleDevice(device, value),
+                    isCommandPending: _pendingDeviceCommands.contains(
+                      device.id,
+                    ),
+                    commandError: _deviceCommandErrors[device.id],
                     onTap: () {
                       // TODO: Navigate to device details
                     },
@@ -1599,6 +1857,14 @@ class _HomeScreenState extends State<HomeScreen> {
     return 'Good';
   }
 
+  String _noiseLabel() {
+    final status = _sensorData.noiseStatus.trim();
+    if (status.isNotEmpty && status.toLowerCase() != 'unknown') {
+      return status;
+    }
+    return _sensorData.noise == 1 ? 'Noise' : 'Quiet';
+  }
+
   Color _airQualityStatusColor() {
     switch (_airQualityLabel()) {
       case 'Poor':
@@ -1694,17 +1960,22 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _performEmergencyShutdown() {
-    // TODO: Send emergency shutdown command to Raspberry Pi
-    setState(() {
-      _devices = _devices.map((device) {
-        return device.copyWith(isOn: false, currentPower: 0.0);
-      }).toList();
-    });
+  Future<void> _performEmergencyShutdown() async {
+    final controllableDevices = _devices.where(
+      (device) => _isControllableBreaker(device.id),
+    );
+
+    for (final device in controllableDevices) {
+      await _sendDeviceCommand(device.id, 'turn_off');
+    }
+
+    if (!mounted) {
+      return;
+    }
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Emergency shutdown activated!'),
+        content: Text('Emergency shutdown commands sent.'),
         backgroundColor: AppColors.energyDanger,
         duration: Duration(seconds: 3),
       ),

@@ -14,6 +14,8 @@ class DashboardData {
   final List<Device> devices;
   final List<Alert> alerts;
   final double tariffBhdPerKwh;
+  final Set<String> pendingDeviceCommands;
+  final Map<String, String> deviceCommandErrors;
   final AiDashboardSummary? aiDashboard;
   final AiDailySummary? aiDailySummary;
   final AiRecommendation? aiRecommendation;
@@ -25,11 +27,42 @@ class DashboardData {
     required this.devices,
     required this.alerts,
     required this.tariffBhdPerKwh,
+    this.pendingDeviceCommands = const {},
+    this.deviceCommandErrors = const {},
     this.aiDashboard,
     this.aiDailySummary,
     this.aiRecommendation,
     this.aiAlert,
   });
+}
+
+class DeviceCommandState {
+  const DeviceCommandState({
+    required this.status,
+    this.action = '',
+    this.error,
+  });
+
+  final String status;
+  final String action;
+  final String? error;
+
+  bool get isPending => status == 'pending';
+  bool get isDone => status == 'done';
+  bool get isFailed => status == 'failed';
+
+  bool? get desiredSwitchState {
+    if (!isPending) {
+      return null;
+    }
+    if (action == 'turn_on') {
+      return true;
+    }
+    if (action == 'turn_off') {
+      return false;
+    }
+    return null;
+  }
 }
 
 class FirebaseRealtimeService {
@@ -43,14 +76,19 @@ class FirebaseRealtimeService {
       );
 
   final Dio _dio;
+  int _lastCommandTimestampMs = 0;
 
-  Stream<Alert> watchAlerts({required int sinceTimestampMs}) {
+  DatabaseReference _firebaseRef(String path) {
     final database = FirebaseDatabase.instanceFor(
       app: FirebaseDatabase.instance.app,
       databaseURL: NetworkConfig.firebaseRealtimeDatabaseUrl,
     );
 
-    final alertsRef = database.ref(
+    return database.ref(path);
+  }
+
+  Stream<Alert> watchAlerts({required int sinceTimestampMs}) {
+    final alertsRef = _firebaseRef(
       'homes/${NetworkConfig.firebaseHomeId}/backend/alerts',
     );
 
@@ -82,24 +120,51 @@ class FirebaseRealtimeService {
     final devices = _asMap(home['devices']);
     final history = _asMap(home['history']);
     final sensors = _asMap(home['sensors']);
+    final commands = _asMap(home['commands']);
     final backend = _asMap(home['backend']);
     final backendAi = _asMap(backend['ai']);
     final backendDashboard = _asMap(backend['dashboard']);
+    final dashboardEnergy = _asMap(backendDashboard['energy']);
+    final dashboardEnvironment = _asMap(backendDashboard['environment']);
+    final backendEnergy = _asMap(backend['energy']);
+    final backendCurrentTotal = _asMap(backendEnergy['current_total']);
     final recommendations = _asMap(backend['recommendations']);
     final activeAlerts = _asMap(backend['active_alerts']);
 
-    final parsedDevices = _parseDevices(devices);
+    final commandStates = _parseDeviceCommandStates(commands);
+    final parsedDevices = _parseDevices(devices, commandStates);
     final meteringSummary = _collectMeteringSummary(devices);
 
     return DashboardData(
-      reading: _parseReading(history, parsedDevices, meteringSummary),
-      sensors: _parseSensors(sensors, devices),
+      reading: _parseReading(
+        history,
+        dashboardEnergy,
+        backendCurrentTotal,
+        parsedDevices,
+        meteringSummary,
+      ),
+      sensors: _parseSensors(sensors, devices, dashboardEnvironment),
       devices: parsedDevices,
       alerts: const [],
       tariffBhdPerKwh: _asDouble(
-        _pick(home, ['tariff_BHD_per_kWh', 'tariffBhdPerKwh', 'tariff']),
+        _pick(dashboardEnergy, [
+              'tariff_BHD_per_kWh',
+              'tariffBhdPerKwh',
+              'tariff',
+            ]) ??
+            _pick(backendCurrentTotal, [
+              'tariff_BHD_per_kWh',
+              'tariffBhdPerKwh',
+              'tariff',
+            ]) ??
+            _pick(home, ['tariff_BHD_per_kWh', 'tariffBhdPerKwh', 'tariff']),
         fallback: ElectricityPricing.costPerKWh,
       ),
+      pendingDeviceCommands: commandStates.entries
+          .where((entry) => entry.value.isPending)
+          .map((entry) => entry.key)
+          .toSet(),
+      deviceCommandErrors: const {},
       aiDashboard: _parseAiDashboard(_asMap(backendDashboard['ai'])),
       aiDailySummary: _parseAiDailySummary(_asMap(backendAi['daily_summary'])),
       aiRecommendation: _parseAiRecommendation(
@@ -107,6 +172,60 @@ class FirebaseRealtimeService {
       ),
       aiAlert: _parseAiAlert(_asMap(activeAlerts['ai_abnormal_usage'])),
     );
+  }
+
+  Future<void> sendDeviceCommand(String deviceId, String action) async {
+    if (deviceId != 'breaker_01' && deviceId != 'breaker_02') {
+      throw ArgumentError.value(deviceId, 'deviceId', 'Unsupported device ID');
+    }
+
+    if (action != 'turn_on' && action != 'turn_off') {
+      throw ArgumentError.value(action, 'action', 'Unsupported command action');
+    }
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final timestampMs = nowMs <= _lastCommandTimestampMs
+        ? _lastCommandTimestampMs + 1
+        : nowMs;
+    _lastCommandTimestampMs = timestampMs;
+
+    await _firebaseRef(
+      'homes/${NetworkConfig.firebaseHomeId}/commands/$deviceId/latest',
+    ).set({
+      'command_id': 'cmd_$timestampMs',
+      'device_id': deviceId,
+      'action': action,
+      'status': 'pending',
+      'requested_by': 'mobile_app',
+      'created_at': timestampMs,
+    });
+  }
+
+  Stream<DeviceCommandState> watchLatestCommandStatus(String deviceId) {
+    final commandRef = _firebaseRef(
+      'homes/${NetworkConfig.firebaseHomeId}/commands/$deviceId/latest',
+    );
+
+    return commandRef.onValue.map((event) {
+      final command = _asMap(event.snapshot.value);
+      return DeviceCommandState(
+        status: _asString(_pick(command, ['status'])).toLowerCase(),
+        action: _asString(_pick(command, ['action'])).toLowerCase(),
+        error: _asNullableString(_pick(command, ['error'])),
+      );
+    });
+  }
+
+  Stream<bool?> watchDeviceSwitchStatus(String deviceId) {
+    return _firebaseRef(
+      'homes/${NetworkConfig.firebaseHomeId}/devices/$deviceId/status/switch',
+    ).onValue.map((event) {
+      final value = event.snapshot.value;
+      if (value == null) {
+        return null;
+      }
+      return _asBool(value);
+    });
   }
 
   AiDashboardSummary? _parseAiDashboard(Map<String, dynamic> data) {
@@ -270,6 +389,8 @@ class FirebaseRealtimeService {
 
   EnergyReading _parseReading(
     Map<String, dynamic> history,
+    Map<String, dynamic> dashboardEnergy,
+    Map<String, dynamic> backendCurrentTotal,
     List<Device> devices,
     Map<String, dynamic> meteringSummary,
   ) {
@@ -280,22 +401,42 @@ class FirebaseRealtimeService {
       (sum, device) => sum + device.currentPower,
     );
 
-    final source = {...latestHistory, ...history, ...meteringSummary};
+    final source = {
+      ...meteringSummary,
+      ...history,
+      ...latestHistory,
+      ...backendCurrentTotal,
+      ...dashboardEnergy,
+    };
 
     return EnergyReading(
       timestamp: _asDateTime(
-        _pick(source, ['timestamp', 'updatedAt', 'updated_at', 'time']),
+        _pick(source, [
+          'updated_at',
+          'updatedAt',
+          'timestamp',
+          'created_at',
+          'time',
+        ]),
       ),
       voltage: _asDouble(_pick(source, ['voltage', 'voltage_V', 'v'])),
       current: _asDouble(
         _pick(source, ['current', 'current_A', 'i', 'ampere']),
       ),
       power: _asDouble(
-        _pick(source, ['power', 'power_W', 'wattage']),
+        _pick(source, [
+          'total_power_W',
+          'total_avg_power_W',
+          'power',
+          'power_W',
+          'wattage',
+        ]),
         fallback: totalPowerFromDevices,
       ),
       energyToday: _asDouble(
         _pick(source, [
+          'total_estimated_energy_kWh',
+          'total_energy_kWh',
           'energyToday',
           'energy_today',
           'todayKwh',
@@ -306,6 +447,8 @@ class FirebaseRealtimeService {
       ),
       energyTotal: _asDouble(
         _pick(source, [
+          'total_energy_kWh',
+          'total_estimated_energy_kWh',
           'energyTotal',
           'energy_total',
           'totalKwh',
@@ -314,16 +457,38 @@ class FirebaseRealtimeService {
           'energy_total_kwh',
         ]),
       ),
+      costToday: _asDouble(
+        _pick(source, [
+          'total_estimated_cost_BHD',
+          'total_cost_BHD',
+          'costToday',
+          'cost_today',
+          'todayCost',
+          'today_cost',
+        ]),
+      ),
     );
   }
 
   SensorData _parseSensors(
     Map<String, dynamic> sensors,
     Map<String, dynamic> devices,
+    Map<String, dynamic> dashboardEnvironment,
   ) {
-    final source = sensors.isNotEmpty
-        ? sensors
-        : _firstNonEmptyMap([_extractSensorsFromDevices(devices)]);
+    final source = <String, dynamic>{
+      ...dashboardEnvironment,
+      ..._extractSensorsFromDevices(devices),
+      ...sensors,
+    };
+    final smokeRaw = _asInt(
+      _pick(source, ['smoke_raw', 'smokeRaw', 'mq2_raw', 'mq2Raw']),
+    );
+    final smokeDigital = _pick(source, ['smoke']);
+    final smokeStatus = _asSmokeStatus(
+      _pick(source, ['smoke_text', 'smokeStatus', 'smoke_status']),
+      smokeDigital,
+      smokeRaw,
+    );
 
     return SensorData(
       timestamp: _asDateTime(
@@ -333,6 +498,8 @@ class FirebaseRealtimeService {
           'timestamp',
           'timestamp_ms',
           'updatedAt',
+          'updated_at',
+          'last_processed_at',
         ]),
       ),
       temperature: _asDouble(_pick(source, ['temperature', 'temp'])),
@@ -349,13 +516,23 @@ class FirebaseRealtimeService {
       eco2: _asDouble(_pick(source, ['eco2', 'co2'])),
       tvoc: _asDouble(_pick(source, ['tvoc'])),
       aqi: _asInt(_pick(source, ['aqi'])),
-      smokeRaw: _asInt(_pick(source, ['smoke_raw', 'smokeRaw', 'smoke'])),
+      smokeRaw: smokeRaw,
       lightRaw: _asInt(_pick(source, ['light_raw', 'lightRaw'])),
+      soundRaw: _asInt(
+        _pick(source, ['sound_raw', 'soundRaw', 'latest_sound_raw']),
+      ),
+      noise: _asInt(_pick(source, ['noise'])),
+      noiseStatus:
+          _pick(source, [
+            'noise_text',
+            'noiseText',
+            'noise_status',
+          ])?.toString() ??
+          'Unknown',
       lightStatus:
           _pick(source, ['light_status', 'lightStatus'])?.toString() ??
           'Unknown',
-      smokeStatus:
-          _pick(source, ['smoke_text', 'smokeStatus'])?.toString() ?? 'Unknown',
+      smokeStatus: smokeStatus,
       ahtOk: _asBool(_pick(source, ['aht_ok', 'ahtOk']), fallback: true),
       ens160Ok: _asBool(
         _pick(source, ['ens160_ok', 'ens160Ok']),
@@ -364,7 +541,10 @@ class FirebaseRealtimeService {
     );
   }
 
-  List<Device> _parseDevices(Map<String, dynamic> devicesMap) {
+  List<Device> _parseDevices(
+    Map<String, dynamic> devicesMap,
+    Map<String, DeviceCommandState> commandStates,
+  ) {
     if (devicesMap.isEmpty) {
       return const [];
     }
@@ -376,8 +556,23 @@ class FirebaseRealtimeService {
         continue;
       }
 
+      final rawType = _pick(data, ['type', 'deviceType'])?.toString();
+      if (!_isControllableDevice(rawType, entry.key)) {
+        continue;
+      }
+
       final metering = _asMap(data['metering']);
       final status = _asMap(data['status']);
+      final commandState = commandStates[entry.key];
+      final desiredSwitchState = commandState?.desiredSwitchState;
+      final actualSwitchState = _asBool(
+        _pick(status, ['switch', 'on', 'relay_status']) ??
+            _pick(data, ['isOn', 'on', 'switch', 'relay_status']),
+      );
+      final currentPower = _asDouble(
+        _pick(data, ['currentPower', 'power', 'wattage']) ??
+            _pick(metering, ['power_W', 'power_w', 'power']),
+      );
 
       devices.add(
         Device(
@@ -385,17 +580,9 @@ class FirebaseRealtimeService {
           name:
               _pick(data, ['name', 'label', 'deviceName'])?.toString() ??
               entry.key,
-          type: _parseDeviceType(
-            _pick(data, ['type', 'deviceType'])?.toString(),
-          ),
-          isOn: _asBool(
-            _pick(data, ['isOn', 'status', 'on']) ??
-                _pick(status, ['on', 'switch']),
-          ),
-          currentPower: _asDouble(
-            _pick(data, ['currentPower', 'power', 'wattage']) ??
-                _pick(metering, ['power_W', 'power_w', 'power']),
-          ),
+          type: _parseDeviceType(rawType),
+          isOn: desiredSwitchState ?? actualSwitchState,
+          currentPower: desiredSwitchState == false ? 0.0 : currentPower,
           branch:
               _pick(data, ['branch', 'zone'])?.toString() ??
               _branchFromDeviceId(entry.key),
@@ -404,6 +591,38 @@ class FirebaseRealtimeService {
     }
 
     return devices;
+  }
+
+  Map<String, DeviceCommandState> _parseDeviceCommandStates(
+    Map<String, dynamic> commandsMap,
+  ) {
+    final result = <String, DeviceCommandState>{};
+
+    for (final entry in commandsMap.entries) {
+      final command = _asMap(_asMap(entry.value)['latest']);
+      if (command.isEmpty) {
+        continue;
+      }
+
+      result[entry.key] = DeviceCommandState(
+        status: _asString(_pick(command, ['status'])).toLowerCase(),
+        action: _asString(_pick(command, ['action'])).toLowerCase(),
+        error: _asNullableString(_pick(command, ['error'])),
+      );
+    }
+
+    return result;
+  }
+
+  bool _isControllableDevice(String? type, String deviceId) {
+    final normalizedType = type?.toLowerCase();
+    if (normalizedType == 'sensor_node' || normalizedType == 'sensor') {
+      return false;
+    }
+
+    return normalizedType == 'smart_breaker' ||
+        normalizedType == 'breaker' ||
+        deviceId.toLowerCase().startsWith('breaker_');
   }
 
   Map<String, dynamic> _collectMeteringSummary(
@@ -468,17 +687,6 @@ class FirebaseRealtimeService {
       }
     }
 
-    return const {};
-  }
-
-  Map<String, dynamic> _firstNonEmptyMap(
-    List<Map<String, dynamic>> candidates,
-  ) {
-    for (final candidate in candidates) {
-      if (candidate.isNotEmpty) {
-        return candidate;
-      }
-    }
     return const {};
   }
 
@@ -555,6 +763,23 @@ class FirebaseRealtimeService {
     }
     final text = value.toString().trim();
     return text.isEmpty ? fallback : text;
+  }
+
+  String _asSmokeStatus(dynamic textValue, dynamic digitalValue, int rawValue) {
+    final text = _asString(textValue);
+    if (text.isNotEmpty) {
+      return text;
+    }
+
+    if (digitalValue != null) {
+      return _asBool(digitalValue) ? 'Smoke/Gas' : 'Clear';
+    }
+
+    if (rawValue > 0) {
+      return 'Clear';
+    }
+
+    return 'Unknown';
   }
 
   String? _asNullableString(dynamic value) {

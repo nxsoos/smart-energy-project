@@ -9,7 +9,7 @@ class SensorsStatusScreen extends StatelessWidget {
 
   final SensorData sensorData;
 
-  static const int _sensorFeedStaleThresholdMs = 60 * 1000;
+  static const int _sensorFeedStaleThresholdMs = 2 * 60 * 1000;
 
   @override
   Widget build(BuildContext context) {
@@ -19,6 +19,8 @@ class SensorsStatusScreen extends StatelessWidget {
     final isEns160Working = isFeedFresh && sensorData.ens160Ok;
     final isSmokeWorking = isFeedFresh && _isSmokeSensorWorking(sensorData);
     final isLightWorking = isFeedFresh && _isLightSensorWorking(sensorData);
+    final isNoiseWorking = isFeedFresh && _isNoiseSensorWorking(sensorData);
+    final isPirWorking = isFeedFresh;
 
     return Scaffold(
       appBar: AppBar(
@@ -37,10 +39,9 @@ class SensorsStatusScreen extends StatelessWidget {
           children: [
             _buildStatusCard(
               title: 'Sensor Feed',
-              subtitle:
-                  isFeedFresh
-                      ? 'Live updates are recent.'
-                      : 'No recent sensor update detected.',
+              subtitle: isFeedFresh
+                  ? 'Live updates are recent.'
+                  : 'No recent sensor update detected.',
               trailingText: isFeedFresh ? 'Working' : 'Not working',
               isHealthy: isFeedFresh,
             ),
@@ -61,7 +62,9 @@ class SensorsStatusScreen extends StatelessWidget {
             const SizedBox(height: 12),
             _buildStatusCard(
               title: 'Smoke Sensor',
-              subtitle: _sensorSubtitle(isSmokeWorking, isFeedFresh),
+              subtitle: isSmokeWorking
+                  ? 'MQ2 raw: ${sensorData.smokeRaw} (${sensorData.smokeStatus}).'
+                  : _sensorSubtitle(isSmokeWorking, isFeedFresh),
               trailingText: isSmokeWorking ? 'Working' : 'Not working',
               isHealthy: isSmokeWorking,
             ),
@@ -71,6 +74,24 @@ class SensorsStatusScreen extends StatelessWidget {
               subtitle: _sensorSubtitle(isLightWorking, isFeedFresh),
               trailingText: isLightWorking ? 'Working' : 'Not working',
               isHealthy: isLightWorking,
+            ),
+            const SizedBox(height: 12),
+            _buildStatusCard(
+              title: 'Noise Sensor',
+              subtitle: isNoiseWorking
+                  ? 'Sound level: ${sensorData.soundRaw} raw units (${_noiseLabel(sensorData)}).'
+                  : _sensorSubtitle(isNoiseWorking, isFeedFresh),
+              trailingText: isNoiseWorking ? 'Working' : 'Not working',
+              isHealthy: isNoiseWorking,
+            ),
+            const SizedBox(height: 12),
+            _buildStatusCard(
+              title: 'PIR Motion Sensor',
+              subtitle: isPirWorking
+                  ? 'Motion state: ${sensorData.isOccupied ? 'motion detected' : 'no motion'}.'
+                  : _sensorSubtitle(isPirWorking, isFeedFresh),
+              trailingText: isPirWorking ? 'Working' : 'Not working',
+              isHealthy: isPirWorking,
             ),
             const SizedBox(height: 24),
             Text(
@@ -124,10 +145,7 @@ class SensorsStatusScreen extends StatelessWidget {
           const SizedBox(width: 10),
           Text(
             trailingText,
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-              color: color,
-            ),
+            style: TextStyle(fontWeight: FontWeight.w700, color: color),
           ),
         ],
       ),
@@ -145,10 +163,26 @@ class SensorsStatusScreen extends StatelessWidget {
   }
 
   bool _isSmokeSensorWorking(SensorData data) {
-    return data.smokeStatus.toLowerCase() != 'unknown';
+    final status = data.smokeStatus.toLowerCase();
+    return status != 'unknown' || data.smokeRaw > 0;
   }
 
   bool _isLightSensorWorking(SensorData data) {
     return data.lightStatus.toLowerCase() != 'unknown';
+  }
+
+  bool _isNoiseSensorWorking(SensorData data) {
+    return data.soundRaw > 0 ||
+        data.noiseStatus.toLowerCase() != 'unknown' ||
+        data.noise == 0 ||
+        data.noise == 1;
+  }
+
+  String _noiseLabel(SensorData data) {
+    final status = data.noiseStatus.trim();
+    if (status.isNotEmpty && status.toLowerCase() != 'unknown') {
+      return status;
+    }
+    return data.noise == 1 ? 'Noise' : 'Quiet';
   }
 }
