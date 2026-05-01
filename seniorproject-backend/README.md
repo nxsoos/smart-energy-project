@@ -2,6 +2,8 @@
 
 Backend workspace for the Smart Energy project.
 
+to rebuild gcloud:
+gcloud run deploy smart-energy-ai --source . --region asia-southeast1 --allow-unauthenticated
 ## Parts
 
 ```text

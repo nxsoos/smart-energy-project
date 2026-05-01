@@ -1,0 +1,30 @@
+.git
+.gitignore
+.gcloudignore
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+.env
+serviceAccountKey.json
+devices/serviceAccountKey.json
+
+functions/node_modules/
+functions/lib/
+functions/.runtimeconfig.json
+
+devices/__pycache__/
+devices/ai_ready_dataset_60_days.csv
+devices/models/smart_energy_ai_metrics.json
+
+logs/
+*.log
+
+# Keep Cloud Run source upload away from Flutter/Gradle caches if the command
+# is accidentally run from a parent directory or copied into another workspace.
+.gradle/
+android/.gradle/
+smart_energy_app/

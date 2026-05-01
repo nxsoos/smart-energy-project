@@ -54,6 +54,16 @@ https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app
 
 Run this from the repository root, where `main.py`, `Dockerfile`, and `requirements.txt` exist:
 
+On this project, that folder is:
+
+```powershell
+cd C:\Nasser\Univirsity\smart-energy-project\seniorproject-backend
+```
+
+Do not run Cloud Run deploy from the Flutter app folder or from the parent
+`smart-energy-project` folder. Otherwise `gcloud` can scan Flutter/Gradle cache
+files and fail before deployment starts.
+
 ```bash
 gcloud run deploy smart-energy-ai \
   --source . \

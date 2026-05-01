@@ -10,11 +10,26 @@ import '../models/device.dart';
 import '../models/energy_reading.dart';
 import '../models/sensor_data.dart';
 import '../screens/ai_chatbot_screen.dart';
-import '../screens/ai_test_details_screen.dart';
 import '../screens/sensors_status_screen.dart';
 import '../services/firebase_realtime_service.dart';
 import '../widgets/metric_card.dart';
 import '../widgets/device_card.dart';
+
+class _HomeChoice {
+  const _HomeChoice({
+    required this.id,
+    required this.label,
+    required this.badge,
+    required this.description,
+    required this.isDemo,
+  });
+
+  final String id;
+  final String label;
+  final String badge;
+  final String description;
+  final bool isDemo;
+}
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, this.enableRealtimeSync = true});
@@ -36,6 +51,12 @@ class _HomeScreenState extends State<HomeScreen> {
   late EnergyReading _currentReading;
   late SensorData _sensorData;
   late List<Device> _devices;
+  String _selectedHomeId = NetworkConfig.firebaseHomeId;
+  String? _selectedScenarioId;
+  String? _activeScenarioName;
+  String? _activeScenarioDescription;
+  bool _deviceControlEnabled = true;
+  List<DemoScenario> _demoScenarios = const [];
   AiDashboardSummary? _aiDashboard;
   AiDailySummary? _aiDailySummary;
   AiRecommendation? _aiRecommendation;
@@ -57,6 +78,31 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = false;
   String? _loadError;
   CancelToken? _activeRequestToken;
+
+  static const List<_HomeChoice> _homeChoices = [
+    _HomeChoice(
+      id: 'home_test',
+      label: 'Home Test',
+      badge: 'DEMO',
+      description: 'Prepared demo scenarios',
+      isDemo: true,
+    ),
+    _HomeChoice(
+      id: NetworkConfig.firebaseHomeId,
+      label: 'Home 1',
+      badge: 'REAL',
+      description: 'Live hardware data',
+      isDemo: false,
+    ),
+  ];
+
+  bool get _isDemoHome => _selectedHomeId == 'home_test';
+  _HomeChoice get _selectedHome => _homeChoices.firstWhere(
+    (home) => home.id == _selectedHomeId,
+    orElse: () => _homeChoices.last,
+  );
+  String get _dataSourceLabel =>
+      _isDemoHome ? 'Demo scenario data' : 'Live Firebase data';
 
   @override
   void initState() {
@@ -101,10 +147,16 @@ class _HomeScreenState extends State<HomeScreen> {
   void _startAlertsListener() {
     try {
       _alertsSubscription?.cancel();
+      if (_isDemoHome) {
+        return;
+      }
       _alertsListenerStartedAtMs = DateTime.now().millisecondsSinceEpoch;
 
       _alertsSubscription = _firebaseRealtimeService
-          .watchAlerts(sinceTimestampMs: _alertsListenerStartedAtMs)
+          .watchAlerts(
+            homeId: _selectedHomeId,
+            sinceTimestampMs: _alertsListenerStartedAtMs,
+          )
           .listen(
             (alert) {
               if (!mounted || _seenAlertIds.contains(alert.id)) {
@@ -181,6 +233,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   bool _isSensorFeedStale() {
+    if (_isDemoHome) {
+      return false;
+    }
+
     final ageMs = DateTime.now()
         .difference(_sensorData.timestamp)
         .inMilliseconds;
@@ -250,6 +306,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _toggleDevice(Device device, bool value) async {
+    if (!_deviceControlEnabled || _isDemoHome) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Device control is disabled in Home Test mode.'),
+        ),
+      );
+      return;
+    }
+
     if (!_isControllableBreaker(device.id)) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${device.name} is not command-enabled.')),
@@ -267,7 +332,11 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      await _firebaseRealtimeService.sendDeviceCommand(deviceId, action);
+      await _firebaseRealtimeService.sendDeviceCommand(
+        deviceId,
+        action,
+        homeId: _selectedHomeId,
+      );
       if (!mounted) {
         return;
       }
@@ -297,6 +366,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _syncDeviceListeners(List<Device> devices) {
+    if (!_deviceControlEnabled || _isDemoHome) {
+      for (final subscription in _commandStatusSubscriptions.values) {
+        subscription.cancel();
+      }
+      for (final subscription in _deviceSwitchSubscriptions.values) {
+        subscription.cancel();
+      }
+      _commandStatusSubscriptions.clear();
+      _deviceSwitchSubscriptions.clear();
+      return;
+    }
+
     final activeDeviceIds = devices
         .map((device) => device.id)
         .where(_isControllableBreaker)
@@ -318,7 +399,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _commandStatusSubscriptions.putIfAbsent(
         deviceId,
         () => _firebaseRealtimeService
-            .watchLatestCommandStatus(deviceId)
+            .watchLatestCommandStatusForHome(_selectedHomeId, deviceId)
             .listen(
               (state) => _handleCommandStateChanged(deviceId, state),
               onError: (_) {
@@ -338,7 +419,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _deviceSwitchSubscriptions.putIfAbsent(
         deviceId,
         () => _firebaseRealtimeService
-            .watchDeviceSwitchStatus(deviceId)
+            .watchDeviceSwitchStatusForHome(_selectedHomeId, deviceId)
             .listen((isOn) => _updateDeviceSwitchState(deviceId, isOn)),
       );
     }
@@ -419,17 +500,37 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       final dashboardData = await _firebaseRealtimeService.fetchDashboardData(
+        homeId: _selectedHomeId,
+        scenarioId: _isDemoHome ? _selectedScenarioId : null,
         cancelToken: cancelToken,
       );
+
+      final demoScenarios = _isDemoHome
+          ? await _firebaseRealtimeService.fetchDemoScenarios(
+              cancelToken: cancelToken,
+            )
+          : const <DemoScenario>[];
 
       if (!mounted) {
         return;
       }
 
+      final fallbackScenarioId = demoScenarios.isNotEmpty
+          ? demoScenarios.first.id
+          : dashboardData.scenarioId;
+
       setState(() {
         _currentReading = dashboardData.reading;
         _sensorData = dashboardData.sensors;
         _devices = dashboardData.devices;
+        _demoScenarios = demoScenarios;
+        _selectedScenarioId = _isDemoHome
+            ? (_selectedScenarioId ?? fallbackScenarioId)
+            : null;
+        _activeScenarioName = dashboardData.scenarioName;
+        _activeScenarioDescription = dashboardData.scenarioDescription;
+        _deviceControlEnabled =
+            !_isDemoHome && dashboardData.deviceControlEnabled;
         _pendingDeviceCommands
           ..clear()
           ..addAll(dashboardData.pendingDeviceCommands);
@@ -484,6 +585,53 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool _isRequestCancellation(Object error) {
     return error is DioException && error.type == DioExceptionType.cancel;
+  }
+
+  void _selectHome(String homeId) {
+    if (homeId == _selectedHomeId) {
+      return;
+    }
+
+    _alertsSubscription?.cancel();
+    for (final subscription in _commandStatusSubscriptions.values) {
+      subscription.cancel();
+    }
+    for (final subscription in _deviceSwitchSubscriptions.values) {
+      subscription.cancel();
+    }
+
+    setState(() {
+      _selectedHomeId = homeId;
+      _selectedScenarioId = null;
+      _activeScenarioName = null;
+      _activeScenarioDescription = null;
+      _demoScenarios = const [];
+      _alerts.clear();
+      _seenAlertIds.clear();
+      _pendingDeviceCommands.clear();
+      _deviceCommandErrors.clear();
+      _commandStatusSubscriptions.clear();
+      _deviceSwitchSubscriptions.clear();
+      _loadError = null;
+    });
+
+    _refreshData(showErrorSnackBar: false);
+    _startAlertsListener();
+  }
+
+  void _selectScenario(String? scenarioId) {
+    if (scenarioId == null || scenarioId == _selectedScenarioId) {
+      return;
+    }
+
+    setState(() {
+      _selectedScenarioId = scenarioId;
+      _loadError = null;
+      _pendingDeviceCommands.clear();
+      _deviceCommandErrors.clear();
+    });
+
+    _refreshData(showErrorSnackBar: false);
   }
 
   @override
@@ -552,51 +700,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 12),
               ],
 
-              // Temporary test/demo navigation for /homes/home_test AI scenarios.
-              SizedBox(
-                width: double.infinity,
-                child: Wrap(
-                  spacing: 10,
-                  runSpacing: 10,
-                  children: [
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.science_outlined),
-                      label: const Text('AI Test Details'),
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const AiTestDetailsScreen(),
-                          ),
-                        );
-                      },
-                    ),
-                    FilledButton.icon(
-                      icon: const Icon(Icons.chat_bubble_outline),
-                      label: const Text('Smart Energy Chatbot'),
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                const AiChatbotScreen(homeId: 'home_001'),
-                          ),
-                        );
-                      },
-                    ),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.forum_outlined),
-                      label: const Text('Test Chatbot'),
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                const AiChatbotScreen(homeId: 'home_test'),
-                          ),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
+              _buildHomeSelectorCard(),
               const SizedBox(height: 16),
 
               if (_alerts.isNotEmpty) ...[
@@ -612,7 +716,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   _buildSectionTitle('Energy Overview'),
                   Text(
-                    'Live Firebase data',
+                    _dataSourceLabel,
                     style: TextStyle(
                       color: Colors.grey[600],
                       fontSize: 12,
@@ -707,6 +811,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
               _buildSectionTitle('Smart Energy AI'),
               const SizedBox(height: 12),
+              if (_isDemoHome) ...[
+                _buildModeNotice(
+                  icon: Icons.science_outlined,
+                  message:
+                      'Home Test Mode: AI analysis is based on demo/test scenario data.',
+                  color: Colors.indigo,
+                ),
+                const SizedBox(height: 12),
+              ],
               _buildAiDashboardCard(),
               const SizedBox(height: 12),
               _buildAiDailySummaryCard(),
@@ -720,8 +833,31 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 24),
 
               // Environment Sensors
-              _buildSectionTitle('Environment'),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildSectionTitle('Environment'),
+                  _buildStatusChip(
+                    icon: _isDemoHome
+                        ? Icons.science_outlined
+                        : Icons.sensors_outlined,
+                    label: _isDemoHome
+                        ? 'Simulated sensors'
+                        : 'Live sensor data',
+                    color: _isDemoHome ? Colors.indigo : AppColors.primary,
+                  ),
+                ],
+              ),
               const SizedBox(height: 12),
+              if (_isDemoHome) ...[
+                _buildModeNotice(
+                  icon: Icons.info_outline,
+                  message:
+                      'Test Home Mode: Showing the latest simulated environment sensor record for demonstration.',
+                  color: Colors.indigo,
+                ),
+                const SizedBox(height: 12),
+              ],
               Card(
                 elevation: 2,
                 child: Padding(
@@ -733,7 +869,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(
-                            'Live sensor feed',
+                            _isDemoHome
+                                ? 'Simulated sensor record'
+                                : 'Live sensor feed',
                             style: TextStyle(
                               fontSize: 15,
                               fontWeight: FontWeight.w700,
@@ -746,6 +884,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 MaterialPageRoute(
                                   builder: (_) => SensorsStatusScreen(
                                     sensorData: _sensorData,
+                                    isDemoMode: _isDemoHome,
                                   ),
                                 ),
                               );
@@ -923,7 +1062,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         crossAxisCount: 2,
                         crossAxisSpacing: 10,
                         mainAxisSpacing: 10,
-                        childAspectRatio: 1.45,
+                        childAspectRatio: 1.25,
                         shrinkWrap: true,
                         physics: const NeverScrollableScrollPhysics(),
                         children: [
@@ -1012,12 +1151,23 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
               const SizedBox(height: 12),
+              if (_isDemoHome) ...[
+                _buildModeNotice(
+                  icon: Icons.lock_outline,
+                  message:
+                      'Test Home Mode: Device control is disabled because this home uses demo data.',
+                  color: AppColors.energyWarning,
+                ),
+                const SizedBox(height: 12),
+              ],
               ..._devices.map(
                 (device) => Padding(
                   padding: const EdgeInsets.only(bottom: 12.0),
                   child: DeviceCard(
                     device: device,
-                    onToggle: (value) => _toggleDevice(device, value),
+                    onToggle: _deviceControlEnabled
+                        ? (value) => _toggleDevice(device, value)
+                        : null,
                     isCommandPending: _pendingDeviceCommands.contains(
                       device.id,
                     ),
@@ -1036,9 +1186,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 width: double.infinity,
                 height: 56,
                 child: ElevatedButton.icon(
-                  onPressed: () {
-                    _showEmergencyDialog();
-                  },
+                  onPressed: _deviceControlEnabled
+                      ? _showEmergencyDialog
+                      : null,
                   icon: const Icon(Icons.power_off, size: 24),
                   label: const Text(
                     'EMERGENCY SHUTDOWN',
@@ -1069,6 +1219,153 @@ class _HomeScreenState extends State<HomeScreen> {
         fontSize: 20,
         fontWeight: FontWeight.bold,
         color: AppColors.textPrimary,
+      ),
+    );
+  }
+
+  Widget _buildHomeSelectorCard() {
+    final selectedHome = _selectedHome;
+    final selectedScenario = _demoScenarios.where(
+      (scenario) => scenario.id == _selectedScenarioId,
+    );
+
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: SegmentedButton<String>(
+                    segments: _homeChoices
+                        .map(
+                          (home) => ButtonSegment<String>(
+                            value: home.id,
+                            label: Text(home.label),
+                            icon: Icon(
+                              home.isDemo
+                                  ? Icons.science_outlined
+                                  : Icons.home_outlined,
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    selected: {_selectedHomeId},
+                    onSelectionChanged: (selection) {
+                      _selectHome(selection.first);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 10),
+                _buildStatusChip(
+                  icon: selectedHome.isDemo
+                      ? Icons.science_outlined
+                      : Icons.verified_outlined,
+                  label: selectedHome.badge,
+                  color: selectedHome.isDemo
+                      ? Colors.indigo
+                      : AppColors.primary,
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              selectedHome.description,
+              style: const TextStyle(
+                fontSize: 12,
+                color: AppColors.textSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (_isDemoHome) ...[
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                key: ValueKey(_selectedScenarioId ?? 'scenario_none'),
+                initialValue: _selectedScenarioId,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Demo scenario',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: _demoScenarios
+                    .map(
+                      (scenario) => DropdownMenuItem<String>(
+                        value: scenario.id,
+                        child: Text(scenario.name),
+                      ),
+                    )
+                    .toList(),
+                onChanged: _demoScenarios.isEmpty ? null : _selectScenario,
+              ),
+              if (selectedScenario.isNotEmpty ||
+                  (_activeScenarioName?.isNotEmpty ?? false)) ...[
+                const SizedBox(height: 8),
+                Text(
+                  selectedScenario.isNotEmpty
+                      ? selectedScenario.first.description
+                      : _activeScenarioDescription ?? _activeScenarioName!,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ],
+            ],
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              icon: const Icon(Icons.chat_bubble_outline),
+              label: const Text('Smart Energy Chatbot'),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => AiChatbotScreen(
+                      homeId: _selectedHomeId,
+                      homeName: selectedHome.label,
+                      scenarioId: _isDemoHome ? _selectedScenarioId : null,
+                      scenarioName: _isDemoHome ? _activeScenarioName : null,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeNotice({
+    required IconData icon,
+    required String message,
+    required Color color,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w700,
+                fontSize: 12,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1641,17 +1938,27 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Icon(icon, color: color, size: 20),
           const SizedBox(height: 8),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.bold,
-              color: color,
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 1),
+              child: Text(
+                value,
+                maxLines: 2,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 2),
           Text(
             title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: 12,
               color: Colors.grey[700],
@@ -1961,6 +2268,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _performEmergencyShutdown() async {
+    if (!_deviceControlEnabled || _isDemoHome) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Emergency shutdown is disabled in Home Test mode.'),
+        ),
+      );
+      return;
+    }
+
     final controllableDevices = _devices.where(
       (device) => _isControllableBreaker(device.id),
     );

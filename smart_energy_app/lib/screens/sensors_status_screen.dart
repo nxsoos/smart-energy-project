@@ -5,16 +5,22 @@ import '../models/sensor_data.dart';
 import '../utils/constants.dart';
 
 class SensorsStatusScreen extends StatelessWidget {
-  const SensorsStatusScreen({super.key, required this.sensorData});
+  const SensorsStatusScreen({
+    super.key,
+    required this.sensorData,
+    this.isDemoMode = false,
+  });
 
   final SensorData sensorData;
+  final bool isDemoMode;
 
   static const int _sensorFeedStaleThresholdMs = 2 * 60 * 1000;
 
   @override
   Widget build(BuildContext context) {
     final feedAge = DateTime.now().difference(sensorData.timestamp);
-    final isFeedFresh = feedAge.inMilliseconds <= _sensorFeedStaleThresholdMs;
+    final isFeedFresh =
+        isDemoMode || feedAge.inMilliseconds <= _sensorFeedStaleThresholdMs;
     final isAhtWorking = isFeedFresh && sensorData.ahtOk;
     final isEns160Working = isFeedFresh && sensorData.ens160Ok;
     final isSmokeWorking = isFeedFresh && _isSmokeSensorWorking(sensorData);
@@ -39,7 +45,9 @@ class SensorsStatusScreen extends StatelessWidget {
           children: [
             _buildStatusCard(
               title: 'Sensor Feed',
-              subtitle: isFeedFresh
+              subtitle: isDemoMode
+                  ? 'Demo scenario uses a simulated sensor record.'
+                  : isFeedFresh
                   ? 'Live updates are recent.'
                   : 'No recent sensor update detected.',
               trailingText: isFeedFresh ? 'Working' : 'Not working',
@@ -153,6 +161,12 @@ class SensorsStatusScreen extends StatelessWidget {
   }
 
   String _sensorSubtitle(bool working, bool isFeedFresh) {
+    if (isDemoMode) {
+      return working
+          ? 'Simulated value is present for this demo scenario.'
+          : 'No simulated value is available for this demo scenario.';
+    }
+
     if (!isFeedFresh) {
       return 'Sensor feed is offline, so this sensor is not trusted.';
     }

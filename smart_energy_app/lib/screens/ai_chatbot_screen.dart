@@ -5,9 +5,18 @@ import '../config/app_config.dart';
 import '../utils/constants.dart';
 
 class AiChatbotScreen extends StatefulWidget {
-  const AiChatbotScreen({super.key, this.homeId = AppConfig.firebaseHomeId});
+  const AiChatbotScreen({
+    super.key,
+    this.homeId = AppConfig.firebaseHomeId,
+    this.homeName = 'Home 1',
+    this.scenarioId,
+    this.scenarioName,
+  });
 
   final String homeId;
+  final String homeName;
+  final String? scenarioId;
+  final String? scenarioName;
 
   @override
   State<AiChatbotScreen> createState() => _AiChatbotScreenState();
@@ -58,7 +67,25 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
     try {
       final response = await _dio.post(
         '/chat/${widget.homeId}',
-        data: {'message': message},
+        data: {
+          'message': message,
+          'home_id': widget.homeId,
+          'home_name': widget.homeName,
+          'conversation_history': _messages
+              .take(_messages.length - 1)
+              .toList()
+              .map(
+                (chatMessage) => {
+                  'role': chatMessage.isUser ? 'user' : 'assistant',
+                  'message': chatMessage.text,
+                },
+              )
+              .toList(),
+          if (widget.scenarioId?.isNotEmpty ?? false)
+            'scenario_id': widget.scenarioId,
+          if (widget.scenarioName?.isNotEmpty ?? false)
+            'scenario_name': widget.scenarioName,
+        },
       );
 
       final data = _asMap(response.data);
@@ -112,14 +139,23 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
       ),
       body: Column(
         children: [
-          _buildHeader(),
-          if (_messages.isEmpty) _buildStarterQuestions(),
           Expanded(
             child: ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: _messages.length,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+              itemCount: _messages.length + 1,
               itemBuilder: (context, index) {
-                return _buildMessageBubble(_messages[index]);
+                if (index == 0) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _buildHeader(),
+                      if (_messages.isEmpty) _buildStarterQuestions(),
+                    ],
+                  );
+                }
+
+                return _buildMessageBubble(_messages[index - 1]);
               },
             ),
           ),
@@ -134,7 +170,7 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
   Widget _buildHeader() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      margin: EdgeInsets.zero,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: AppColors.primary.withValues(alpha: 0.08),
@@ -147,7 +183,7 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              'Ask about AI predictions, energy waste, cost, efficiency, and recommendations for ${widget.homeId}.',
+              _chatContextLabel(),
               style: const TextStyle(
                 height: 1.3,
                 color: AppColors.textPrimary,
@@ -160,15 +196,24 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
     );
   }
 
+  String _chatContextLabel() {
+    final scenario = widget.scenarioName ?? widget.scenarioId;
+    if (widget.homeId == 'home_test' && scenario?.isNotEmpty == true) {
+      return 'Ask about AI predictions, energy waste, cost, efficiency, and recommendations for ${widget.homeName} ($scenario).';
+    }
+    return 'Ask about AI predictions, energy waste, cost, efficiency, and recommendations for ${widget.homeName}.';
+  }
+
   Widget _buildStarterQuestions() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.only(top: 12),
       child: Wrap(
         spacing: 8,
         runSpacing: 8,
         children: _starterQuestions.map((question) {
           return ActionChip(
-            label: Text(question),
+            label: Text(question, maxLines: 1, overflow: TextOverflow.ellipsis),
             avatar: const Icon(Icons.question_answer_outlined, size: 16),
             onPressed: _isSending ? null : () => _sendMessage(question),
           );

@@ -39,6 +39,11 @@ class HealthResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    home_id: str | None = None
+    home_name: str | None = None
+    scenario_id: str | None = None
+    scenario_name: str | None = None
+    conversation_history: list[dict[str, Any]] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -146,15 +151,28 @@ def calculate_occupancy_score(
     return round(min(1.0, max(motion_score, noise_score)), 4)
 
 
-def read_backend_data(home_id: str) -> dict[str, Any]:
+def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str, Any]:
     try:
-        backend_ref = db.reference(f"/homes/{home_id}/backend")
+        home_ref = db.reference(f"/homes/{home_id}")
+        if home_id == "home_test" and scenario_id:
+            scenario_raw = home_ref.child(f"demo_scenarios/{scenario_id}").get()
+            if not isinstance(scenario_raw, dict) or not scenario_raw:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No demo scenario '{scenario_id}' found for {home_id}.",
+                )
+            backend_ref = home_ref.child(f"demo_scenarios/{scenario_id}/backend")
+        else:
+            backend_ref = home_ref.child("backend")
+
         return {
             "latest_hourly_summary": backend_ref.child("latest_hourly_summary").get(),
             "dashboard_energy": backend_ref.child("dashboard/energy").get(),
             "dashboard_environment": backend_ref.child("dashboard/environment").get(),
             "current_state": backend_ref.child("current_state").get(),
         }
+    except HTTPException:
+        raise
     except Exception as error:
         raise HTTPException(
             status_code=502,
@@ -162,10 +180,21 @@ def read_backend_data(home_id: str) -> dict[str, Any]:
         ) from error
 
 
-def read_chat_context(home_id: str) -> dict[str, Any]:
+def read_chat_context(home_id: str, scenario_id: str | None = None) -> dict[str, Any]:
     try:
-        backend_ref = db.reference(f"/homes/{home_id}/backend")
-        home_ref = db.reference(f"/homes/{home_id}")
+        root_home_ref = db.reference(f"/homes/{home_id}")
+        root_backend_ref = db.reference(f"/homes/{home_id}/backend")
+        scenario_data = None
+        if home_id == "home_test" and scenario_id:
+            scenario_data = root_home_ref.child(f"demo_scenarios/{scenario_id}").get()
+
+        if isinstance(scenario_data, dict) and scenario_data:
+            home_ref = root_home_ref.child(f"demo_scenarios/{scenario_id}")
+            backend_ref = home_ref.child("backend")
+        else:
+            home_ref = root_home_ref
+            backend_ref = root_backend_ref
+
         history_raw = backend_ref.child("ai/prediction_history").get()
         history = history_raw if isinstance(history_raw, dict) else {}
         latest_history = sorted(
@@ -178,7 +207,7 @@ def read_chat_context(home_id: str) -> dict[str, Any]:
             reverse=True,
         )[:5]
 
-        chat_history_raw = backend_ref.child("ai/chat_history").get()
+        chat_history_raw = root_backend_ref.child("ai/chat_history").get()
         chat_history = chat_history_raw if isinstance(chat_history_raw, dict) else {}
         latest_chat_history = sorted(
             [
@@ -211,6 +240,9 @@ def read_chat_context(home_id: str) -> dict[str, Any]:
             "devices": summarize_devices(home_ref.child("devices").get()),
             "recent_chat_history_latest_6": latest_chat_history,
         }
+        if scenario_id:
+            context["selected_scenario_id"] = scenario_id
+            context["selected_scenario"] = home_ref.child("scenario").get()
         context["derived_context"] = build_chat_derived_context(context)
         return context
     except Exception as error:
@@ -385,8 +417,11 @@ def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def build_ai_payload(home_id: str) -> tuple[dict[str, Any], str]:
-    source = read_backend_data(home_id)
+def build_ai_payload(
+    home_id: str,
+    scenario_id: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    source = read_backend_data(home_id, scenario_id)
 
     latest_summary = ensure_dict(source["latest_hourly_summary"])
     dashboard_energy = ensure_dict(source["dashboard_energy"])
@@ -411,6 +446,8 @@ def build_ai_payload(home_id: str) -> tuple[dict[str, Any], str]:
 
     using_hourly_summary = bool(latest_summary.get("hour_id"))
     input_source = "latest_hourly_summary" if using_hourly_summary else "dashboard_fallback"
+    if scenario_id:
+        input_source = f"demo_scenario:{scenario_id}:{input_source}"
 
     sample_count = as_number(latest_summary.get("sample_count"), 1.0)
     if sample_count <= 0 and dashboard_environment:
@@ -564,11 +601,28 @@ def apply_post_processing_rules(result: dict[str, Any], payload: dict[str, Any])
     light_very_high = as_number(payload.get("bright_count")) >= 45
     total_power_active = as_number(payload.get("total_avg_power_W")) > 20
     ac_power_active = as_number(payload.get("ac_avg_power_W")) > 0
+    smoke_detected = as_number(payload.get("smoke_count")) > 0
     high_temperature = (
         as_number(payload.get("avg_temperature")) >= 27
         or as_number(payload.get("high_temp_count")) > 0
     )
     occupied = as_number(payload.get("motion_count")) > 0 and not occupancy_low
+
+    if smoke_detected:
+        set_classifier_result(result, "waste_event", False)
+        set_classifier_result(result, "anomaly_label", "safety_smoke_gas_warning")
+        set_classifier_result(result, "recommendation_type", "check_smoke_gas_sensor")
+        result["energy_efficiency_score"] = min(
+            as_number(result.get("energy_efficiency_score"), 100),
+            20,
+        )
+        result["explanation"] = (
+            "Smoke or gas was detected in the scenario. This is a safety warning, "
+            "so the user should check the room and sensor immediately. Energy saving "
+            "recommendations are secondary to safety."
+        )
+        result["post_processing_rules"].append("smoke_gas_safety_warning")
+        return result
 
     if (
         light_very_high
@@ -705,11 +759,13 @@ def build_firebase_result(
     payload: dict[str, Any],
     prediction: dict[str, Any],
     input_source: str,
+    scenario_id: str | None = None,
 ) -> dict[str, Any]:
     control_suggestion = make_control_suggestion(prediction, payload)
 
     return {
         "home_id": home_id,
+        "scenario_id": scenario_id,
         "created_at": now_ms(),
         "model_name": prediction["model_name"],
         "model_version": prediction["model_version"],
@@ -741,10 +797,19 @@ def build_firebase_result(
     }
 
 
-def write_ai_result(home_id: str, result: dict[str, Any]) -> str:
+def write_ai_result(
+    home_id: str,
+    result: dict[str, Any],
+    scenario_id: str | None = None,
+) -> str:
     try:
-        backend_ref = db.reference(f"/homes/{home_id}/backend")
-        prediction_path = f"/homes/{home_id}/backend/ai/latest_prediction"
+        if home_id == "home_test" and scenario_id:
+            backend_path = f"/homes/{home_id}/demo_scenarios/{scenario_id}/backend"
+        else:
+            backend_path = f"/homes/{home_id}/backend"
+
+        backend_ref = db.reference(backend_path)
+        prediction_path = f"{backend_path}/ai/latest_prediction"
         prediction_id = f"prediction_{result['created_at']}"
         previous_prediction = ensure_dict(backend_ref.child("ai/latest_prediction").get())
         previous_daily_summary = ensure_dict(backend_ref.child("ai/daily_summary").get())
@@ -915,30 +980,51 @@ def normalize_text(value: str) -> str:
     return " ".join(value.lower().strip().split())
 
 
-def build_chat_prompt(home_id: str, user_message: str, context: dict[str, Any]) -> str:
+def build_chat_prompt(
+    home_id: str,
+    user_message: str,
+    context: dict[str, Any],
+    *,
+    home_name: str | None = None,
+    scenario_id: str | None = None,
+    scenario_name: str | None = None,
+) -> str:
     context_json = json_safe_dumps(context)
+    scenario_line = ""
+    if scenario_id or scenario_name:
+        scenario_line = (
+            f"\nSelected demo scenario ID: {scenario_id or 'not provided'}"
+            f"\nSelected demo scenario name: {scenario_name or 'not provided'}"
+            "\nTreat this as demo/test data, not real live hardware data."
+        )
 
     return f"""
 You are the Smart Energy AI assistant for a senior project.
 
 Rules:
-- Answer only using the Firebase system data provided below.
+- Answer the user's exact question first. Do not switch topics unless the user asks.
+- Answer using the system data provided below.
 - Do not invent energy values, costs, device states, alerts, or recommendations.
+- For hypothetical "what if I connect/install..." questions, give a clearly labeled estimate range using normal appliance assumptions and explain that it is not a measured value.
 - If a value is missing, say that information is not available.
 - Do not control devices directly.
 - You may suggest that the user review or approve a control suggestion if the data includes one.
 - Do not override safety-critical alerts.
-- Smoke, gas, breaker safety, and device-health alerts are handled by the rule-based backend, not by this chatbot.
+- Smoke, gas, breaker safety, and device-health alerts are handled by the safety system, not by this chatbot.
 - Keep answers clear, short, and understandable.
+- Do not mention internal implementation words such as Firebase, backend, database paths, JSON, device IDs, breaker_01, breaker_02, or esp32_01 unless the user explicitly asks for technical details.
+- Use friendly names like "room sensor", "switch breaker", and "AC breaker".
 - Use BHD for cost values and kWh for energy values when those units are present.
-- Firebase timestamp fields are epoch milliseconds. When answering about time/date, use the readable Bahrain time fields from derived_context. Do not reply with only a raw millisecond timestamp unless the user explicitly asks for the raw value.
-- If the user asks for "real time", explain that this is the latest Firebase reading time, then give the readable time and the latest available readings.
-- If the user asks whether sensors or devices are working, use device_health, devices, dashboard_environment, current_state, and derived_context.device_health_summary.
+- Timestamp fields are epoch milliseconds. When answering about time/date, use the readable Bahrain time fields from derived_context. Do not reply with only a raw millisecond timestamp unless the user explicitly asks for the raw value.
+- If the user asks for "real time", explain that this is the latest system reading time, then give the readable time and the latest available readings.
+- If the user asks whether sensors are working, answer from dashboard_environment and current_state first. Mention the room sensor feed, not breaker devices.
+- If the user asks whether devices/breakers are working, use device_health, devices, and derived_context.device_health_summary.
 - If the user asks about sensor data, use dashboard_environment and current_state first. The AI prediction inputs are secondary and may be older or aggregated.
-- Use recent_chat_history_latest_6 only to understand short follow-up questions. Do not repeat the whole chat history.
+- Use recent_chat_history_latest_6 and current_conversation_latest to understand follow-up questions. Do not repeat the whole chat history.
 - If the latest data is old or a sensor/device is offline, say that clearly.
 
 Home ID: {home_id}
+Home name: {home_name or home_id}{scenario_line}
 
 Firebase system data:
 {context_json}
@@ -965,16 +1051,35 @@ def answer_direct_chat_question(user_message: str, context: dict[str, Any]) -> s
     )
     asks_sensor_status = (
         "sensor" in normalized
-        and any(word in normalized for word in ["working", "work", "status", "right now"])
+        and any(
+            phrase in normalized
+            for phrase in [
+                "working",
+                "work",
+                "status",
+                "right now",
+                "on right now",
+                "on now",
+                "are the sensors on",
+            ]
+        )
     )
     asks_sensor_data = (
         "sensor data" in normalized
         or "any sensor" in normalized
         or ("sensor" in normalized and "access" in normalized)
     )
+    asks_hypothetical_power = (
+        any(phrase in normalized for phrase in ["what do you think", "estimate", "predict", "will be the power"])
+        and any(word in normalized for word in ["connect", "install", "add", "plug"])
+        and any(word in normalized for word in ["power", "watt", "kw", "ac", "charger"])
+    )
 
     if asks_sensor_status:
         return build_sensor_status_answer(context)
+
+    if asks_hypothetical_power:
+        return build_hypothetical_power_answer(user_message, context)
 
     if asks_time:
         return build_latest_sensor_time_answer(context)
@@ -992,55 +1097,92 @@ def build_latest_sensor_time_answer(context: dict[str, Any]) -> str:
     age_seconds = derived.get("latest_sensor_data_age_seconds")
 
     if not readable_time:
-        return "The latest sensor data time is not available in Firebase yet."
+        return "The latest room sensor time is not available yet."
 
     age_text = ""
     if isinstance(age_seconds, (int, float)):
         age_text = f" That is about {round(float(age_seconds))} seconds before this chat request."
 
     return (
-        f"The latest sensor data was recorded at {readable_time}."
-        f"{age_text} The raw Firebase timestamp is {raw_time}."
+        f"The latest room sensor reading was recorded at {readable_time}."
+        f"{age_text} The raw timestamp is {raw_time}."
     )
 
 
 def build_sensor_status_answer(context: dict[str, Any]) -> str:
-    device_health = ensure_dict(context.get("device_health"))
-    devices = ensure_dict(device_health.get("devices"))
+    environment = ensure_dict(context.get("dashboard_environment"))
+    current_state = ensure_dict(context.get("current_state"))
     derived = ensure_dict(context.get("derived_context"))
-    summary = ensure_dict(derived.get("device_health_summary"))
+    source = environment if environment else current_state
 
-    if not devices:
-        if context.get("dashboard_environment") or context.get("current_state"):
-            return (
-                "I can see the latest sensor readings in Firebase, but the device-health "
-                "status is not available, so I cannot fully confirm whether every sensor "
-                "is online."
-            )
-        return "Sensor status is not available in Firebase yet."
+    if not source:
+        return "I do not have a recent room sensor reading yet, so I cannot confirm the sensors right now."
 
-    offline_devices = summary.get("offline_devices") or []
-    online_count = int(as_number(summary.get("online_count")))
-    offline_count = int(as_number(summary.get("offline_count")))
-    unknown_count = int(as_number(summary.get("unknown_count")))
-    health_time = derived.get("device_health_updated_at_readable")
+    readable_time = derived.get("latest_sensor_data_time_readable")
+    is_fresh = derived.get("latest_sensor_data_is_fresh")
+    age_seconds = derived.get("latest_sensor_data_age_seconds")
+    temperature = source.get("temperature", current_state.get("latest_temperature"))
+    humidity = source.get("humidity", current_state.get("latest_humidity"))
+    sound = source.get("sound_raw", current_state.get("latest_sound_raw"))
+    noise = source.get("noise")
+    motion = source.get("motion")
+    light_status = source.get("light_status")
+    smoke = source.get("smoke")
 
-    if offline_count == 0 and unknown_count == 0:
-        return (
-            f"Yes. Firebase device health shows {online_count} devices online and no "
-            f"offline devices. Last health check: {health_time or 'not available'}."
-        )
+    available_sensors = []
+    missing_sensors = []
+    if temperature is not None and humidity is not None:
+        available_sensors.append("temperature/humidity")
+    else:
+        missing_sensors.append("temperature/humidity")
+    if light_status is not None:
+        available_sensors.append("light")
+    else:
+        missing_sensors.append("light")
+    if motion is not None:
+        available_sensors.append("motion")
+    else:
+        missing_sensors.append("motion")
+    if sound is not None or noise is not None:
+        available_sensors.append("noise")
+    else:
+        missing_sensors.append("noise")
+    if smoke is not None:
+        available_sensors.append("smoke/gas")
+    else:
+        missing_sensors.append("smoke/gas")
 
-    parts = [
-        f"Firebase device health shows {online_count} online, {offline_count} offline, "
-        f"and {unknown_count} unknown devices."
-    ]
-    if offline_devices:
-        parts.append(f"Offline devices: {', '.join(map(str, offline_devices))}.")
-    if health_time:
-        parts.append(f"Last health check: {health_time}.")
+    status_text = "The room sensor feed is recent." if is_fresh else "The room sensor feed looks old."
+    details = []
+    if temperature is not None:
+        details.append(f"temperature {temperature} C")
+    if humidity is not None:
+        details.append(f"humidity {humidity}%")
+    if motion is not None:
+        details.append("motion detected" if as_number(motion) > 0 else "no motion")
+    if light_status is not None:
+        details.append(f"light is {light_status}")
+    if smoke is not None:
+        details.append("smoke/gas warning" if as_number(smoke) > 0 else "smoke/gas clear")
+    if sound is not None:
+        details.append(f"noise raw {sound}")
 
-    return " ".join(parts)
+    age_text = ""
+    if isinstance(age_seconds, (int, float)):
+        age_text = f" It is about {round(float(age_seconds))} seconds old."
+
+    answer = (
+        f"{status_text}{age_text} I can see these sensor readings: "
+        f"{', '.join(available_sensors)}."
+    )
+    if details:
+        answer += f" Current values: {', '.join(details)}."
+    if missing_sensors:
+        answer += f" Missing values: {', '.join(missing_sensors)}."
+    if readable_time:
+        answer += f" Last reading: {readable_time}."
+
+    return answer
 
 
 def build_sensor_data_answer(context: dict[str, Any]) -> str:
@@ -1049,7 +1191,7 @@ def build_sensor_data_answer(context: dict[str, Any]) -> str:
     source = environment if environment else current_state
 
     if not source:
-        return "Sensor data is not available in Firebase yet."
+        return "Room sensor data is not available yet."
 
     derived = ensure_dict(context.get("derived_context"))
     readable_time = derived.get("latest_sensor_data_time_readable")
@@ -1079,7 +1221,50 @@ def build_sensor_data_answer(context: dict[str, Any]) -> str:
         return "Sensor data exists, but the individual sensor values are not available."
 
     time_text = f" Latest reading time: {readable_time}." if readable_time else ""
-    return f"Yes. Latest sensor data: {', '.join(available)}.{time_text}"
+    return f"Yes. Latest room sensor data: {', '.join(available)}.{time_text}"
+
+
+def build_hypothetical_power_answer(user_message: str, context: dict[str, Any]) -> str:
+    dashboard_energy = ensure_dict(context.get("dashboard_energy"))
+    latest_summary = ensure_dict(context.get("latest_hourly_summary"))
+    summary_energy = ensure_dict(latest_summary.get("energy"))
+    energy = dashboard_energy if dashboard_energy else summary_energy
+    current_power_w = as_number(
+        energy.get("total_power_W", energy.get("total_avg_power_W"))
+    )
+
+    normalized = normalize_text(user_message)
+    added_min_w = 0.0
+    added_max_w = 0.0
+    assumptions: list[str] = []
+
+    if "charger" in normalized:
+        added_min_w += 10
+        added_max_w += 100
+        assumptions.append("a normal charger is usually about 10-100 W")
+
+    if "ac" in normalized:
+        added_min_w += 800
+        added_max_w += 1800
+        assumptions.append("a normal split AC while cooling is often about 800-1800 W")
+        assumptions.append("AC startup can briefly be higher than steady running power")
+
+    if added_max_w == 0:
+        return (
+            "I can estimate it, but I need the device type or watt rating. "
+            "For example, tell me the AC size or the charger's watt rating."
+        )
+
+    estimated_min_kw = (current_power_w + added_min_w) / 1000
+    estimated_max_kw = (current_power_w + added_max_w) / 1000
+    current_kw = current_power_w / 1000
+
+    return (
+        f"Estimated, not measured: your total power could rise from about "
+        f"{current_kw:.2f} kW now to roughly {estimated_min_kw:.2f}-"
+        f"{estimated_max_kw:.2f} kW. I assumed {', and '.join(assumptions)}. "
+        "For an exact answer, use the device watt rating or connect it and check the live reading."
+    )
 
 
 def json_safe_dumps(value: Any) -> str:
@@ -1392,14 +1577,14 @@ def build_daily_summary_text(
 
     if waste_predictions_today == 0 and abnormal_predictions_today == 0:
         return (
-            f"AI checked the home {total_ai_checks_today} times today "
+            f"AI checked this home {total_ai_checks_today} times today "
             f"with {history_records_today} meaningful history records. "
             f"Average efficiency score is {average_efficiency_score}. "
             f"Latest status: {latest_explanation}"
         )
 
     return (
-        f"AI checked the home {total_ai_checks_today} times today and found "
+        f"AI checked this home {total_ai_checks_today} times today and found "
         f"{waste_predictions_today} waste events and "
         f"{abnormal_predictions_today} abnormal usage events. "
         f"It stored {history_records_today} meaningful history records. "
@@ -1417,6 +1602,7 @@ def flatten_response(
 
     return {
         "home_id": home_id,
+        "scenario_id": firebase_result.get("scenario_id"),
         "timestamp": firebase_result["created_at"],
         "prediction_status": firebase_result.get("prediction_status", "ok"),
         "energy_waste": predictions["waste_event"]["value"],
@@ -1451,7 +1637,9 @@ def chat_home(home_id: str, request: ChatRequest) -> ChatResponse:
     if not user_message:
         raise HTTPException(status_code=400, detail="Message must not be empty.")
 
-    context = read_chat_context(home_id)
+    context = read_chat_context(home_id, request.scenario_id)
+    if request.conversation_history:
+        context["current_conversation_latest"] = request.conversation_history[-8:]
     used_data = has_chat_context(context)
 
     if not used_data:
@@ -1477,7 +1665,14 @@ def chat_home(home_id: str, request: ChatRequest) -> ChatResponse:
             timestamp=created_at,
         )
 
-    prompt = build_chat_prompt(home_id, user_message, context)
+    prompt = build_chat_prompt(
+        home_id,
+        user_message,
+        context,
+        home_name=request.home_name,
+        scenario_id=request.scenario_id,
+        scenario_name=request.scenario_name,
+    )
     answer = call_gemini(prompt)
     log_chat_message(home_id, user_message, answer, created_at, used_data=True)
 
@@ -1500,4 +1695,29 @@ def predict_home(home_id: str) -> dict[str, Any]:
     prediction = run_model(payload)
     firebase_result = build_firebase_result(home_id, payload, prediction, input_source)
     firebase_path_written = write_ai_result(home_id, firebase_result)
+    return flatten_response(home_id, firebase_result, firebase_path_written)
+
+
+@app.post("/predict/{home_id}/scenario/{scenario_id}")
+def predict_home_scenario(home_id: str, scenario_id: str) -> dict[str, Any]:
+    if home_id != "home_test":
+        raise HTTPException(
+            status_code=400,
+            detail="Scenario prediction is only supported for home_test.",
+        )
+
+    payload, input_source = build_ai_payload(home_id, scenario_id)
+    prediction = run_model(payload)
+    firebase_result = build_firebase_result(
+        home_id,
+        payload,
+        prediction,
+        input_source,
+        scenario_id=scenario_id,
+    )
+    firebase_path_written = write_ai_result(
+        home_id,
+        firebase_result,
+        scenario_id=scenario_id,
+    )
     return flatten_response(home_id, firebase_result, firebase_path_written)

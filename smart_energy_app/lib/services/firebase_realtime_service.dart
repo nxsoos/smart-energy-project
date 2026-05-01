@@ -20,6 +20,10 @@ class DashboardData {
   final AiDailySummary? aiDailySummary;
   final AiRecommendation? aiRecommendation;
   final AiAlertInsight? aiAlert;
+  final String? scenarioId;
+  final String? scenarioName;
+  final String? scenarioDescription;
+  final bool deviceControlEnabled;
 
   const DashboardData({
     required this.reading,
@@ -33,7 +37,23 @@ class DashboardData {
     this.aiDailySummary,
     this.aiRecommendation,
     this.aiAlert,
+    this.scenarioId,
+    this.scenarioName,
+    this.scenarioDescription,
+    this.deviceControlEnabled = true,
   });
+}
+
+class DemoScenario {
+  const DemoScenario({
+    required this.id,
+    required this.name,
+    required this.description,
+  });
+
+  final String id;
+  final String name;
+  final String description;
 }
 
 class DeviceCommandState {
@@ -87,10 +107,11 @@ class FirebaseRealtimeService {
     return database.ref(path);
   }
 
-  Stream<Alert> watchAlerts({required int sinceTimestampMs}) {
-    final alertsRef = _firebaseRef(
-      'homes/${NetworkConfig.firebaseHomeId}/backend/alerts',
-    );
+  Stream<Alert> watchAlerts({
+    required String homeId,
+    required int sinceTimestampMs,
+  }) {
+    final alertsRef = _firebaseRef('homes/$homeId/backend/alerts');
 
     final alertsQuery = alertsRef
         .orderByChild('timestamp')
@@ -106,26 +127,49 @@ class FirebaseRealtimeService {
     });
   }
 
-  Future<DashboardData> fetchDashboardData({CancelToken? cancelToken}) async {
+  Future<DashboardData> fetchDashboardData({
+    required String homeId,
+    String? scenarioId,
+    CancelToken? cancelToken,
+  }) async {
     final response = await _dio.get(
-      '/homes/${NetworkConfig.firebaseHomeId}.json',
+      '/homes/$homeId.json',
       cancelToken: cancelToken,
     );
     final home = _asMap(response.data);
 
     if (home.isEmpty) {
-      throw Exception('No data found for ${NetworkConfig.firebaseHomeId}.');
+      throw Exception('No data found for $homeId.');
     }
 
-    final devices = _asMap(home['devices']);
-    final history = _asMap(home['history']);
-    final sensors = _asMap(home['sensors']);
-    final commands = _asMap(home['commands']);
-    final backend = _asMap(home['backend']);
+    final selectedScenario = scenarioId == null
+        ? const <String, dynamic>{}
+        : _asMap(_asMap(home['demo_scenarios'])[scenarioId]);
+    final sourceHome = selectedScenario.isEmpty ? home : selectedScenario;
+    final sourceBackend = _asMap(sourceHome['backend']);
+    final rootBackend = _asMap(home['backend']);
+    final rootAiMetadata = _asMap(_asMap(rootBackend['ai'])['test_metadata']);
+    final metadata = {
+      ...rootAiMetadata,
+      ..._asMap(_asMap(sourceBackend['ai'])['test_metadata']),
+      ..._asMap(sourceHome['scenario']),
+    };
+
+    final devices = _asMap(sourceHome['devices']);
+    final history = _asMap(sourceHome['history']);
+    final sensors = _asMap(sourceHome['sensors']);
+    final commands = _asMap(sourceHome['commands']);
+    final backend = _asMap(sourceHome['backend']);
     final backendAi = _asMap(backend['ai']);
     final backendDashboard = _asMap(backend['dashboard']);
-    final dashboardEnergy = _asMap(backendDashboard['energy']);
-    final dashboardEnvironment = _asMap(backendDashboard['environment']);
+    final dashboardEnergy = {
+      ...sourceHome,
+      ..._asMap(backendDashboard['energy']),
+    };
+    final dashboardEnvironment = {
+      ...sourceHome,
+      ..._asMap(backendDashboard['environment']),
+    };
     final backendEnergy = _asMap(backend['energy']);
     final backendCurrentTotal = _asMap(backendEnergy['current_total']);
     final recommendations = _asMap(backend['recommendations']);
@@ -171,10 +215,84 @@ class FirebaseRealtimeService {
         _asMap(recommendations['ai_energy_insight']),
       ),
       aiAlert: _parseAiAlert(_asMap(activeAlerts['ai_abnormal_usage'])),
+      scenarioId: _asNullableString(
+        _pick(metadata, ['scenario_id', 'active_scenario', 'scenario_name']),
+      ),
+      scenarioName: _asNullableString(
+        _pick(metadata, ['scenario_name', 'name', 'active_scenario']),
+      ),
+      scenarioDescription: _asNullableString(
+        _pick(metadata, ['scenario_description', 'description', 'notes']),
+      ),
+      deviceControlEnabled: _asBool(
+        _pick(sourceHome, ['device_control_enabled', 'deviceControlEnabled']) ??
+            _pick(metadata, ['device_control_enabled', 'deviceControlEnabled']),
+        fallback: homeId != 'home_test',
+      ),
     );
   }
 
-  Future<void> sendDeviceCommand(String deviceId, String action) async {
+  Future<List<DemoScenario>> fetchDemoScenarios({
+    CancelToken? cancelToken,
+  }) async {
+    final response = await _dio.get(
+      '/homes/home_test.json',
+      cancelToken: cancelToken,
+    );
+    final home = _asMap(response.data);
+    final scenarios = _asMap(home['demo_scenarios']);
+
+    if (scenarios.isNotEmpty) {
+      return scenarios.entries.map((entry) {
+        final data = _asMap(entry.value);
+        final scenarioAiMetadata = _asMap(
+          _asMap(_asMap(data['backend'])['ai'])['test_metadata'],
+        );
+        final metadata = {..._asMap(data['scenario']), ...scenarioAiMetadata};
+        return DemoScenario(
+          id: entry.key,
+          name:
+              _asNullableString(
+                _pick(metadata, ['scenario_name', 'name', 'active_scenario']),
+              ) ??
+              _prettyScenarioName(entry.key),
+          description:
+              _asNullableString(
+                _pick(metadata, ['scenario_description', 'description']),
+              ) ??
+              'Demo scenario data.',
+        );
+      }).toList()..sort((a, b) => a.name.compareTo(b.name));
+    }
+
+    final metadata = _asMap(_asMap(home['backend'])['ai'])['test_metadata'];
+    final activeScenario =
+        _asNullableString(_pick(metadata, ['active_scenario'])) ??
+        'current_home_test';
+    return [
+      DemoScenario(
+        id: activeScenario,
+        name: _prettyScenarioName(activeScenario),
+        description:
+            _asNullableString(_pick(metadata, ['notes'])) ??
+            'Current Home Test scenario.',
+      ),
+    ];
+  }
+
+  Future<void> sendDeviceCommand(
+    String deviceId,
+    String action, {
+    required String homeId,
+  }) async {
+    if (homeId != NetworkConfig.firebaseHomeId) {
+      throw ArgumentError.value(
+        homeId,
+        'homeId',
+        'Device control is only enabled for the real home',
+      );
+    }
+
     if (deviceId != 'breaker_01' && deviceId != 'breaker_02') {
       throw ArgumentError.value(deviceId, 'deviceId', 'Unsupported device ID');
     }
@@ -189,9 +307,7 @@ class FirebaseRealtimeService {
         : nowMs;
     _lastCommandTimestampMs = timestampMs;
 
-    await _firebaseRef(
-      'homes/${NetworkConfig.firebaseHomeId}/commands/$deviceId/latest',
-    ).set({
+    await _firebaseRef('homes/$homeId/commands/$deviceId/latest').set({
       'command_id': 'cmd_$timestampMs',
       'device_id': deviceId,
       'action': action,
@@ -202,9 +318,17 @@ class FirebaseRealtimeService {
   }
 
   Stream<DeviceCommandState> watchLatestCommandStatus(String deviceId) {
-    final commandRef = _firebaseRef(
-      'homes/${NetworkConfig.firebaseHomeId}/commands/$deviceId/latest',
+    return watchLatestCommandStatusForHome(
+      NetworkConfig.firebaseHomeId,
+      deviceId,
     );
+  }
+
+  Stream<DeviceCommandState> watchLatestCommandStatusForHome(
+    String homeId,
+    String deviceId,
+  ) {
+    final commandRef = _firebaseRef('homes/$homeId/commands/$deviceId/latest');
 
     return commandRef.onValue.map((event) {
       final command = _asMap(event.snapshot.value);
@@ -217,8 +341,15 @@ class FirebaseRealtimeService {
   }
 
   Stream<bool?> watchDeviceSwitchStatus(String deviceId) {
+    return watchDeviceSwitchStatusForHome(
+      NetworkConfig.firebaseHomeId,
+      deviceId,
+    );
+  }
+
+  Stream<bool?> watchDeviceSwitchStatusForHome(String homeId, String deviceId) {
     return _firebaseRef(
-      'homes/${NetworkConfig.firebaseHomeId}/devices/$deviceId/status/switch',
+      'homes/$homeId/devices/$deviceId/status/switch',
     ).onValue.map((event) {
       final value = event.snapshot.value;
       if (value == null) {
@@ -226,6 +357,15 @@ class FirebaseRealtimeService {
       }
       return _asBool(value);
     });
+  }
+
+  String _prettyScenarioName(String value) {
+    return value
+        .replaceAll('_', ' ')
+        .split(' ')
+        .where((part) => part.isNotEmpty)
+        .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+        .join(' ');
   }
 
   AiDashboardSummary? _parseAiDashboard(Map<String, dynamic> data) {
@@ -405,8 +545,8 @@ class FirebaseRealtimeService {
       ...meteringSummary,
       ...history,
       ...latestHistory,
-      ...backendCurrentTotal,
       ...dashboardEnergy,
+      ...backendCurrentTotal,
     };
 
     return EnergyReading(
@@ -419,14 +559,18 @@ class FirebaseRealtimeService {
           'time',
         ]),
       ),
-      voltage: _asDouble(_pick(source, ['voltage', 'voltage_V', 'v'])),
+      voltage: _asDouble(
+        _pick(source, ['voltage', 'voltage_v', 'voltage_V', 'v']),
+      ),
       current: _asDouble(
-        _pick(source, ['current', 'current_A', 'i', 'ampere']),
+        _pick(source, ['current', 'current_a', 'current_A', 'i', 'ampere']),
       ),
       power: _asDouble(
         _pick(source, [
           'total_power_W',
           'total_avg_power_W',
+          'current_power_w',
+          'currentPowerW',
           'power',
           'power_W',
           'wattage',
@@ -437,6 +581,8 @@ class FirebaseRealtimeService {
         _pick(source, [
           'total_estimated_energy_kWh',
           'total_energy_kWh',
+          'energy_today_kwh',
+          'energy_today_kWh',
           'energyToday',
           'energy_today',
           'todayKwh',
@@ -449,6 +595,7 @@ class FirebaseRealtimeService {
         _pick(source, [
           'total_energy_kWh',
           'total_estimated_energy_kWh',
+          'total_energy_kwh',
           'energyTotal',
           'energy_total',
           'totalKwh',
@@ -461,6 +608,8 @@ class FirebaseRealtimeService {
         _pick(source, [
           'total_estimated_cost_BHD',
           'total_cost_BHD',
+          'cost_today_bd',
+          'cost_today_BD',
           'costToday',
           'cost_today',
           'todayCost',
@@ -502,8 +651,17 @@ class FirebaseRealtimeService {
           'last_processed_at',
         ]),
       ),
-      temperature: _asDouble(_pick(source, ['temperature', 'temp'])),
-      humidity: _asDouble(_pick(source, ['humidity', 'humid'])),
+      temperature: _asDouble(
+        _pick(source, [
+          'temperature',
+          'temperature_c',
+          'temperature_C',
+          'temp',
+        ]),
+      ),
+      humidity: _asDouble(
+        _pick(source, ['humidity', 'humidity_percent', 'humid']),
+      ),
       isOccupied: _asBool(
         _pick(source, [
           'isOccupied',
@@ -513,13 +671,18 @@ class FirebaseRealtimeService {
           'motion_text',
         ]),
       ),
-      eco2: _asDouble(_pick(source, ['eco2', 'co2'])),
+      eco2: _asDouble(_pick(source, ['eco2', 'eCO2', 'co2'])),
       tvoc: _asDouble(_pick(source, ['tvoc'])),
       aqi: _asInt(_pick(source, ['aqi'])),
       smokeRaw: smokeRaw,
       lightRaw: _asInt(_pick(source, ['light_raw', 'lightRaw'])),
       soundRaw: _asInt(
-        _pick(source, ['sound_raw', 'soundRaw', 'latest_sound_raw']),
+        _pick(source, [
+          'sound_raw',
+          'soundRaw',
+          'latest_sound_raw',
+          'noise_level',
+        ]),
       ),
       noise: _asInt(_pick(source, ['noise'])),
       noiseStatus:
@@ -527,6 +690,7 @@ class FirebaseRealtimeService {
             'noise_text',
             'noiseText',
             'noise_status',
+            'noiseStatus',
           ])?.toString() ??
           'Unknown',
       lightStatus:
