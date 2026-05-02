@@ -9,6 +9,11 @@ from firebase_admin import credentials, db
 from tuya_connector import TuyaOpenAPI, TUYA_LOGGER
 
 
+# Raspberry Pi hub role:
+# This is the default production script to run from main.py. It watches Firebase
+# command requests, sends ON/OFF commands to Tuya Cloud, and writes command
+# results back to Firebase.
+
 # ============================================================
 # Firebase settings
 # ============================================================

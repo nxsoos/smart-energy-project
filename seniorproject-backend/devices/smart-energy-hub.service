@@ -1,0 +1,16 @@
+[Unit]
+Description=Smart Energy Hub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ali
+WorkingDirectory=/home/ali/smart-energy-hub
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ali/smart-energy-hub/venv/bin/python /home/ali/smart-energy-hub/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

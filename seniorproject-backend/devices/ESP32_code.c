@@ -1,6 +1,5 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <Adafruit_AHTX0.h>
 #include "DFRobot_ENS160.h"
@@ -15,10 +14,14 @@ const char* ssid     = "Nassernxs";
 const char* password = "nasser04";
 
 // =====================================
-// Firebase base URL
+// Raspberry Pi hub endpoint
 // =====================================
-const char* firebaseBaseURL =
-  "https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app";
+const char* PI_SERVER_URL = "http://10.220.38.94:5000/api/sensors/room1";
+
+// Disabled because sensor data now goes through Raspberry Pi hub.
+// Previous direct Firebase base URL:
+// const char* firebaseBaseURL =
+//   "https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app";
 
 // =====================================
 // Pin definitions
@@ -228,41 +231,38 @@ bool readENS160(float temperature, float humidity, uint8_t &aqi, uint16_t &tvoc,
 }
 
 // =====================================
-// HTTPS sender
+// HTTP sender
 // =====================================
-bool sendPutRequest(const String& url, const String& jsonPayload) {
+bool sendPostRequest(const String& url, const String& jsonPayload) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Wi-Fi not connected");
     return false;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
+  HTTPClient http;
 
-  HTTPClient https;
-
-  if (!https.begin(client, url)) {
-    Serial.println("Failed to start HTTPS connection");
+  if (!http.begin(url)) {
+    Serial.println("Failed to start HTTP connection");
     return false;
   }
 
-  https.addHeader("Content-Type", "application/json");
+  http.addHeader("Content-Type", "application/json");
 
-  int httpCode = https.PUT(jsonPayload);
+  int httpCode = http.POST(jsonPayload);
 
-  Serial.print("HTTP code: ");
+  Serial.print("HTTP response code: ");
   Serial.println(httpCode);
 
   if (httpCode > 0) {
-    String response = https.getString();
-    Serial.println("Firebase response:");
+    String response = http.getString();
+    Serial.println("Raspberry Pi response:");
     Serial.println(response);
-    https.end();
-    return true;
+    http.end();
+    return httpCode >= 200 && httpCode < 300;
   } else {
     Serial.print("Request failed: ");
-    Serial.println(https.errorToString(httpCode));
-    https.end();
+    Serial.println(http.errorToString(httpCode));
+    http.end();
     return false;
   }
 }
@@ -434,21 +434,12 @@ void uploadData() {
     tsSec, tsMs, readableTime
   );
 
-  String historyJson = buildHistoryJson(
-    temperature, humidity, aht_ok,
-    aqi, tvoc, eco2, ens160_ok,
-    lightRaw, lightStatus,
-    motion, motionText,
-    mq2Raw, smokeDetected, smokeText,
-    soundRaw, noiseDetected, noiseText,
-    tsSec, tsMs, readableTime
-  );
-
-  String liveURL = String(firebaseBaseURL) +
-    "/homes/home_001/devices/esp32_01.json";
-
-  String historyURL = String(firebaseBaseURL) +
-    "/homes/home_001/history/sensor_logs/" + String(tsMs) + ".json";
+  // Disabled because sensor data now goes through Raspberry Pi hub.
+  // Previous direct Firebase upload targets:
+  // String liveURL = String(firebaseBaseURL) +
+  //   "/homes/home_001/devices/esp32_01.json";
+  // String historyURL = String(firebaseBaseURL) +
+  //   "/homes/home_001/history/sensor_logs/" + String(tsMs) + ".json";
 
   Serial.println("========== SENSOR DATA ==========");
   Serial.print("Readable Time : ");
@@ -489,17 +480,11 @@ void uploadData() {
   Serial.println(noiseText);
   Serial.println("================================");
 
-  Serial.println("Sending LIVE data...");
-  bool liveOk = sendPutRequest(liveURL, liveJson);
+  Serial.println("Sending sensor data to Raspberry Pi hub...");
+  bool piOk = sendPostRequest(String(PI_SERVER_URL), liveJson);
 
-  Serial.println("Sending HISTORY data...");
-  bool historyOk = sendPutRequest(historyURL, historyJson);
-
-  Serial.print("Live upload    : ");
-  Serial.println(liveOk ? "SUCCESS" : "FAILED");
-
-  Serial.print("History upload : ");
-  Serial.println(historyOk ? "SUCCESS" : "FAILED");
+  Serial.print("Pi hub upload  : ");
+  Serial.println(piOk ? "SUCCESS" : "FAILED");
 }
 
 // =====================================

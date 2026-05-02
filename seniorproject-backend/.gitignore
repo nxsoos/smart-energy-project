@@ -77,6 +77,8 @@ venv/
 # Secrets
 serviceAccountKey.json
 devices/serviceAccountKey.json
+*firebase-adminsdk*.json
+devices/*firebase-adminsdk*.json
 *.pem
 *.key
 

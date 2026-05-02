@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Smart Energy Hub</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Smart Energy Hub</h1>
+          <p>Raspberry Pi Local Control Panel</p>
+        </div>
+        <div id="systemStatus" class="status-pill status-offline">Offline</div>
+      </header>
+
+      <section class="section-header">
+        <h2>Live Sensors</h2>
+        <p>Last updated: <span id="lastUpdated">Waiting for data</span></p>
+      </section>
+
+      <section class="sensor-grid">
+        <article class="card metric"><span>Temperature</span><strong id="temperature">--</strong></article>
+        <article class="card metric"><span>Humidity</span><strong id="humidity">--</strong></article>
+        <article class="card metric"><span>Air Quality</span><strong id="aqi">--</strong></article>
+        <article class="card metric"><span>eCO2</span><strong id="eco2">--</strong></article>
+        <article class="card metric"><span>TVOC</span><strong id="tvoc">--</strong></article>
+        <article class="card metric"><span>Light</span><strong id="light">--</strong></article>
+        <article class="card metric"><span>Motion</span><strong id="motion">--</strong></article>
+        <article class="card metric"><span>Smoke/Gas</span><strong id="smoke">--</strong></article>
+        <article class="card metric"><span>Sound</span><strong id="sound">--</strong></article>
+      </section>
+
+      <section class="section-header">
+        <h2>Breaker Control</h2>
+        <p id="commandMessage">Ready</p>
+      </section>
+
+      <section class="breaker-grid">
+        <article class="card breaker" data-device-id="breaker_01">
+          <div>
+            <h3>Switch Breaker</h3>
+            <p>breaker_01</p>
+            <span id="breaker_01_status" class="breaker-status">Unknown</span>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-on" data-device-id="breaker_01" data-action="turn_on">ON</button>
+            <button class="btn btn-off" data-device-id="breaker_01" data-action="turn_off">OFF</button>
+          </div>
+        </article>
+
+        <article class="card breaker" data-device-id="breaker_02">
+          <div>
+            <h3>AC Breaker</h3>
+            <p>breaker_02</p>
+            <span id="breaker_02_status" class="breaker-status">Unknown</span>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-on" data-device-id="breaker_02" data-action="turn_on">ON</button>
+            <button class="btn btn-off" data-device-id="breaker_02" data-action="turn_off">OFF</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="card suggestions">
+        <h2>System Suggestions</h2>
+        <p id="suggestionText">Waiting for live sensor data.</p>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

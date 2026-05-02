@@ -17,6 +17,8 @@ firebase-debug.*.log
 *.local
 serviceAccountKey.json
 **/serviceAccountKey.json
+*firebase-adminsdk*.json
+**/*firebase-adminsdk*.json
 *.pem
 *.key
 

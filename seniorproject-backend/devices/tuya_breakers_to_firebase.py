@@ -4,6 +4,11 @@ import logging
 import requests
 from tuya_connector import TuyaOpenAPI, TUYA_LOGGER
 
+# Raspberry Pi hub role:
+# This optional telemetry poller reads Tuya breaker metering/status data and
+# writes latest/history values to Firebase. Leave it disabled in main.py until
+# we confirm continuous Tuya polling is needed alongside the command controller.
+
 # =========================================================
 # TUYA CONFIG
 # =========================================================
