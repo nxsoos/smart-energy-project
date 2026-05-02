@@ -57,13 +57,59 @@ def build_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sensors = payload.get("sensors")
+    status = payload.get("status")
+
+    if not isinstance(sensors, dict):
+        sensors = {}
+
+    if not isinstance(status, dict):
+        status = {}
+
+    timestamp = sensors.get("timestamp", status.get("lastSeen"))
+    timestamp_ms = sensors.get("timestamp_ms", status.get("lastSeenMs"))
+    readable_time = sensors.get("readable_time", status.get("readableTime"))
+
+    return {
+        "timestamp": timestamp,
+        "timestamp_ms": timestamp_ms,
+        "readable_time": readable_time,
+        "ntp_synced": status.get("ntp_synced"),
+        "temperature": sensors.get("temperature"),
+        "humidity": sensors.get("humidity"),
+        "aht_ok": sensors.get("aht_ok"),
+        "aqi": sensors.get("aqi"),
+        "tvoc": sensors.get("tvoc"),
+        "eco2": sensors.get("eco2"),
+        "ens160_ok": sensors.get("ens160_ok"),
+        "light_raw": sensors.get("light_raw"),
+        "light_status": sensors.get("light_status"),
+        "motion": sensors.get("motion"),
+        "motion_text": sensors.get("motion_text"),
+        "smoke_raw": sensors.get("smoke_raw"),
+        "smoke": sensors.get("smoke"),
+        "smoke_text": sensors.get("smoke_text"),
+        "sound_raw": sensors.get("sound_raw"),
+        "noise": sensors.get("noise"),
+        "noise_text": sensors.get("noise_text"),
+        "home_id": payload.get("home_id"),
+        "source": payload.get("source"),
+        "esp32_source_id": payload.get("esp32_source_id"),
+        "received_at": payload.get("timestamp"),
+        "timestamp_key": payload.get("timestamp_key"),
+    }
+
+
 def save_to_firebase(payload: dict[str, Any]) -> None:
     history_key = payload["timestamp_key"]
+    history_payload = build_history_payload(payload)
 
     # Keep the original Firebase structure: latest ESP32 data lives inside
-    # devices/esp32_01, and history lives under history/sensor_logs.
+    # devices/esp32_01. History is flattened so backend Firebase Functions can
+    # read top-level fields like motion, noise, sound_raw, and light_status.
     home_ref(f"devices/{APP_DEVICE_ID}").set(payload)
-    home_ref(f"history/sensor_logs/{history_key}").set(payload)
+    home_ref(f"history/sensor_logs/{history_key}").set(history_payload)
 
 
 @app.post("/api/sensors/room1")
