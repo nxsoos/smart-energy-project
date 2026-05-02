@@ -56,6 +56,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _activeScenarioName;
   String? _activeScenarioDescription;
   bool _deviceControlEnabled = true;
+  bool _hasLiveData = false;
   List<DemoScenario> _demoScenarios = const [];
   AiDashboardSummary? _aiDashboard;
   AiDailySummary? _aiDailySummary;
@@ -107,14 +108,18 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _initializeMockData();
-    _sensorFreshnessTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    _initializeEmptyData();
+    _sensorFreshnessTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) {
         return;
       }
 
       if (widget.enableRealtimeSync) {
-        _refreshData(showErrorSnackBar: false, updateLoading: false);
+        _refreshData(
+          showErrorSnackBar: false,
+          updateLoading: false,
+          cancelActiveRequest: false,
+        );
       } else {
         setState(() {});
       }
@@ -254,49 +259,24 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  void _initializeMockData() {
+  void _initializeEmptyData() {
     _currentReading = EnergyReading(
-      timestamp: DateTime.now(),
-      voltage: 230.5,
-      current: 8.5,
-      power: 1958.0,
-      energyToday: 12.45,
-      energyTotal: 458.32,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(0),
+      voltage: 0,
+      current: 0,
+      power: 0,
+      energyToday: 0,
+      energyTotal: 0,
     );
 
     _sensorData = SensorData(
-      timestamp: DateTime.now(),
-      temperature: 24.5,
-      humidity: 55.0,
-      isOccupied: true,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(0),
+      temperature: 0,
+      humidity: 0,
+      isOccupied: false,
     );
 
-    _devices = [
-      Device(
-        id: '1',
-        name: 'LED Strip',
-        type: DeviceType.light,
-        isOn: true,
-        currentPower: 45.0,
-        branch: 'Branch 1',
-      ),
-      Device(
-        id: '2',
-        name: 'Power Socket',
-        type: DeviceType.socket,
-        isOn: true,
-        currentPower: 120.0,
-        branch: 'Branch 2',
-      ),
-      Device(
-        id: '3',
-        name: 'Air Conditioner',
-        type: DeviceType.airConditioner,
-        isOn: true,
-        currentPower: 1793.0,
-        branch: 'Branch 3',
-      ),
-    ];
+    _devices = const [];
 
     _currentTariff = ElectricityPricing.costPerKWh;
   }
@@ -486,7 +466,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _refreshData({
     bool showErrorSnackBar = true,
     bool updateLoading = true,
+    bool cancelActiveRequest = true,
   }) async {
+    if (_activeRequestToken != null) {
+      if (!cancelActiveRequest) {
+        return;
+      }
+      _activeRequestToken?.cancel('New refresh started');
+    }
+
     if (mounted && updateLoading) {
       setState(() {
         _isLoading = true;
@@ -494,7 +482,6 @@ class _HomeScreenState extends State<HomeScreen> {
       });
     }
 
-    _activeRequestToken?.cancel('New refresh started');
     final cancelToken = CancelToken();
     _activeRequestToken = cancelToken;
 
@@ -523,6 +510,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _currentReading = dashboardData.reading;
         _sensorData = dashboardData.sensors;
         _devices = dashboardData.devices;
+        _hasLiveData = true;
         _demoScenarios = demoScenarios;
         _selectedScenarioId = _isDemoHome
             ? (_selectedScenarioId ?? fallbackScenarioId)
@@ -561,7 +549,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _loadError =
-            'Could not load live Firebase data. Showing local fallback values.';
+            'Could not load live Firebase data. Check Firebase connection and pull to retry.';
+        _hasLiveData = false;
+        _devices = const [];
       });
 
       if (showErrorSnackBar) {
@@ -613,6 +603,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _commandStatusSubscriptions.clear();
       _deviceSwitchSubscriptions.clear();
       _loadError = null;
+      _hasLiveData = false;
+      _devices = const [];
     });
 
     _refreshData(showErrorSnackBar: false);
@@ -629,6 +621,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _loadError = null;
       _pendingDeviceCommands.clear();
       _deviceCommandErrors.clear();
+      _hasLiveData = false;
+      _devices = const [];
     });
 
     _refreshData(showErrorSnackBar: false);
@@ -703,6 +697,11 @@ class _HomeScreenState extends State<HomeScreen> {
               _buildHomeSelectorCard(),
               const SizedBox(height: 16),
 
+              if (!_hasLiveData && !_isLoading) ...[
+                _buildNoLiveDataCard(),
+                const SizedBox(height: 16),
+              ],
+
               if (_alerts.isNotEmpty) ...[
                 _buildSectionTitle('Alerts'),
                 const SizedBox(height: 8),
@@ -731,7 +730,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   Expanded(
                     child: MetricCard(
                       title: 'Current Power',
-                      value: (_currentReading.power / 1000).toStringAsFixed(2),
+                      value: _hasLiveData
+                          ? (_currentReading.power / 1000).toStringAsFixed(2)
+                          : '--',
                       unit: 'kW',
                       icon: Icons.bolt,
                       color: AppColors.primary,
@@ -741,7 +742,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   Expanded(
                     child: MetricCard(
                       title: 'Energy Today',
-                      value: _currentReading.energyToday.toStringAsFixed(2),
+                      value: _hasLiveData
+                          ? _currentReading.energyToday.toStringAsFixed(2)
+                          : '--',
                       unit: 'kWh',
                       icon: Icons.calendar_today,
                       color: AppColors.accent,
@@ -755,7 +758,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   Expanded(
                     child: MetricCard(
                       title: 'Cost Today',
-                      value: totalCost.toStringAsFixed(3),
+                      value: _hasLiveData ? totalCost.toStringAsFixed(3) : '--',
                       unit: 'BD',
                       icon: Icons.attach_money,
                       color: Colors.orange,
@@ -765,7 +768,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   Expanded(
                     child: MetricCard(
                       title: 'Tariff',
-                      value: _currentTariff.toStringAsFixed(3),
+                      value: _hasLiveData
+                          ? _currentTariff.toStringAsFixed(3)
+                          : '--',
                       unit: 'BD/kWh',
                       icon: Icons.price_change,
                       color: Colors.indigo,
@@ -780,7 +785,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   Expanded(
                     child: MetricCard(
                       title: 'Voltage',
-                      value: _currentReading.voltage.toStringAsFixed(1),
+                      value: _hasLiveData
+                          ? _currentReading.voltage.toStringAsFixed(1)
+                          : '--',
                       unit: 'V',
                       icon: Icons.electrical_services,
                       color: Colors.blue,
@@ -790,7 +797,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   Expanded(
                     child: MetricCard(
                       title: 'Current',
-                      value: averageCurrent.toStringAsFixed(2),
+                      value: _hasLiveData
+                          ? averageCurrent.toStringAsFixed(2)
+                          : '--',
                       unit: 'A',
                       icon: Icons.cable,
                       color: Colors.teal,
@@ -801,7 +810,9 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 12),
               MetricCard(
                 title: 'Total Energy',
-                value: _currentReading.energyTotal.toStringAsFixed(2),
+                value: _hasLiveData
+                    ? _currentReading.energyTotal.toStringAsFixed(2)
+                    : '--',
                 unit: 'kWh',
                 icon: Icons.stacked_line_chart,
                 color: Colors.deepPurple,
@@ -1160,24 +1171,27 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 12),
               ],
-              ..._devices.map(
-                (device) => Padding(
-                  padding: const EdgeInsets.only(bottom: 12.0),
-                  child: DeviceCard(
-                    device: device,
-                    onToggle: _deviceControlEnabled
-                        ? (value) => _toggleDevice(device, value)
-                        : null,
-                    isCommandPending: _pendingDeviceCommands.contains(
-                      device.id,
+              if (_devices.isEmpty)
+                _buildNoDevicesCard()
+              else
+                ..._devices.map(
+                  (device) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12.0),
+                    child: DeviceCard(
+                      device: device,
+                      onToggle: _deviceControlEnabled
+                          ? (value) => _toggleDevice(device, value)
+                          : null,
+                      isCommandPending: _pendingDeviceCommands.contains(
+                        device.id,
+                      ),
+                      commandError: _deviceCommandErrors[device.id],
+                      onTap: () {
+                        // TODO: Navigate to device details
+                      },
                     ),
-                    commandError: _deviceCommandErrors[device.id],
-                    onTap: () {
-                      // TODO: Navigate to device details
-                    },
                   ),
                 ),
-              ),
 
               const SizedBox(height: 24),
 
@@ -1207,6 +1221,78 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 24),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNoLiveDataCard() {
+    return Card(
+      color: Colors.orange.shade50,
+      child: const Padding(
+        padding: EdgeInsets.all(14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.cloud_off_outlined, color: Colors.orange),
+            SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Waiting for live Firebase data',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    'No local demo values are being shown. Pull to retry or check the Firebase connection.',
+                    style: TextStyle(color: AppColors.textSecondary),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNoDevicesCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.power_settings_new, color: AppColors.textSecondary),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'No live devices loaded',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _loadError == null
+                        ? 'Waiting for breaker data from Firebase.'
+                        : 'Breaker cards will appear after Firebase loads successfully.',
+                    style: const TextStyle(color: AppColors.textSecondary),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

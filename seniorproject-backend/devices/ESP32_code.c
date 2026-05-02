@@ -44,7 +44,7 @@ DFRobot_ENS160_I2C ens160(&Wire, 0x53);
 // Settings
 // =====================================
 unsigned long lastSendTime = 0;
-const unsigned long sendInterval = 10000;
+const unsigned long sendInterval = 3000;
 int mq2Threshold = 900;
 int soundThreshold = 1800;   // adjust after testing
 
