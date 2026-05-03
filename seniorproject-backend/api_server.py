@@ -22,6 +22,7 @@ BAHRAIN_TZ = ZoneInfo("Asia/Bahrain")
 DEFAULT_HOME_ID = "home_001"
 CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02"}
 VALID_COMMANDS = {"turn_on", "turn_off"}
+DEVICE_STALE_AFTER_MS = 45 * 1000
 
 DEFAULT_DEVICE_NAMES = {
     "esp32_01": "Room Sensor",
@@ -253,18 +254,18 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         backend_energy.get("relay_status"),
     )
 
-    if isinstance(explicit_state, str) and explicit_state.lower() in {
-        "on",
-        "off",
-        "unknown",
-    }:
-        state = explicit_state.lower()
-    elif switch_bool is True:
+    if switch_bool is True:
         state = "on"
     elif switch_bool is False:
         state = "off"
     elif isinstance(relay_status, str) and relay_status:
         state = relay_status.lower()
+    elif isinstance(explicit_state, str) and explicit_state.lower() in {
+        "on",
+        "off",
+        "unknown",
+    }:
+        state = explicit_state.lower()
     else:
         state = "unknown"
 
@@ -276,33 +277,44 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
     )
 
     online = normalize_bool(status.get("online"))
-    if online is None and isinstance(last_seen_ms, (int, float)):
-        online = now_ms() - int(last_seen_ms) <= 3 * 60 * 1000
+    is_stale = not isinstance(last_seen_ms, (int, float)) or (
+        now_ms() - int(last_seen_ms) > DEVICE_STALE_AFTER_MS
+    )
+    if online is None:
+        online = not is_stale
+    elif is_stale:
+        online = False
 
     command_in_progress = bool(normalize_bool(raw.get("command_in_progress")))
     pending_target_state = raw.get("pending_target_state")
     if pending_target_state not in {"on", "off"}:
         pending_target_state = None
     display_state = pending_target_state if command_in_progress and pending_target_state else state
+    if not online:
+        display_state = "off"
     latest_command = as_dict(raw.get("last_command"))
+    power_w = as_number(
+        first_present(
+            metering.get("power_W"),
+            metering.get("power"),
+            raw.get("power_W"),
+            raw.get("currentPower"),
+            backend_energy.get("power_W"),
+        )
+    )
+    if not online:
+        power_w = 0.0
 
     return {
         "device_id": device_id,
         "name": raw.get("name") or DEFAULT_DEVICE_NAMES.get(device_id, device_id),
         "type": raw.get("type") or DEFAULT_DEVICE_TYPES.get(device_id, "unknown"),
         "online": bool(online),
+        "stale": is_stale,
         "controllable": is_controllable_device(device_id, raw),
         "state": state,
         "display_state": display_state,
-        "power_w": as_number(
-            first_present(
-                metering.get("power_W"),
-                metering.get("power"),
-                raw.get("power_W"),
-                raw.get("currentPower"),
-                backend_energy.get("power_W"),
-            )
-        ),
+        "power_w": power_w,
         "today_kwh": as_number(
             first_present(
                 metering.get("energy_kWh"),
@@ -694,7 +706,8 @@ def create_device_command(
     if not is_controllable_device(device_id, device):
         raise HTTPException(status_code=400, detail="Device is not controllable.")
 
-    if normalize_bool(as_dict(device.get("status")).get("online")) is False:
+    formatted_device = format_device(device_id, device)
+    if formatted_device.get("online") is not True:
         raise HTTPException(
             status_code=409,
             detail={
@@ -705,7 +718,6 @@ def create_device_command(
         )
 
     target_state = command_to_target_state(command)
-    formatted_device = format_device(device_id, device)
     current_state = str(formatted_device.get("state", "unknown")).lower()
     device_name = device_message_name(device_id, device)
     pending_target_state = device.get("pending_target_state")

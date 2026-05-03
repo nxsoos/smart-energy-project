@@ -23,6 +23,7 @@ SMART_ENERGY_API_URL = os.environ.get(
 ALLOWED_DEVICES = {"breaker_01", "breaker_02"}
 ALLOWED_ACTIONS = {"turn_on", "turn_off"}
 SENSOR_STALE_AFTER_MS = 2 * 60 * 1000
+DEVICE_STALE_AFTER_MS = 45 * 1000
 
 app = Flask(__name__)
 
@@ -121,28 +122,43 @@ def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]
     switch = normalize_bool(status.get("switch"))
     relay_status = status.get("relay_status")
     state = (
-        str(device.get("state")).lower()
-        if device.get("state") in {"on", "off", "unknown"}
-        else "on" if switch is True else "off" if switch is False else relay_status or "unknown"
+        "on"
+        if switch is True
+        else "off" if switch is False else relay_status or str(device.get("state", "unknown")).lower()
     )
     command_in_progress = bool(normalize_bool(device.get("command_in_progress")))
     pending_target_state = device.get("pending_target_state")
     if pending_target_state not in {"on", "off"}:
         pending_target_state = None
     display_state = pending_target_state if command_in_progress and pending_target_state else state
+    last_seen_ms = status.get("lastSeenMs")
+    is_stale = not isinstance(last_seen_ms, (int, float)) or (
+        int(time.time() * 1000) - int(last_seen_ms) > DEVICE_STALE_AFTER_MS
+    )
+    online = normalize_bool(status.get("online"))
+    if online is None:
+        online = not is_stale
+    elif is_stale:
+        online = False
+    if not online:
+        display_state = "off"
+    power_w = metering.get("power_W", 0)
+    if not online:
+        power_w = 0
 
     return {
         "device_id": device_id,
         "name": device.get("name", device_id),
         "type": device.get("type", "unknown"),
-        "online": bool(normalize_bool(status.get("online"))),
+        "online": bool(online),
+        "stale": is_stale,
         "controllable": normalize_bool(device.get("controllable")) is not False,
         "state": state,
         "display_state": display_state,
-        "power_w": metering.get("power_W", 0),
+        "power_w": power_w,
         "today_kwh": metering.get("energy_kWh", 0),
         "today_cost_bhd": metering.get("cost_BHD", 0),
-        "last_seen_ms": status.get("lastSeenMs"),
+        "last_seen_ms": last_seen_ms,
         "command_in_progress": command_in_progress,
         "pending_command_id": device.get("pending_command_id"),
         "pending_target_state": pending_target_state,

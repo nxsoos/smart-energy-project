@@ -184,7 +184,7 @@ def command_message(device_id: str, state: str) -> str:
 
 def friendly_error(raw_error: Any, fallback_code: str = "COMMAND_FAILED") -> Dict[str, Any]:
     text = str(raw_error or "").lower()
-    if "offline" in text:
+    if "offline" in text or "no breaker voltage" in text:
         return {
             "error_code": "DEVICE_OFFLINE",
             "user_message": "Device is offline. Check power or Wi-Fi connection.",
@@ -239,6 +239,22 @@ def fetch_tuya_status(cloud, tuya_device_id: str) -> Dict[str, Any]:
             raw[str(item["code"])] = item.get("value")
 
     return raw
+
+
+def fetch_tuya_device_online(cloud, tuya_device_id: str) -> bool:
+    response = cloud.get(f"/v1.0/devices/{tuya_device_id}")
+    if not isinstance(response, dict) or response.get("success") is not True:
+        raise RuntimeError(f"Tuya device read failed: {response}")
+
+    result = response.get("result") or {}
+    return result.get("online") is True
+
+
+def ensure_tuya_device_powered(cloud, tuya_device_id: str) -> Dict[str, Any]:
+    if not fetch_tuya_device_online(cloud, tuya_device_id):
+        raise RuntimeError("Device offline")
+
+    return fetch_tuya_status(cloud, tuya_device_id)
 
 
 def send_tuya_command_with_code(
@@ -505,17 +521,26 @@ def mark_command_failed(
     }
     if state_update in {"on", "off", "unknown"}:
         device_updates["state"] = state_update
+    if mapped["error_code"] == "DEVICE_OFFLINE":
+        device_updates["state"] = "off"
 
     get_device_ref(device_id).update(device_updates)
 
-    get_device_status_ref(device_id).update(
-        {
-            "lastSeenMs": failed_at,
-            "readableTime": readable,
-            "last_error": mapped["user_message"],
-            "last_command_id": command_id,
-        }
-    )
+    status_updates = {
+        "lastSeenMs": failed_at,
+        "readableTime": readable,
+        "last_error": mapped["user_message"],
+        "last_command_id": command_id,
+    }
+    if mapped["error_code"] == "DEVICE_OFFLINE":
+        status_updates.update(
+            {
+                "online": False,
+                "switch": False,
+                "relay_status": "off",
+            }
+        )
+    get_device_status_ref(device_id).update(status_updates)
 
 
 def mark_command_cancelled(
@@ -613,6 +638,8 @@ def process_device_command(cloud, device_id: str, command: Dict[str, Any]) -> No
 
     try:
         relay_on = action == "turn_on"
+        device_config = DEVICES[device_id]
+        ensure_tuya_device_powered(cloud, device_config["tuya_device_id"])
 
         command = mark_command_sent(device_id, command)
         success = send_tuya_cloud_command(cloud, device_id, action)

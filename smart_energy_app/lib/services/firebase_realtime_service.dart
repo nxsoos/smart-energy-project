@@ -267,7 +267,6 @@ class FirebaseRealtimeService {
         .toList();
 
     final pendingCommands = <String>{};
-    final commandErrors = <String, String>{};
     for (final entry in devicesMap.entries) {
       final device = _asMap(entry.value);
       final commandState = _asString(
@@ -277,15 +276,6 @@ class FirebaseRealtimeService {
           commandState == 'pending' ||
           commandState == 'sent') {
         pendingCommands.add(entry.key);
-      }
-      if (commandState == 'failed' || commandState == 'timeout') {
-        final message = _asNullableString(
-          _pick(_asMap(device['last_command']), ['user_message']) ??
-              _pick(device, ['last_command_message']),
-        );
-        if (message != null) {
-          commandErrors[entry.key] = message;
-        }
       }
     }
 
@@ -351,7 +341,7 @@ class FirebaseRealtimeService {
           .toList(),
       tariffBhdPerKwh: ElectricityPricing.costPerKWh,
       pendingDeviceCommands: pendingCommands,
-      deviceCommandErrors: commandErrors,
+      deviceCommandErrors: const {},
       aiDashboard: ai.isEmpty ? null : _parseApiAiDashboard(ai, data),
       aiDailySummary: _parseAiDailySummary(aiDailySummary),
       aiRecommendation: recommendations.isEmpty
@@ -372,14 +362,20 @@ class FirebaseRealtimeService {
     final rawType = _asString(_pick(data, ['type']));
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final lastCommand = _asMap(data['last_command']);
+    final online = _asBool(_pick(data, ['online']), fallback: true);
+    final visualIsOn =
+        online &&
+        (displayState == 'on' || _asBool(_pick(data, ['is_on', 'switch'])));
     return Device(
       id: _asString(_pick(data, ['device_id', 'id']), fallback: deviceId),
       name: name,
       type: _parseApiDeviceType(deviceId, name, rawType),
-      isOn: displayState == 'on' || _asBool(_pick(data, ['is_on', 'switch'])),
-      currentPower: _asDouble(_pick(data, ['power_w', 'currentPower'])),
+      isOn: visualIsOn,
+      currentPower: online
+          ? _asDouble(_pick(data, ['power_w', 'currentPower']))
+          : 0.0,
       branch: _branchFromDeviceId(deviceId),
-      online: _asBool(_pick(data, ['online']), fallback: true),
+      online: online,
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: _asBool(_pick(data, ['command_in_progress'])),
       pendingTargetState: _asNullableString(
@@ -532,11 +528,7 @@ class FirebaseRealtimeService {
           .where((entry) => entry.value.isPending)
           .map((entry) => entry.key)
           .toSet(),
-      deviceCommandErrors: Map.fromEntries(
-        commandStates.entries
-            .where((entry) => entry.value.isFailed && entry.value.error != null)
-            .map((entry) => MapEntry(entry.key, entry.value.error!)),
-      ),
+      deviceCommandErrors: const {},
       aiDashboard: _parseAiDashboard(_asMap(backendDashboard['ai'])),
       aiDailySummary: _parseAiDailySummary(_asMap(backendAi['daily_summary'])),
       aiRecommendation: _parseAiRecommendation(
@@ -722,6 +714,61 @@ class FirebaseRealtimeService {
       }
       return _asBool(value);
     });
+  }
+
+  Stream<Device> watchDeviceForHome(String homeId, String deviceId) {
+    return _firebaseRef('homes/$homeId/devices/$deviceId').onValue.map((event) {
+      final raw = _asMap(event.snapshot.value);
+      if (raw.isEmpty) {
+        throw StateError('No device data found for $deviceId.');
+      }
+      return _parseRealtimeDevice(deviceId, raw);
+    });
+  }
+
+  Device _parseRealtimeDevice(String deviceId, Map<String, dynamic> data) {
+    final metering = _asMap(data['metering']);
+    final status = _asMap(data['status']);
+    final pendingTargetState = _asNullableString(
+      _pick(data, ['pending_target_state']),
+    );
+    final commandInProgress = _asBool(_pick(data, ['command_in_progress']));
+    final pendingSwitchState = pendingTargetState == 'on'
+        ? true
+        : pendingTargetState == 'off'
+        ? false
+        : null;
+    final actualSwitchState = _asBool(
+      _pick(status, ['switch', 'on', 'relay_status']) ??
+          _pick(data, ['isOn', 'on', 'switch', 'relay_status']),
+    );
+    final rawType = _pick(data, ['type', 'deviceType'])?.toString();
+    final name =
+        _pick(data, ['name', 'label', 'deviceName'])?.toString() ?? deviceId;
+    final online = _asBool(_pick(status, ['online']), fallback: true);
+    final visualIsOn = online && (pendingSwitchState ?? actualSwitchState);
+    final rawPower = _asDouble(
+      _pick(data, ['currentPower', 'power', 'wattage']) ??
+          _pick(metering, ['power_W', 'power_w', 'power']),
+    );
+
+    return Device(
+      id: (_pick(data, ['id']) ?? deviceId).toString(),
+      name: name,
+      type: _parseApiDeviceType(deviceId, name, rawType ?? ''),
+      isOn: visualIsOn,
+      currentPower: visualIsOn ? rawPower : 0.0,
+      branch:
+          _pick(data, ['branch', 'zone'])?.toString() ??
+          _branchFromDeviceId(deviceId),
+      online: online,
+      controllable: _asBool(_pick(data, ['controllable']), fallback: true),
+      commandInProgress: commandInProgress,
+      pendingTargetState: pendingTargetState,
+      lastCommandMessage: _asNullableString(
+        _pick(data, ['last_command_message']),
+      ),
+    );
   }
 
   String _prettyScenarioName(String value) {
@@ -1112,6 +1159,8 @@ class FirebaseRealtimeService {
         _pick(data, ['currentPower', 'power', 'wattage']) ??
             _pick(metering, ['power_W', 'power_w', 'power']),
       );
+      final online = _asBool(_pick(status, ['online']), fallback: true);
+      final visualIsOn = online && (desiredSwitchState ?? actualSwitchState);
 
       devices.add(
         Device(
@@ -1120,12 +1169,12 @@ class FirebaseRealtimeService {
               _pick(data, ['name', 'label', 'deviceName'])?.toString() ??
               entry.key,
           type: _parseDeviceType(rawType),
-          isOn: desiredSwitchState ?? actualSwitchState,
-          currentPower: desiredSwitchState == false ? 0.0 : currentPower,
+          isOn: visualIsOn,
+          currentPower: visualIsOn ? currentPower : 0.0,
           branch:
               _pick(data, ['branch', 'zone'])?.toString() ??
               _branchFromDeviceId(entry.key),
-          online: _asBool(_pick(status, ['online']), fallback: true),
+          online: online,
           controllable: _asBool(_pick(data, ['controllable']), fallback: true),
           commandInProgress: commandInProgress,
           pendingTargetState: pendingTargetState,

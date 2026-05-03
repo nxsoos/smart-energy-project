@@ -70,8 +70,8 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<String, StreamSubscription<DeviceCommandState>>
   _commandStatusSubscriptions =
       <String, StreamSubscription<DeviceCommandState>>{};
-  final Map<String, StreamSubscription<bool?>> _deviceSwitchSubscriptions =
-      <String, StreamSubscription<bool?>>{};
+  final Map<String, StreamSubscription<Device>> _deviceSubscriptions =
+      <String, StreamSubscription<Device>>{};
   StreamSubscription<Alert>? _alertsSubscription;
   StreamSubscription<SensorData>? _liveSensorSubscription;
   Timer? _sensorFreshnessTimer;
@@ -151,7 +151,7 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final subscription in _commandStatusSubscriptions.values) {
       subscription.cancel();
     }
-    for (final subscription in _deviceSwitchSubscriptions.values) {
+    for (final subscription in _deviceSubscriptions.values) {
       subscription.cancel();
     }
     _sensorFreshnessTimer?.cancel();
@@ -417,11 +417,11 @@ class _HomeScreenState extends State<HomeScreen> {
       for (final subscription in _commandStatusSubscriptions.values) {
         subscription.cancel();
       }
-      for (final subscription in _deviceSwitchSubscriptions.values) {
+      for (final subscription in _deviceSubscriptions.values) {
         subscription.cancel();
       }
       _commandStatusSubscriptions.clear();
-      _deviceSwitchSubscriptions.clear();
+      _deviceSubscriptions.clear();
       return;
     }
 
@@ -436,9 +436,9 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
-    for (final deviceId in _deviceSwitchSubscriptions.keys.toList()) {
+    for (final deviceId in _deviceSubscriptions.keys.toList()) {
       if (!activeDeviceIds.contains(deviceId)) {
-        _deviceSwitchSubscriptions.remove(deviceId)?.cancel();
+        _deviceSubscriptions.remove(deviceId)?.cancel();
       }
     }
 
@@ -463,11 +463,11 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
       );
 
-      _deviceSwitchSubscriptions.putIfAbsent(
+      _deviceSubscriptions.putIfAbsent(
         deviceId,
         () => _firebaseRealtimeService
-            .watchDeviceSwitchStatusForHome(_selectedHomeId, deviceId)
-            .listen((isOn) => _updateDeviceSwitchState(deviceId, isOn)),
+            .watchDeviceForHome(_selectedHomeId, deviceId)
+            .listen((device) => _updateDeviceRealtimeState(device)),
       );
     }
   }
@@ -515,22 +515,41 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _updateDeviceSwitchState(String deviceId, bool? isOn) {
-    if (!mounted || isOn == null) {
+  void _updateDeviceRealtimeState(Device updatedDevice) {
+    if (!mounted) {
       return;
     }
 
-    final index = _devices.indexWhere((device) => device.id == deviceId);
-    if (_pendingDeviceCommands.contains(deviceId) ||
+    final index = _devices.indexWhere(
+      (device) => device.id == updatedDevice.id,
+    );
+    if (_pendingDeviceCommands.contains(updatedDevice.id) ||
         (index != -1 && _devices[index].commandInProgress)) {
+      if (index != -1) {
+        setState(() {
+          if (!updatedDevice.online) {
+            _pendingDeviceCommands.remove(updatedDevice.id);
+            _deviceCommandErrors.remove(updatedDevice.id);
+          }
+          _devices[index] = _devices[index].copyWith(
+            isOn: updatedDevice.online && updatedDevice.isOn,
+            online: updatedDevice.online,
+            controllable: updatedDevice.controllable,
+            currentPower: updatedDevice.currentPower,
+            commandInProgress:
+                updatedDevice.online && updatedDevice.commandInProgress,
+            lastCommandMessage: updatedDevice.lastCommandMessage,
+          );
+        });
+      }
       return;
     }
-    if (index == -1 || _devices[index].isOn == isOn) {
+    if (index == -1) {
       return;
     }
 
     setState(() {
-      _devices[index] = _devices[index].copyWith(isOn: isOn);
+      _devices[index] = updatedDevice;
     });
   }
 
@@ -577,12 +596,14 @@ class _HomeScreenState extends State<HomeScreen> {
           ? demoScenarios.first.id
           : dashboardData.scenarioId;
 
+      final mergedDevices = _mergeRealtimeDevices(dashboardData.devices);
+
       setState(() {
         _currentReading = dashboardData.reading;
         if (_isDemoHome || _isSensorFeedStale()) {
           _sensorData = dashboardData.sensors;
         }
-        _devices = dashboardData.devices;
+        _devices = mergedDevices;
         _hasLiveData = true;
         _demoScenarios = demoScenarios;
         _selectedScenarioId = _isDemoHome
@@ -606,7 +627,7 @@ class _HomeScreenState extends State<HomeScreen> {
       });
 
       try {
-        _syncDeviceListeners(dashboardData.devices);
+        _syncDeviceListeners(mergedDevices);
       } catch (_) {
         // The dashboard data is loaded through REST. Native Firebase listeners
         // can be unavailable on local/dev builds without breaking the dashboard.
@@ -645,6 +666,30 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  List<Device> _mergeRealtimeDevices(List<Device> refreshedDevices) {
+    if (_isDemoHome || _devices.isEmpty || _deviceSubscriptions.isEmpty) {
+      return refreshedDevices;
+    }
+
+    final currentById = {for (final device in _devices) device.id: device};
+
+    return refreshedDevices.map((device) {
+      final current = currentById[device.id];
+      if (current == null) {
+        return device;
+      }
+      return device.copyWith(
+        isOn: current.isOn,
+        currentPower: current.currentPower,
+        online: current.online,
+        controllable: current.controllable,
+        commandInProgress: current.commandInProgress,
+        pendingTargetState: current.pendingTargetState,
+        lastCommandMessage: current.lastCommandMessage,
+      );
+    }).toList();
+  }
+
   bool _isRequestCancellation(Object error) {
     return error is DioException && error.type == DioExceptionType.cancel;
   }
@@ -677,7 +722,7 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final subscription in _commandStatusSubscriptions.values) {
       subscription.cancel();
     }
-    for (final subscription in _deviceSwitchSubscriptions.values) {
+    for (final subscription in _deviceSubscriptions.values) {
       subscription.cancel();
     }
 
@@ -692,7 +737,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _pendingDeviceCommands.clear();
       _deviceCommandErrors.clear();
       _commandStatusSubscriptions.clear();
-      _deviceSwitchSubscriptions.clear();
+      _deviceSubscriptions.clear();
       _loadError = null;
       _hasLiveData = false;
       _devices = const [];

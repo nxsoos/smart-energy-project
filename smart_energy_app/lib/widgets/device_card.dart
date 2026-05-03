@@ -32,7 +32,7 @@ class DeviceCard extends StatelessWidget {
   }
 
   Color _getDeviceColor() {
-    if (!device.isOn) return Colors.grey;
+    if (!device.online || !device.isOn) return Colors.grey;
 
     switch (device.type) {
       case DeviceType.light:
@@ -49,6 +49,8 @@ class DeviceCard extends StatelessWidget {
     final color = _getDeviceColor();
     final controlsDisabled =
         isCommandPending || !device.online || !device.controllable;
+    final switchValue = device.online && device.isOn;
+    final visibleCommandError = device.online ? commandError : null;
 
     return Card(
       elevation: 2,
@@ -94,7 +96,7 @@ class DeviceCard extends StatelessWidget {
                     const SizedBox(width: 12),
                   ],
                   Switch(
-                    value: device.isOn,
+                    value: switchValue,
                     onChanged: controlsDisabled ? null : onToggle,
                     activeThumbColor: color,
                   ),
@@ -107,7 +109,7 @@ class DeviceCard extends StatelessWidget {
                   vertical: 6,
                 ),
                 decoration: BoxDecoration(
-                  color: device.isOn
+                  color: switchValue
                       ? color.withValues(alpha: 0.1)
                       : Colors.grey[100],
                   borderRadius: BorderRadius.circular(12),
@@ -118,7 +120,7 @@ class DeviceCard extends StatelessWidget {
                     Icon(
                       Icons.bolt,
                       size: 16,
-                      color: device.isOn ? color : Colors.grey,
+                      color: switchValue ? color : Colors.grey,
                     ),
                     const SizedBox(width: 4),
                     Text(
@@ -126,7 +128,7 @@ class DeviceCard extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
-                        color: device.isOn ? color : Colors.grey,
+                        color: switchValue ? color : Colors.grey,
                       ),
                     ),
                   ],
@@ -150,7 +152,8 @@ class DeviceCard extends StatelessWidget {
                   ),
                 ),
               ],
-              if (commandError != null && commandError!.isNotEmpty) ...[
+              if (visibleCommandError != null &&
+                  visibleCommandError.isNotEmpty) ...[
                 const SizedBox(height: 10),
                 Row(
                   children: [
@@ -162,7 +165,7 @@ class DeviceCard extends StatelessWidget {
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        commandError!,
+                        visibleCommandError,
                         style: const TextStyle(
                           color: AppColors.energyDanger,
                           fontSize: 12,
