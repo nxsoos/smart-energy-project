@@ -57,11 +57,15 @@ class DeviceCommandRequest(BaseModel):
 
 class DeviceCommandResponse(BaseModel):
     success: bool
-    command_id: str
-    device_id: str
-    command: str
+    no_action: bool = False
     status: str
     message: str
+    device_id: str | None = None
+    command_id: str | None = None
+    command: str | None = None
+    current_state: str | None = None
+    target_state: str | None = None
+    previous_state: str | None = None
 
 
 class ScenarioRunResponse(BaseModel):
@@ -177,6 +181,28 @@ def normalize_bool(value: Any) -> bool | None:
     return None
 
 
+def command_to_target_state(command: str) -> str:
+    return "on" if command == "turn_on" else "off"
+
+
+def state_to_command(state: str) -> str:
+    return "turn_on" if state == "on" else "turn_off"
+
+
+def is_controllable_device(device_id: str, device: dict[str, Any]) -> bool:
+    if device_id in CONTROLLABLE_DEVICES:
+        return normalize_bool(device.get("controllable")) is not False
+    return normalize_bool(device.get("controllable")) is True
+
+
+def friendly_state(state: str) -> str:
+    return "on" if state == "on" else "off" if state == "off" else state
+
+
+def device_message_name(device_id: str, device: dict[str, Any]) -> str:
+    return str(device.get("name") or DEFAULT_DEVICE_NAMES.get(device_id, device_id))
+
+
 def as_number(value: Any, default: float = 0.0) -> float:
     if isinstance(value, bool):
         return default
@@ -212,6 +238,7 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
     metering = as_dict(raw.get("metering"))
     backend_energy = as_dict(raw.get("_backend_energy"))
 
+    explicit_state = raw.get("state")
     switch_value = first_present(
         status.get("switch"),
         status.get("on"),
@@ -226,7 +253,13 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         backend_energy.get("relay_status"),
     )
 
-    if switch_bool is True:
+    if isinstance(explicit_state, str) and explicit_state.lower() in {
+        "on",
+        "off",
+        "unknown",
+    }:
+        state = explicit_state.lower()
+    elif switch_bool is True:
         state = "on"
     elif switch_bool is False:
         state = "off"
@@ -246,12 +279,21 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
     if online is None and isinstance(last_seen_ms, (int, float)):
         online = now_ms() - int(last_seen_ms) <= 3 * 60 * 1000
 
+    command_in_progress = bool(normalize_bool(raw.get("command_in_progress")))
+    pending_target_state = raw.get("pending_target_state")
+    if pending_target_state not in {"on", "off"}:
+        pending_target_state = None
+    display_state = pending_target_state if command_in_progress and pending_target_state else state
+    latest_command = as_dict(raw.get("last_command"))
+
     return {
         "device_id": device_id,
         "name": raw.get("name") or DEFAULT_DEVICE_NAMES.get(device_id, device_id),
         "type": raw.get("type") or DEFAULT_DEVICE_TYPES.get(device_id, "unknown"),
         "online": bool(online),
+        "controllable": is_controllable_device(device_id, raw),
         "state": state,
+        "display_state": display_state,
         "power_w": as_number(
             first_present(
                 metering.get("power_W"),
@@ -278,6 +320,23 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         ),
         "last_seen_ms": last_seen_ms,
         "last_seen_iso": iso_from_ms(last_seen_ms),
+        "command_in_progress": command_in_progress,
+        "pending_command_id": raw.get("pending_command_id"),
+        "pending_target_state": pending_target_state,
+        "last_requested_state": raw.get("last_requested_state"),
+        "last_command": {
+            "status": first_present(
+                raw.get("last_command_status"),
+                latest_command.get("status"),
+            ),
+            "user_message": first_present(
+                raw.get("last_command_message"),
+                latest_command.get("user_message"),
+            ),
+            "error_code": latest_command.get("error_code"),
+        },
+        "last_command_status": raw.get("last_command_status"),
+        "last_command_message": raw.get("last_command_message"),
     }
 
 
@@ -311,6 +370,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
         "system_health": as_dict(home.get("system_health")),
         # Existing project paths. These keep the API immediately compatible.
         "backend": backend,
+        "backend_ai": backend_ai,
         "backend_dashboard_energy": as_dict(backend_dashboard.get("energy")),
         "backend_dashboard_environment": as_dict(backend_dashboard.get("environment")),
         "backend_dashboard_ai": as_dict(backend_dashboard.get("ai")),
@@ -410,34 +470,71 @@ def build_energy(bundle: dict[str, Any], devices: dict[str, dict[str, Any]]) -> 
     latest = bundle["dashboard_latest"]
 
     source = {**latest, **dashboard_energy, **current_total}
+    branches = as_dict(first_present(source.get("branches"), current_total.get("branches")))
     highest_device = None
     highest_power = -1.0
+    device_power_total = 0.0
+    device_energy_total = 0.0
+    device_cost_total = 0.0
+    voltage_values: list[float] = []
+    current_total_a = 0.0
+
     for device_id, device in devices.items():
         if device.get("type") != "smart_breaker":
             continue
         power = as_number(device.get("power_w"))
+        device_power_total += power
+        device_energy_total += as_number(device.get("today_kwh"))
+        device_cost_total += as_number(device.get("today_cost_bhd"))
+
+        raw_device = as_dict(bundle["devices"].get(device_id))
+        metering = as_dict(raw_device.get("metering"))
+        branch = as_dict(branches.get(device_id))
+        voltage = as_number(first_present(metering.get("voltage_V"), branch.get("voltage_V")))
+        current = as_number(first_present(metering.get("current_A"), branch.get("current_A")))
+        if voltage > 0:
+            voltage_values.append(voltage)
+        if current > 0:
+            current_total_a += current
+
         if power > highest_power:
             highest_power = power
             highest_device = device_id
 
+    source_power = as_number(
+        first_present(source.get("total_power_W"), source.get("current_power_w"))
+    )
+    source_energy = as_number(
+        first_present(
+            source.get("total_estimated_energy_kWh"),
+            source.get("total_energy_kWh"),
+            source.get("today_kwh"),
+        )
+    )
+    source_cost = as_number(
+        first_present(
+            source.get("total_estimated_cost_BHD"),
+            source.get("total_cost_BHD"),
+            source.get("today_cost_bhd"),
+        )
+    )
+    source_voltage = as_number(
+        first_present(source.get("voltage_V"), source.get("voltage_v"), source.get("voltage"))
+    )
+    source_current = as_number(
+        first_present(source.get("current_A"), source.get("current_a"), source.get("current"))
+    )
+
     return {
-        "current_power_w": as_number(
-            first_present(source.get("total_power_W"), source.get("current_power_w"))
-        ),
-        "today_kwh": as_number(
-            first_present(
-                source.get("total_estimated_energy_kWh"),
-                source.get("total_energy_kWh"),
-                source.get("today_kwh"),
-            )
-        ),
-        "today_cost_bhd": as_number(
-            first_present(
-                source.get("total_estimated_cost_BHD"),
-                source.get("total_cost_BHD"),
-                source.get("today_cost_bhd"),
-            )
-        ),
+        "current_power_w": device_power_total if device_power_total > 0 else source_power,
+        "today_kwh": source_energy if source_energy > 0 else device_energy_total,
+        "today_cost_bhd": source_cost if source_cost > 0 else device_cost_total,
+        "voltage_V": source_voltage
+        if source_voltage > 0
+        else round(sum(voltage_values) / len(voltage_values), 1)
+        if voltage_values
+        else 0,
+        "current_A": source_current if source_current > 0 else round(current_total_a, 3),
         "highest_consuming_device": highest_device if highest_power > 0 else None,
     }
 
@@ -450,7 +547,10 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
     }
     predictions = as_dict(latest.get("predictions"))
     waste = as_dict(predictions.get("waste_event"))
+    anomaly = as_dict(predictions.get("anomaly_label"))
     recommendation = as_dict(predictions.get("recommendation_type"))
+    next_energy = as_dict(predictions.get("next_hour_total_energy_kWh"))
+    next_cost = as_dict(predictions.get("next_hour_total_cost_BHD"))
 
     return {
         "status": first_present(
@@ -458,10 +558,32 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
             latest.get("abnormal_usage"),
             default="unknown",
         ),
-        "confidence": first_present(
-            latest.get("confidence"),
-            waste.get("confidence"),
-            recommendation.get("confidence"),
+        "prediction_status": first_present(latest.get("prediction_status"), default="unknown"),
+        "confidence": first_present(latest.get("confidence"), waste.get("confidence")),
+        "waste_confidence": first_present(latest.get("waste_confidence"), waste.get("confidence")),
+        "abnormal_usage_confidence": first_present(
+            latest.get("abnormal_usage_confidence"),
+            anomaly.get("confidence"),
+        ),
+        "energy_waste": first_present(latest.get("energy_waste"), waste.get("value")),
+        "abnormal_usage": first_present(latest.get("abnormal_usage"), anomaly.get("value")),
+        "recommendation_type": first_present(
+            latest.get("recommendation_type"),
+            recommendation.get("value"),
+        ),
+        "next_hour_energy_kWh": first_present(
+            latest.get("next_hour_energy_kWh"),
+            latest.get("next_hour_energy"),
+            next_energy.get("value"),
+        ),
+        "next_hour_cost_BHD": first_present(
+            latest.get("next_hour_cost_BHD"),
+            latest.get("next_hour_cost"),
+            next_cost.get("value"),
+        ),
+        "efficiency_score": first_present(
+            latest.get("efficiency_score"),
+            predictions.get("energy_efficiency_score"),
         ),
         "summary": first_present(latest.get("explanation"), latest.get("summary")),
         "recommended_action": first_present(
@@ -469,6 +591,8 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
             recommendation.get("value"),
             nested(latest, "control_suggestion", "action"),
         ),
+        "control_suggestion": latest.get("control_suggestion"),
+        "updated_at": first_present(latest.get("updated_at"), latest.get("created_at")),
     }
 
 
@@ -506,6 +630,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         "alerts": alerts,
         "recommendations": recommendations,
         "ai": build_ai(bundle),
+        "ai_daily_summary": as_dict(as_dict(bundle["backend_ai"]).get("daily_summary")),
         "system_health": bundle["system_health"] or bundle["backend_device_health"],
         "updated_at_ms": timestamp_ms,
         "updated_at_iso": iso_from_ms(timestamp_ms),
@@ -561,12 +686,102 @@ def create_device_command(
     if command not in VALID_COMMANDS:
         raise HTTPException(status_code=400, detail="Command must be turn_on or turn_off.")
 
-    if device_id not in CONTROLLABLE_DEVICES:
-        raise HTTPException(status_code=400, detail="Device is not controllable.")
-
     device = safe_get(f"/homes/{home_id}/devices/{device_id}")
     if device is None:
         raise HTTPException(status_code=404, detail="Device does not exist.")
+    device = as_dict(device)
+
+    if not is_controllable_device(device_id, device):
+        raise HTTPException(status_code=400, detail="Device is not controllable.")
+
+    if normalize_bool(as_dict(device.get("status")).get("online")) is False:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "status": "device_offline",
+                "message": "Device is offline. Check power or Wi-Fi connection.",
+            },
+        )
+
+    target_state = command_to_target_state(command)
+    formatted_device = format_device(device_id, device)
+    current_state = str(formatted_device.get("state", "unknown")).lower()
+    device_name = device_message_name(device_id, device)
+    pending_target_state = device.get("pending_target_state")
+
+    if normalize_bool(device.get("command_in_progress")) is True:
+        if pending_target_state == target_state:
+            return DeviceCommandResponse(
+                success=True,
+                no_action=True,
+                status="command_already_in_progress",
+                device_id=device_id,
+                current_state=current_state,
+                target_state=target_state,
+                message=(
+                    f"A command to turn this device {friendly_state(target_state)} "
+                    "is already in progress."
+                ),
+            )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "status": "command_in_progress",
+                "message": "Another command is already in progress for this device.",
+            },
+        )
+
+    if current_state == target_state:
+        timestamp_ms = now_ms()
+        already_record = {
+            "command_id": f"cmd_{timestamp_ms}",
+            "home_id": home_id,
+            "device_id": device_id,
+            "device_name": device_name,
+            "command": command,
+            "action": command,
+            "target_state": target_state,
+            "previous_state": current_state,
+            "requested_by": request.requested_by,
+            "status": "already_in_state",
+            "requested_at_ms": timestamp_ms,
+            "requested_at_iso": iso_from_ms(timestamp_ms),
+            "result": {
+                "success": True,
+                "actual_state": current_state,
+                "error_code": None,
+                "user_message": f"{device_name} is already {target_state}.",
+                "raw_error": None,
+            },
+        }
+        safe_set(
+            f"/homes/{home_id}/commands/latest_by_device/{device_id}",
+            already_record,
+        )
+        safe_update(
+            f"/homes/{home_id}/devices/{device_id}",
+            {
+                "last_requested_state": target_state,
+                "last_command_status": "already_in_state",
+                "last_command_message": f"{device_name} is already {target_state}.",
+                "last_command": {
+                    "status": "already_in_state",
+                    "user_message": f"{device_name} is already {target_state}.",
+                    "error_code": None,
+                },
+            },
+        )
+        return DeviceCommandResponse(
+            success=True,
+            no_action=True,
+            status="already_in_state",
+            device_id=device_id,
+            current_state=current_state,
+            target_state=target_state,
+            message=f"{device_name} is already {target_state}.",
+        )
 
     timestamp_ms = now_ms()
     timestamp_iso = iso_from_ms(timestamp_ms)
@@ -575,18 +790,52 @@ def create_device_command(
         "command_id": command_id,
         "home_id": home_id,
         "device_id": device_id,
+        "device_name": device_name,
         "command": command,
+        "target_state": target_state,
+        "previous_state": current_state,
         "requested_by": request.requested_by,
         "status": "pending",
         "requested_at_ms": timestamp_ms,
         "requested_at_iso": timestamp_iso,
         "sent_at_ms": None,
-        "completed_at_ms": None,
-        "error": None,
+        "sent_at_iso": None,
+        "confirmed_at_ms": None,
+        "confirmed_at_iso": None,
+        "failed_at_ms": None,
+        "failed_at_iso": None,
+        "timeout_at_ms": None,
+        "timeout_at_iso": None,
+        "result": {
+            "success": None,
+            "actual_state": None,
+            "error_code": None,
+            "user_message": None,
+            "raw_error": None,
+        },
+        "retry_count": 0,
+        "max_retries": 1,
     }
 
     safe_set(f"/homes/{home_id}/commands/pending/{command_id}", command_record)
     safe_set(f"/homes/{home_id}/commands/history/{command_id}", command_record)
+    safe_set(f"/homes/{home_id}/commands/latest_by_device/{device_id}", command_record)
+    safe_update(
+        f"/homes/{home_id}/devices/{device_id}",
+        {
+            "command_in_progress": True,
+            "pending_command_id": command_id,
+            "pending_target_state": target_state,
+            "last_requested_state": target_state,
+            "last_command_status": "pending",
+            "last_command_message": "Command accepted.",
+            "last_command": {
+                "status": "pending",
+                "user_message": None,
+                "error_code": None,
+            },
+        },
+    )
 
     # Compatibility with the current Raspberry Pi Tuya controller, which watches
     # /commands/{device_id}/latest and expects the field name "action".
@@ -600,9 +849,12 @@ def create_device_command(
 
     return DeviceCommandResponse(
         success=True,
+        no_action=False,
         command_id=command_id,
         device_id=device_id,
         command=command,
+        target_state=target_state,
+        previous_state=current_state,
         status="pending",
         message="Command accepted.",
     )

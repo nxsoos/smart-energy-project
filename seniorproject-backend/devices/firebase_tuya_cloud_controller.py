@@ -27,6 +27,7 @@ DATABASE_URL = (
 
 HOME_ID = "home_001"
 POLL_INTERVAL_SECONDS = 0.2
+COMMAND_MAX_AGE_MS = 2 * 60 * 1000
 
 
 # ============================================================
@@ -71,8 +72,25 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def as_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return default
+    return default
+
+
 def readable_time() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def readable_iso() -> str:
+    return datetime.now().isoformat()
 
 
 def initialize_firebase() -> None:
@@ -94,12 +112,28 @@ def get_command_ref(device_id: str):
     return firebase_ref(f"/homes/{HOME_ID}/commands/{device_id}/latest")
 
 
+def get_pending_commands_ref():
+    return firebase_ref(f"/homes/{HOME_ID}/commands/pending")
+
+
+def get_pending_command_ref(command_id: str):
+    return firebase_ref(f"/homes/{HOME_ID}/commands/pending/{command_id}")
+
+
+def get_latest_by_device_ref(device_id: str):
+    return firebase_ref(f"/homes/{HOME_ID}/commands/latest_by_device/{device_id}")
+
+
 def get_device_status_ref(device_id: str):
     return firebase_ref(f"/homes/{HOME_ID}/devices/{device_id}/status")
 
 
+def get_device_ref(device_id: str):
+    return firebase_ref(f"/homes/{HOME_ID}/devices/{device_id}")
+
+
 def get_command_history_ref(command_id: str):
-    return firebase_ref(f"/homes/{HOME_ID}/command_history/{command_id}")
+    return firebase_ref(f"/homes/{HOME_ID}/commands/history/{command_id}")
 
 
 def is_valid_command(command: Dict[str, Any], device_id: str) -> bool:
@@ -112,13 +146,73 @@ def is_valid_command(command: Dict[str, Any], device_id: str) -> bool:
     if command.get("device_id") != device_id:
         return False
 
-    if command.get("action") not in ["turn_on", "turn_off"]:
+    action = command.get("action") or command.get("command")
+    if action not in ["turn_on", "turn_off"]:
         return False
 
     if not command.get("command_id"):
         return False
 
     return True
+
+
+def command_timestamp_ms(command: Dict[str, Any]) -> int:
+    return as_int(
+        command.get("requested_at_ms")
+        or command.get("created_at")
+        or command.get("timestamp_ms")
+    )
+
+
+def is_stale_command(command: Dict[str, Any]) -> bool:
+    timestamp_ms = command_timestamp_ms(command)
+    return timestamp_ms <= 0 or now_ms() - timestamp_ms > COMMAND_MAX_AGE_MS
+
+
+def target_state_for_action(action: str) -> str:
+    return "on" if action == "turn_on" else "off"
+
+
+def action_for_command(command: Dict[str, Any]) -> str:
+    return str(command.get("action") or command.get("command") or "").strip()
+
+
+def command_message(device_id: str, state: str) -> str:
+    name = DEVICES.get(device_id, {}).get("name", device_id)
+    return f"{name} turned {state} successfully."
+
+
+def friendly_error(raw_error: Any, fallback_code: str = "COMMAND_FAILED") -> Dict[str, Any]:
+    text = str(raw_error or "").lower()
+    if "offline" in text:
+        return {
+            "error_code": "DEVICE_OFFLINE",
+            "user_message": "Device is offline. Check power or Wi-Fi connection.",
+        }
+    if "timeout" in text or "timed out" in text:
+        return {
+            "error_code": "COMMAND_TIMEOUT",
+            "user_message": "Device did not respond in time.",
+        }
+    if "permission" in text or "auth" in text or "sign" in text or "token" in text:
+        return {
+            "error_code": "PERMISSION_ERROR",
+            "user_message": "Device control permission failed.",
+        }
+    if "state did not change" in text or "did not change breaker state" in text:
+        return {
+            "error_code": "STATE_NOT_CHANGED",
+            "user_message": "Command was sent, but the breaker state did not change.",
+        }
+    if fallback_code == "STATE_NOT_CHANGED":
+        return {
+            "error_code": "STATE_NOT_CHANGED",
+            "user_message": "Command was sent, but the breaker state did not change.",
+        }
+    return {
+        "error_code": fallback_code,
+        "user_message": "Command failed. Please try again.",
+    }
 
 
 # ============================================================
@@ -263,38 +357,100 @@ def send_tuya_cloud_command(
 # Firebase update logic
 # ============================================================
 
+def write_command_state(
+    device_id: str,
+    command: Dict[str, Any],
+    updates: Dict[str, Any],
+    remove_pending: bool = False,
+) -> None:
+    command_id = command.get("command_id")
+    if not command_id:
+        return
+
+    updated_command = {
+        **command,
+        **updates,
+    }
+
+    pending_ref = get_pending_command_ref(command_id)
+    if remove_pending:
+        pending_ref.delete()
+    else:
+        pending_ref.update(updates)
+
+    get_command_history_ref(command_id).set(updated_command)
+    get_latest_by_device_ref(device_id).set(updated_command)
+
+    legacy_updates = {
+        **updates,
+        "action": action_for_command(command),
+    }
+    get_command_ref(device_id).update(legacy_updates)
+
+
+def mark_command_sent(device_id: str, command: Dict[str, Any]) -> Dict[str, Any]:
+    sent_at = now_ms()
+    updates = {
+        "status": "sent",
+        "sent_at_ms": sent_at,
+        "sent_at_iso": readable_iso(),
+    }
+    write_command_state(device_id, command, updates)
+    return {**command, **updates}
+
+
 def mark_command_done(
     device_id: str,
     command: Dict[str, Any],
     relay_on: bool,
 ) -> None:
     command_id = command["command_id"]
-    executed_at = now_ms()
+    confirmed_at = now_ms()
     readable = readable_time()
+    state = "on" if relay_on else "off"
+    message = command_message(device_id, state)
 
-    updated_command = {
-        **command,
-        "status": "done",
-        "executed_at": executed_at,
+    updates = {
+        "status": "confirmed",
+        "confirmed_at_ms": confirmed_at,
+        "confirmed_at_iso": readable_iso(),
+        "executed_at": confirmed_at,
         "executed_readable_time": readable,
+        "result": {
+            **command.get("result", {}),
+            "success": True,
+            "actual_state": state,
+            "error_code": None,
+            "user_message": message,
+            "raw_error": None,
+        },
     }
 
-    get_command_ref(device_id).update(
+    write_command_state(device_id, command, updates, remove_pending=True)
+
+    get_device_ref(device_id).update(
         {
-            "status": "done",
-            "executed_at": executed_at,
-            "executed_readable_time": readable,
+            "state": state,
+            "command_in_progress": False,
+            "pending_command_id": None,
+            "pending_target_state": None,
+            "last_requested_state": state,
+            "last_command_status": "confirmed",
+            "last_command_message": message,
+            "last_command": {
+                "status": "confirmed",
+                "user_message": message,
+                "error_code": None,
+            },
         }
     )
-
-    get_command_history_ref(command_id).set(updated_command)
 
     get_device_status_ref(device_id).update(
         {
             "switch": relay_on,
-            "relay_status": "on" if relay_on else "off",
+            "relay_status": state,
             "online": True,
-            "lastSeenMs": executed_at,
+            "lastSeenMs": confirmed_at,
             "readableTime": readable,
             "last_command_id": command_id,
         }
@@ -305,59 +461,160 @@ def mark_command_failed(
     device_id: str,
     command: Dict[str, Any],
     error_message: str,
+    actual_state: str | None = None,
+    status: str = "failed",
 ) -> None:
     command_id = command.get("command_id", f"unknown_{now_ms()}")
-    executed_at = now_ms()
+    failed_at = now_ms()
     readable = readable_time()
+    mapped = friendly_error(error_message)
+    state_update = actual_state or command.get("previous_state")
 
-    failed_command = {
-        **command,
-        "status": "failed",
-        "error": error_message,
-        "executed_at": executed_at,
+    updates = {
+        "status": status,
+        "error": mapped["user_message"],
+        "failed_at_ms": failed_at if status == "failed" else command.get("failed_at_ms"),
+        "failed_at_iso": readable_iso() if status == "failed" else command.get("failed_at_iso"),
+        "timeout_at_ms": failed_at if status == "timeout" else command.get("timeout_at_ms"),
+        "timeout_at_iso": readable_iso() if status == "timeout" else command.get("timeout_at_iso"),
+        "executed_at": failed_at,
         "executed_readable_time": readable,
+        "result": {
+            **command.get("result", {}),
+            "success": False,
+            "actual_state": state_update,
+            "error_code": mapped["error_code"],
+            "user_message": mapped["user_message"],
+            "raw_error": error_message,
+        },
     }
 
-    get_command_ref(device_id).update(
-        {
-            "status": "failed",
-            "error": error_message,
-            "executed_at": executed_at,
-            "executed_readable_time": readable,
-        }
-    )
+    write_command_state(device_id, command, updates, remove_pending=True)
 
-    get_command_history_ref(command_id).set(failed_command)
+    device_updates = {
+        "command_in_progress": False,
+        "pending_command_id": None,
+        "pending_target_state": None,
+        "last_command_status": status,
+        "last_command_message": mapped["user_message"],
+        "last_command": {
+            "status": status,
+            "user_message": mapped["user_message"],
+            "error_code": mapped["error_code"],
+        },
+    }
+    if state_update in {"on", "off", "unknown"}:
+        device_updates["state"] = state_update
+
+    get_device_ref(device_id).update(device_updates)
 
     get_device_status_ref(device_id).update(
         {
-            "lastSeenMs": executed_at,
+            "lastSeenMs": failed_at,
             "readableTime": readable,
-            "last_error": error_message,
+            "last_error": mapped["user_message"],
             "last_command_id": command_id,
         }
     )
+
+
+def mark_command_cancelled(
+    device_id: str,
+    command: Dict[str, Any],
+    message: str,
+) -> None:
+    cancelled_at = now_ms()
+    updates = {
+        "status": "cancelled",
+        "cancelled_at_ms": cancelled_at,
+        "cancelled_at_iso": readable_iso(),
+        "result": {
+            **command.get("result", {}),
+            "success": False,
+            "actual_state": command.get("previous_state"),
+            "error_code": "COMMAND_CANCELLED",
+            "user_message": message,
+            "raw_error": None,
+        },
+    }
+    write_command_state(device_id, command, updates, remove_pending=True)
+
+    current = get_device_ref(device_id).get()
+    should_clear_device = not isinstance(current, dict) or current.get(
+        "pending_command_id"
+    ) == command.get("command_id")
+    if should_clear_device:
+        get_device_ref(device_id).update(
+            {
+                "command_in_progress": False,
+                "pending_command_id": None,
+                "pending_target_state": None,
+                "last_command_status": "cancelled",
+                "last_command_message": message,
+                "last_command": {
+                    "status": "cancelled",
+                    "user_message": message,
+                    "error_code": "COMMAND_CANCELLED",
+                },
+            }
+        )
+
+
+def clear_stuck_command_state(device_id: str, command: Dict[str, Any]) -> None:
+    current = get_device_ref(device_id).get()
+    if isinstance(current, dict) and current.get("pending_command_id") == command.get("command_id"):
+        get_device_ref(device_id).update(
+            {
+                "command_in_progress": False,
+                "pending_command_id": None,
+                "pending_target_state": None,
+            }
+        )
 
 
 # ============================================================
 # Main command processor
 # ============================================================
 
-def process_device_command(cloud, device_id: str) -> None:
-    command_ref = get_command_ref(device_id)
-    command = command_ref.get()
+def process_device_command(cloud, device_id: str, command: Dict[str, Any]) -> None:
+    if not command:
+        return
+
+    if is_stale_command(command):
+        if command.get("status") == "pending":
+            print(
+                f"[COMMAND] Cancelling stale pending command: "
+                f"{device_id} {command.get('command_id')}"
+            )
+            mark_command_cancelled(
+                device_id,
+                command,
+                "Old pending command was cancelled and was not sent to the breaker.",
+            )
+        return
 
     if not is_valid_command(command, device_id):
         return
 
+    current_device = get_device_ref(device_id).get()
+    if isinstance(current_device, dict):
+        pending_command_id = current_device.get("pending_command_id")
+        if pending_command_id and pending_command_id != command.get("command_id"):
+            print(
+                f"[COMMAND] Ignoring unclaimed command for {device_id}: "
+                f"{command.get('command_id')}"
+            )
+            return
+
     command_id = command["command_id"]
-    action = command["action"]
+    action = action_for_command(command)
 
     print(f"[COMMAND] Pending command found: {device_id} {action} {command_id}")
 
     try:
         relay_on = action == "turn_on"
 
+        command = mark_command_sent(device_id, command)
         success = send_tuya_cloud_command(cloud, device_id, action)
 
         if success:
@@ -368,6 +625,7 @@ def process_device_command(cloud, device_id: str) -> None:
                 device_id,
                 command,
                 "Tuya Cloud command returned unsuccessful result",
+                actual_state=command.get("previous_state"),
             )
             print(f"[FAILED] {device_id} {action}")
 
@@ -376,7 +634,39 @@ def process_device_command(cloud, device_id: str) -> None:
         print(f"[ERROR] {device_id}: {error_message}")
         traceback.print_exc()
 
-        mark_command_failed(device_id, command, error_message)
+        actual_state = command.get("previous_state")
+        try:
+            config = DEVICES.get(device_id, {})
+            status = fetch_tuya_status(cloud, config["tuya_device_id"])
+            raw_switch = status.get(config.get("command_code", "switch"))
+            if raw_switch is None:
+                raw_switch = status.get("switch")
+            if raw_switch is True:
+                actual_state = "on"
+            elif raw_switch is False:
+                actual_state = "off"
+        except Exception:
+            pass
+
+        mark_command_failed(device_id, command, error_message, actual_state=actual_state)
+    finally:
+        clear_stuck_command_state(device_id, command)
+
+
+def process_pending_commands(cloud) -> None:
+    pending = get_pending_commands_ref().get()
+    if isinstance(pending, dict) and pending:
+        for _, command in pending.items():
+            if not isinstance(command, dict):
+                continue
+            device_id = str(command.get("device_id", ""))
+            process_device_command(cloud, device_id, command)
+        return
+
+    # Backward compatibility: older clients wrote only /commands/{device_id}/latest.
+    for device_id in DEVICES.keys():
+        command = get_command_ref(device_id).get()
+        process_device_command(cloud, device_id, command)
 
 
 def run_controller() -> None:
@@ -394,9 +684,7 @@ def run_controller() -> None:
     print("======================================")
 
     while True:
-        for device_id in DEVICES.keys():
-            process_device_command(cloud, device_id)
-
+        process_pending_commands(cloud)
         time.sleep(POLL_INTERVAL_SECONDS)
 
 

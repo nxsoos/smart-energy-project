@@ -120,18 +120,38 @@ def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]
     metering = as_dict(device.get("metering"))
     switch = normalize_bool(status.get("switch"))
     relay_status = status.get("relay_status")
-    state = "on" if switch is True else "off" if switch is False else relay_status or "unknown"
+    state = (
+        str(device.get("state")).lower()
+        if device.get("state") in {"on", "off", "unknown"}
+        else "on" if switch is True else "off" if switch is False else relay_status or "unknown"
+    )
+    command_in_progress = bool(normalize_bool(device.get("command_in_progress")))
+    pending_target_state = device.get("pending_target_state")
+    if pending_target_state not in {"on", "off"}:
+        pending_target_state = None
+    display_state = pending_target_state if command_in_progress and pending_target_state else state
 
     return {
         "device_id": device_id,
         "name": device.get("name", device_id),
         "type": device.get("type", "unknown"),
         "online": bool(normalize_bool(status.get("online"))),
+        "controllable": normalize_bool(device.get("controllable")) is not False,
         "state": state,
+        "display_state": display_state,
         "power_w": metering.get("power_W", 0),
         "today_kwh": metering.get("energy_kWh", 0),
         "today_cost_bhd": metering.get("cost_BHD", 0),
         "last_seen_ms": status.get("lastSeenMs"),
+        "command_in_progress": command_in_progress,
+        "pending_command_id": device.get("pending_command_id"),
+        "pending_target_state": pending_target_state,
+        "last_requested_state": device.get("last_requested_state"),
+        "last_command": {
+            "status": device.get("last_command_status"),
+            "user_message": device.get("last_command_message"),
+            "error_code": as_dict(device.get("last_command")).get("error_code"),
+        },
     }
 
 
@@ -230,23 +250,34 @@ def send_command():
         )
         result = response.json()
         if not response.ok:
+            detail = result.get("detail", "Command failed")
+            if isinstance(detail, dict):
+                detail = detail.get("message", "Command failed")
             return (
                 jsonify(
                     {
                         "success": False,
-                        "message": result.get("detail", "Command failed"),
+                        "message": detail,
                     }
                 ),
                 response.status_code,
             )
 
-        print(
-            f"[DASHBOARD] Command sent through API: {device_id} {action}",
-            flush=True,
-        )
+        if result.get("no_action") is True:
+            print(
+                f"[DASHBOARD] No command needed: {device_id} {action}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[DASHBOARD] Command accepted through API: {device_id} {action}",
+                flush=True,
+            )
         return jsonify(
             {
                 "success": True,
+                "no_action": bool(result.get("no_action")),
+                "status": result.get("status"),
                 "message": result.get("message", "Command sent"),
                 "command_id": result.get("command_id"),
             }

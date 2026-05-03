@@ -83,16 +83,18 @@ def normalize_status(result):
     }
 
 def build_device_payload(breaker_name, device_id, data):
+    online_raw = data.get("online_state")
     return {
         "type": "smart_breaker",
         "name": breaker_name,
         "tuya_device_id": device_id,
         "status": {
-            "online": data.get("online_state") == "online",
+            "online": online_raw != "offline",
             "switch": data.get("switch"),
             "relay_status": data.get("relay_status"),
             "fault": data.get("fault"),
-            "lastSeen": data.get("timestamp")
+            "lastSeen": data.get("timestamp"),
+            "lastSeenMs": data.get("timestamp"),
         },
         "metering": {
             "voltage_V": data.get("voltage_V"),
@@ -112,6 +114,7 @@ def build_device_payload(breaker_name, device_id, data):
 def build_history_payload(data):
     return {
         "timestamp": data.get("timestamp"),
+        "timestamp_ms": data.get("timestamp"),
         "switch": data.get("switch"),
         "online_state": data.get("online_state"),
         "relay_status": data.get("relay_status"),
@@ -132,7 +135,7 @@ def build_history_payload(data):
 def write_device_latest(firebase_key, breaker_name, device_id, data):
     payload = build_device_payload(breaker_name, device_id, data)
     url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/devices/{firebase_key}.json"
-    r = requests.put(url, json=payload, timeout=15)
+    r = requests.patch(url, json=payload, timeout=15)
     r.raise_for_status()
 
 def write_device_history(firebase_key, data):

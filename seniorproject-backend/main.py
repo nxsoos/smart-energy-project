@@ -107,6 +107,13 @@ def as_number(value: Any, default: float = 0.0) -> float:
     return float(default)
 
 
+def first_present(*values: Any, default: Any = None) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return default
+
+
 def get_time_features(summary: dict[str, Any]) -> dict[str, Any]:
     timestamp_ms = summary.get("hour_start")
 
@@ -433,8 +440,10 @@ def build_ai_payload(
             detail=f"No usable Firebase backend data found for home_id '{home_id}'.",
         )
 
-    energy = latest_summary.get("energy")
-    if not isinstance(energy, dict):
+    summary_energy = latest_summary.get("energy")
+    if isinstance(summary_energy, dict):
+        energy = {**dashboard_energy, **summary_energy}
+    else:
         energy = dashboard_energy
 
     branches = energy.get("branches")
@@ -457,9 +466,19 @@ def build_ai_payload(
     if not using_hourly_summary:
         motion_count = 1.0 if dashboard_environment.get("motion") == 1 else 0.0
 
-    temperature = latest_summary.get("avg_temperature", dashboard_environment.get("temperature"))
-    humidity = latest_summary.get("avg_humidity", dashboard_environment.get("humidity"))
-    sound_raw = latest_summary.get("avg_sound_raw", dashboard_environment.get("sound_raw"))
+    temperature = first_present(
+        latest_summary.get("avg_temperature"),
+        dashboard_environment.get("temperature"),
+    )
+    humidity = first_present(
+        latest_summary.get("avg_humidity"),
+        dashboard_environment.get("humidity"),
+    )
+    sound_raw = first_present(
+        latest_summary.get("avg_sound_raw"),
+        dashboard_environment.get("sound_raw"),
+        dashboard_environment.get("sound_level"),
+    )
     light_is_bright = dashboard_environment.get("light_status") == "Bright"
 
     noise_count = (
@@ -503,16 +522,22 @@ def build_ai_payload(
         "ac_peak_power_W": ac_branch["peak_power_W"],
         "ac_energy_kWh": ac_branch["energy_kWh"],
         "total_avg_power_W": as_number(
-            energy.get("total_avg_power_W", energy.get("total_power_W"))
+            first_present(energy.get("total_avg_power_W"), energy.get("total_power_W"))
         ),
         "total_peak_power_W": as_number(
-            energy.get("total_peak_power_W", energy.get("total_power_W"))
+            first_present(energy.get("total_peak_power_W"), energy.get("total_power_W"))
         ),
         "total_energy_kWh": as_number(
-            energy.get("total_estimated_energy_kWh", energy.get("total_energy_kWh"))
+            first_present(
+                energy.get("total_estimated_energy_kWh"),
+                energy.get("total_energy_kWh"),
+            )
         ),
         "total_cost_BHD": as_number(
-            energy.get("total_estimated_cost_BHD", energy.get("total_cost_BHD"))
+            first_present(
+                energy.get("total_estimated_cost_BHD"),
+                energy.get("total_cost_BHD"),
+            )
         ),
         "tariff_BHD_per_kWh": as_number(energy.get("tariff_BHD_per_kWh"), 0.032),
     }

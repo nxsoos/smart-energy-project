@@ -14,9 +14,7 @@ SCRIPTS = [
     "firebase_tuya_cloud_controller.py",
     "esp32_sensor_receiver.py",
     "dashboard_server.py",
-    # Enable this only if the hub must continuously copy Tuya metering/status
-    # into Firebase history in addition to processing breaker commands.
-    # "tuya_breakers_to_firebase.py",
+    "tuya_breakers_to_firebase.py",
 ]
 
 

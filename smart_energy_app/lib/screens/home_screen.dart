@@ -340,6 +340,22 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
+    if (!device.online || !device.controllable) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Device is offline. Check power or Wi-Fi connection.'),
+        ),
+      );
+      return;
+    }
+
+    if (!device.commandInProgress && device.isOn == value) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Already ${value ? 'on' : 'off'}.')),
+      );
+      return;
+    }
+
     await _sendDeviceCommand(device.id, value ? 'turn_on' : 'turn_off');
   }
 
@@ -350,7 +366,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      await _firebaseRealtimeService.sendDeviceCommand(
+      final result = await _firebaseRealtimeService.sendDeviceCommand(
         deviceId,
         action,
         homeId: _selectedHomeId,
@@ -359,13 +375,26 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            '${action == 'turn_on' ? 'Turn on' : 'Turn off'} command sent.',
-          ),
-        ),
-      );
+      if (result.noAction) {
+        setState(() {
+          if (result.status == 'command_already_in_progress') {
+            _pendingDeviceCommands.add(deviceId);
+          } else {
+            _pendingDeviceCommands.remove(deviceId);
+          }
+        });
+        if (result.message.trim().isNotEmpty &&
+            result.status != 'command_already_in_progress') {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(result.message)));
+        }
+        return;
+      }
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Command accepted.')));
     } catch (_) {
       if (!mounted) {
         return;
@@ -492,6 +521,10 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final index = _devices.indexWhere((device) => device.id == deviceId);
+    if (_pendingDeviceCommands.contains(deviceId) ||
+        (index != -1 && _devices[index].commandInProgress)) {
+      return;
+    }
     if (index == -1 || _devices[index].isOn == isOn) {
       return;
     }
@@ -1241,9 +1274,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       onToggle: _deviceControlEnabled
                           ? (value) => _toggleDevice(device, value)
                           : null,
-                      isCommandPending: _pendingDeviceCommands.contains(
-                        device.id,
-                      ),
+                      isCommandPending:
+                          _pendingDeviceCommands.contains(device.id) ||
+                          device.commandInProgress,
                       commandError: _deviceCommandErrors[device.id],
                       onTap: () {
                         // TODO: Navigate to device details

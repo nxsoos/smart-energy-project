@@ -47,6 +47,8 @@ class DeviceCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = _getDeviceColor();
+    final controlsDisabled =
+        isCommandPending || !device.online || !device.controllable;
 
     return Card(
       elevation: 2,
@@ -83,7 +85,7 @@ class DeviceCard extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (isCommandPending) ...[
+                  if (isCommandPending || device.commandInProgress) ...[
                     const SizedBox(
                       width: 24,
                       height: 24,
@@ -93,7 +95,7 @@ class DeviceCard extends StatelessWidget {
                   ],
                   Switch(
                     value: device.isOn,
-                    onChanged: isCommandPending ? null : onToggle,
+                    onChanged: controlsDisabled ? null : onToggle,
                     activeThumbColor: color,
                   ),
                 ],
@@ -130,11 +132,22 @@ class DeviceCard extends StatelessWidget {
                   ],
                 ),
               ),
-              if (isCommandPending) ...[
+              if (isCommandPending || device.commandInProgress) ...[
                 const SizedBox(height: 10),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(999),
                   child: const LinearProgressIndicator(minHeight: 3),
+                ),
+              ],
+              if (!device.online || !device.controllable) ...[
+                const SizedBox(height: 10),
+                Text(
+                  !device.online ? 'Offline' : 'Control disabled',
+                  style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ],
               if (commandError != null && commandError!.isNotEmpty) ...[

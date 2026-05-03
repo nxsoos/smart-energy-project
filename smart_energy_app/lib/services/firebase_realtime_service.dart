@@ -67,9 +67,9 @@ class DeviceCommandState {
   final String action;
   final String? error;
 
-  bool get isPending => status == 'pending';
-  bool get isDone => status == 'done';
-  bool get isFailed => status == 'failed';
+  bool get isPending => status == 'pending' || status == 'sent';
+  bool get isDone => status == 'done' || status == 'confirmed';
+  bool get isFailed => status == 'failed' || status == 'timeout';
 
   bool? get desiredSwitchState {
     if (!isPending) {
@@ -83,6 +83,22 @@ class DeviceCommandState {
     }
     return null;
   }
+}
+
+class DeviceCommandResult {
+  const DeviceCommandResult({
+    required this.success,
+    required this.noAction,
+    required this.status,
+    required this.message,
+    this.commandId,
+  });
+
+  final bool success;
+  final bool noAction;
+  final String status;
+  final String message;
+  final String? commandId;
 }
 
 class FirebaseRealtimeService {
@@ -239,6 +255,7 @@ class FirebaseRealtimeService {
     final alerts = _asList(data['alerts']);
     final recommendations = _asList(data['recommendations']);
     final ai = _asMap(data['ai']);
+    final aiDailySummary = _asMap(data['ai_daily_summary']);
 
     final parsedDevices = devicesMap.entries
         .map((entry) => _parseApiDevice(entry.key, _asMap(entry.value)))
@@ -250,12 +267,25 @@ class FirebaseRealtimeService {
         .toList();
 
     final pendingCommands = <String>{};
+    final commandErrors = <String, String>{};
     for (final entry in devicesMap.entries) {
+      final device = _asMap(entry.value);
       final commandState = _asString(
-        _pick(_asMap(entry.value), ['command_status']),
-      );
-      if (commandState.toLowerCase() == 'pending') {
+        _pick(device, ['last_command_status', 'command_status']),
+      ).toLowerCase();
+      if (_asBool(_pick(device, ['command_in_progress'])) ||
+          commandState == 'pending' ||
+          commandState == 'sent') {
         pendingCommands.add(entry.key);
+      }
+      if (commandState == 'failed' || commandState == 'timeout') {
+        final message = _asNullableString(
+          _pick(_asMap(device['last_command']), ['user_message']) ??
+              _pick(device, ['last_command_message']),
+        );
+        if (message != null) {
+          commandErrors[entry.key] = message;
+        }
       }
     }
 
@@ -321,9 +351,9 @@ class FirebaseRealtimeService {
           .toList(),
       tariffBhdPerKwh: ElectricityPricing.costPerKWh,
       pendingDeviceCommands: pendingCommands,
-      deviceCommandErrors: const {},
+      deviceCommandErrors: commandErrors,
       aiDashboard: ai.isEmpty ? null : _parseApiAiDashboard(ai, data),
-      aiDailySummary: null,
+      aiDailySummary: _parseAiDailySummary(aiDailySummary),
       aiRecommendation: recommendations.isEmpty
           ? null
           : _parseAiRecommendation(recommendations.first),
@@ -336,16 +366,29 @@ class FirebaseRealtimeService {
   }
 
   Device _parseApiDevice(String deviceId, Map<String, dynamic> data) {
-    final state = _asString(_pick(data, ['state'])).toLowerCase();
+    final displayState = _asString(
+      _pick(data, ['display_state', 'state']),
+    ).toLowerCase();
     final rawType = _asString(_pick(data, ['type']));
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
+    final lastCommand = _asMap(data['last_command']);
     return Device(
       id: _asString(_pick(data, ['device_id', 'id']), fallback: deviceId),
       name: name,
       type: _parseApiDeviceType(deviceId, name, rawType),
-      isOn: state == 'on' || _asBool(_pick(data, ['is_on', 'switch'])),
+      isOn: displayState == 'on' || _asBool(_pick(data, ['is_on', 'switch'])),
       currentPower: _asDouble(_pick(data, ['power_w', 'currentPower'])),
       branch: _branchFromDeviceId(deviceId),
+      online: _asBool(_pick(data, ['online']), fallback: true),
+      controllable: _asBool(_pick(data, ['controllable']), fallback: true),
+      commandInProgress: _asBool(_pick(data, ['command_in_progress'])),
+      pendingTargetState: _asNullableString(
+        _pick(data, ['pending_target_state']),
+      ),
+      lastCommandMessage: _asNullableString(
+        _pick(lastCommand, ['user_message']) ??
+            _pick(data, ['last_command_message']),
+      ),
     );
   }
 
@@ -364,21 +407,42 @@ class FirebaseRealtimeService {
     Map<String, dynamic> ai,
     Map<String, dynamic> root,
   ) {
-    final status = _asString(_pick(ai, ['status']), fallback: 'unknown');
+    final status = _asString(
+      _pick(ai, ['prediction_status', 'status']),
+      fallback: 'unknown',
+    );
+    final abnormalUsage = _pick(ai, ['abnormal_usage']);
+    final energyWaste = _pick(ai, ['energy_waste']);
     return AiDashboardSummary(
-      updatedAt: _asDateTime(_pick(root, ['updated_at_ms', 'updated_at_iso'])),
+      updatedAt: _asDateTime(
+        _pick(ai, ['updated_at']) ??
+            _pick(root, ['updated_at_ms', 'updated_at_iso']),
+      ),
       source: 'Smart Energy API',
       modelName: '',
       modelVersion: '',
       inputSource: 'backend_api',
-      energyWaste: status != 'normal' && status != 'unknown',
-      wasteConfidence: _asDouble(_pick(ai, ['confidence'])),
-      abnormalUsage: status != 'normal' && status != 'unknown',
-      abnormalUsageConfidence: _asDouble(_pick(ai, ['confidence'])),
-      recommendationType: _asString(_pick(ai, ['recommended_action'])),
-      nextHourEnergyKwh: 0,
-      nextHourCostBhd: 0,
-      efficiencyScore: 0,
+      energyWaste: energyWaste != null
+          ? _asBool(energyWaste)
+          : status != 'normal' && status != 'unknown',
+      wasteConfidence: _asDouble(_pick(ai, ['waste_confidence', 'confidence'])),
+      abnormalUsage: abnormalUsage != null
+          ? _asString(abnormalUsage).toLowerCase() != 'normal' &&
+                _asString(abnormalUsage).isNotEmpty
+          : status != 'normal' && status != 'unknown',
+      abnormalUsageConfidence: _asDouble(
+        _pick(ai, ['abnormal_usage_confidence', 'confidence']),
+      ),
+      recommendationType: _asString(
+        _pick(ai, ['recommendation_type', 'recommended_action']),
+      ),
+      nextHourEnergyKwh: _asDouble(
+        _pick(ai, ['next_hour_energy_kWh', 'next_hour_energy']),
+      ),
+      nextHourCostBhd: _asDouble(
+        _pick(ai, ['next_hour_cost_BHD', 'next_hour_cost']),
+      ),
+      efficiencyScore: _asDouble(_pick(ai, ['efficiency_score'])),
       explanation: _asString(
         _pick(ai, ['summary']),
         fallback: 'AI analysis is not available yet.',
@@ -468,7 +532,11 @@ class FirebaseRealtimeService {
           .where((entry) => entry.value.isPending)
           .map((entry) => entry.key)
           .toSet(),
-      deviceCommandErrors: const {},
+      deviceCommandErrors: Map.fromEntries(
+        commandStates.entries
+            .where((entry) => entry.value.isFailed && entry.value.error != null)
+            .map((entry) => MapEntry(entry.key, entry.value.error!)),
+      ),
       aiDashboard: _parseAiDashboard(_asMap(backendDashboard['ai'])),
       aiDailySummary: _parseAiDailySummary(_asMap(backendAi['daily_summary'])),
       aiRecommendation: _parseAiRecommendation(
@@ -540,7 +608,7 @@ class FirebaseRealtimeService {
     ];
   }
 
-  Future<void> sendDeviceCommand(
+  Future<DeviceCommandResult> sendDeviceCommand(
     String deviceId,
     String action, {
     required String homeId,
@@ -562,11 +630,29 @@ class FirebaseRealtimeService {
     }
 
     try {
-      await _dio.post(
+      final response = await _dio.post(
         '/api/home/$homeId/devices/$deviceId/command',
         data: {'command': action, 'requested_by': 'flutter_app'},
       );
-    } catch (_) {
+      final data = _asMap(response.data);
+      return DeviceCommandResult(
+        success: _asBool(_pick(data, ['success']), fallback: true),
+        noAction: _asBool(_pick(data, ['no_action'])),
+        status: _asString(_pick(data, ['status'])),
+        message: _asString(_pick(data, ['message'])),
+        commandId: _asNullableString(_pick(data, ['command_id'])),
+      );
+    } catch (error) {
+      if (error is DioException && error.response != null) {
+        final data = _asMap(error.response?.data);
+        final detail = _asMap(data['detail']);
+        final message = _asString(
+          _pick(detail, ['message']) ?? _pick(data, ['message', 'detail']),
+          fallback: 'Could not send command. Please try again.',
+        );
+        throw Exception(message);
+      }
+
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       final timestampMs = nowMs <= _lastCommandTimestampMs
           ? _lastCommandTimestampMs + 1
@@ -577,10 +663,19 @@ class FirebaseRealtimeService {
         'command_id': 'cmd_$timestampMs',
         'device_id': deviceId,
         'action': action,
+        'command': action,
+        'target_state': action == 'turn_on' ? 'on' : 'off',
         'status': 'pending',
         'requested_by': 'mobile_app',
         'created_at': timestampMs,
       });
+      return DeviceCommandResult(
+        success: true,
+        noAction: false,
+        status: 'pending',
+        message: 'Command accepted.',
+        commandId: 'cmd_$timestampMs',
+      );
     }
   }
 
@@ -601,8 +696,11 @@ class FirebaseRealtimeService {
       final command = _asMap(event.snapshot.value);
       return DeviceCommandState(
         status: _asString(_pick(command, ['status'])).toLowerCase(),
-        action: _asString(_pick(command, ['action'])).toLowerCase(),
-        error: _asNullableString(_pick(command, ['error'])),
+        action: _asString(_pick(command, ['action', 'command'])).toLowerCase(),
+        error: _asNullableString(
+          _pick(command, ['error']) ??
+              _pick(_asMap(command['result']), ['user_message']),
+        ),
       );
     });
   }
@@ -995,7 +1093,17 @@ class FirebaseRealtimeService {
       final metering = _asMap(data['metering']);
       final status = _asMap(data['status']);
       final commandState = commandStates[entry.key];
-      final desiredSwitchState = commandState?.desiredSwitchState;
+      final pendingTargetState = _asNullableString(
+        _pick(data, ['pending_target_state']),
+      );
+      final commandInProgress =
+          _asBool(_pick(data, ['command_in_progress'])) ||
+          commandState?.isPending == true;
+      final desiredSwitchState = pendingTargetState == 'on'
+          ? true
+          : pendingTargetState == 'off'
+          ? false
+          : commandState?.desiredSwitchState;
       final actualSwitchState = _asBool(
         _pick(status, ['switch', 'on', 'relay_status']) ??
             _pick(data, ['isOn', 'on', 'switch', 'relay_status']),
@@ -1017,6 +1125,13 @@ class FirebaseRealtimeService {
           branch:
               _pick(data, ['branch', 'zone'])?.toString() ??
               _branchFromDeviceId(entry.key),
+          online: _asBool(_pick(status, ['online']), fallback: true),
+          controllable: _asBool(_pick(data, ['controllable']), fallback: true),
+          commandInProgress: commandInProgress,
+          pendingTargetState: pendingTargetState,
+          lastCommandMessage:
+              _asNullableString(_pick(data, ['last_command_message'])) ??
+              commandState?.error,
         ),
       );
     }
@@ -1037,8 +1152,11 @@ class FirebaseRealtimeService {
 
       result[entry.key] = DeviceCommandState(
         status: _asString(_pick(command, ['status'])).toLowerCase(),
-        action: _asString(_pick(command, ['action'])).toLowerCase(),
-        error: _asNullableString(_pick(command, ['error'])),
+        action: _asString(_pick(command, ['action', 'command'])).toLowerCase(),
+        error: _asNullableString(
+          _pick(command, ['error']) ??
+              _pick(_asMap(command['result']), ['user_message']),
+        ),
       );
     }
 

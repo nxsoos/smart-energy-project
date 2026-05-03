@@ -163,7 +163,7 @@ function updateSensors(dashboard) {
 }
 
 function breakerStatus(device) {
-  const status = nested(device, ["state", "status.switch", "switch", "isOn", "on"]);
+  const status = nested(device, ["display_state", "state", "status.switch", "switch", "isOn", "on"]);
   const relay = nested(device, ["status.relay_status", "relay_status"]);
   if (status === true || status === "true" || status === "on" || relay === "on") {
     return "ON";
@@ -176,11 +176,31 @@ function breakerStatus(device) {
 
 function updateBreakers(devices) {
   for (const id of ["breaker_01", "breaker_02"]) {
+    const device = devices[id] || {};
     const element = document.getElementById(`${id}_status`);
-    const status = breakerStatus(devices[id] || {});
-    element.textContent = status;
+    const card = document.querySelector(`.breaker[data-device-id="${id}"]`);
+    const buttons = document.querySelectorAll(`button[data-device-id="${id}"]`);
+    const inProgress = nested(device, ["command_in_progress"], false) === true;
+    const online = nested(device, ["online"], false) === true;
+    const controllable = nested(device, ["controllable"], true) !== false;
+    const pendingTarget = nested(device, ["pending_target_state"], null);
+    const lastCommand = nested(device, ["last_command.user_message", "last_command_message"], "");
+    const status = breakerStatus(device);
+    element.textContent = inProgress && pendingTarget ? `${status} - Processing` : status;
     element.style.background = status === "ON" ? "#dff5eb" : status === "OFF" ? "#ffe5e5" : "#edf2f0";
     element.style.color = status === "ON" ? "#157a4f" : status === "OFF" ? "#c63434" : "#66736d";
+    card?.classList.toggle("breaker-pending", inProgress);
+    card?.classList.toggle("breaker-disabled", !online || !controllable);
+    buttons.forEach((button) => {
+      button.disabled = inProgress || !online || !controllable;
+    });
+    if (!online) {
+      element.textContent = "Offline";
+    } else if (!controllable) {
+      element.textContent = "Disabled";
+    } else if (!inProgress && lastCommand) {
+      element.title = lastCommand;
+    }
   }
 }
 
@@ -231,7 +251,15 @@ async function fetchLatest() {
 }
 
 async function sendCommand(deviceId, action) {
-  ids.commandMessage.textContent = "Sending command...";
+  const device = nested(state.lastData || {}, [`devices.${deviceId}`], {});
+  const currentState = nested(device, ["display_state", "state"], "unknown");
+  const targetState = action === "turn_on" ? "on" : "off";
+  if (currentState === targetState && nested(device, ["command_in_progress"], false) !== true) {
+    ids.commandMessage.textContent = `Already ${targetState}`;
+    return;
+  }
+
+  ids.commandMessage.textContent = "Processing command...";
   try {
     const response = await fetch("/api/command", {
       method: "POST",
@@ -247,7 +275,7 @@ async function sendCommand(deviceId, action) {
     if (!response.ok || !data.success) {
       throw new Error(data.message || "Command failed");
     }
-    ids.commandMessage.textContent = `${deviceId} command sent`;
+    ids.commandMessage.textContent = data.no_action ? data.message || `Already ${targetState}` : "Command accepted";
     await fetchLatest();
   } catch (error) {
     ids.commandMessage.textContent = `Command failed: ${error.message}`;
