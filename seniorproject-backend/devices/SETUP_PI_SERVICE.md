@@ -4,6 +4,7 @@ Final data flow:
 
 ```text
 ESP32 sensors -> HTTP POST -> Raspberry Pi Flask server -> Firebase Realtime Database
+Flutter/Pi dashboard -> Cloud Run API server -> Firebase Realtime Database
 ```
 
 The Raspberry Pi preserves the original Firebase layout used by the app:
@@ -27,7 +28,9 @@ Required files:
 main.py
 firebase_tuya_cloud_controller.py
 esp32_sensor_receiver.py
+dashboard_server.py
 tuya_breakers_to_firebase.py
+requirements-ai.txt
 serviceAccountKey.json
 smart-energy-hub.service
 venv/
@@ -65,6 +68,25 @@ The ESP32 posts sensor JSON to:
 
 ```text
 http://10.220.38.94:5000/api/sensors/room1
+```
+
+## UI API Endpoints
+
+The shared FastAPI backend API runs on Cloud Run:
+
+```text
+https://smart-energy-api-qs7uzdqawq-as.a.run.app/api/health
+https://smart-energy-api-qs7uzdqawq-as.a.run.app/api/home/home_001/dashboard
+https://smart-energy-api-qs7uzdqawq-as.a.run.app/api/home/home_001/devices/breaker_01/command
+```
+
+The local touchscreen dashboard still runs on port `5001`, but it now gets
+AI/summary data and sends breaker commands through the Cloud Run API layer.
+It still overlays fast-changing sensor/device values directly from Firebase for
+a live local display:
+
+```text
+http://<pi-ip>:5001
 ```
 
 If the Pi is connected through a phone hotspot, this IP address may change.

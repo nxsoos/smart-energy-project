@@ -2,11 +2,14 @@ const state = {
   lastData: null,
 };
 
+const SENSOR_STALE_AFTER_MS = 2 * 60 * 1000;
+
 const ids = {
   status: document.getElementById("systemStatus"),
   lastUpdated: document.getElementById("lastUpdated"),
   commandMessage: document.getElementById("commandMessage"),
   suggestionText: document.getElementById("suggestionText"),
+  sensorBanner: document.getElementById("sensorBanner"),
   temperature: document.getElementById("temperature"),
   humidity: document.getElementById("humidity"),
   aqi: document.getElementById("aqi"),
@@ -45,6 +48,55 @@ function formatNumber(value, suffix = "", decimals = 1) {
   return `${number.toFixed(decimals)}${suffix}`;
 }
 
+function formatTimestamp(value) {
+  if (!value) {
+    return null;
+  }
+  if (typeof value === "number") {
+    return new Date(value).toLocaleString();
+  }
+  return String(value);
+}
+
+function timestampMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber)) {
+      return asNumber;
+    }
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function isSensorOnline(room) {
+  const rawTimestamp = nested(room, ["sensor_timestamp_ms", "sensor_timestamp_iso"]);
+  const lastSeenMs = timestampMs(rawTimestamp);
+  const isFresh = lastSeenMs !== null && Date.now() - lastSeenMs <= SENSOR_STALE_AFTER_MS;
+  return room.feed_online === true && isFresh;
+}
+
+function setMetric(id, value, mode = "normal") {
+  const element = ids[id];
+  element.textContent = value;
+  const card = element.closest(".metric");
+  card.classList.remove("metric-offline", "metric-warning", "metric-good");
+  if (mode !== "normal") {
+    card.classList.add(`metric-${mode}`);
+  }
+}
+
+function setSensorBanner(mode, text) {
+  ids.sensorBanner.textContent = text;
+  ids.sensorBanner.className = `sensor-banner sensor-banner-${mode}`;
+}
+
 function yesNo(value, yesText, noText) {
   if (value === true || value === 1 || value === "1" || value === "true") {
     return yesText;
@@ -60,44 +112,63 @@ function setStatus(mode, text) {
   ids.status.className = `status-pill status-${mode}`;
 }
 
-function updateSensors(esp32) {
-  const temperature = nested(esp32, ["sensors.temperature", "temperature"]);
-  const humidity = nested(esp32, ["sensors.humidity", "humidity"]);
-  const aqi = nested(esp32, ["sensors.aqi", "aqi"]);
-  const eco2 = nested(esp32, ["sensors.eco2", "sensors.eCO2", "eco2", "eCO2"]);
-  const tvoc = nested(esp32, ["sensors.tvoc", "tvoc"]);
-  const lightStatus = nested(esp32, ["sensors.light_status", "light_status"]);
-  const lightRaw = nested(esp32, ["sensors.light_raw", "light_raw"]);
-  const motionText = nested(esp32, ["sensors.motion_text", "motion_text"]);
-  const motion = nested(esp32, ["sensors.motion", "motion"]);
-  const smokeText = nested(esp32, ["sensors.smoke_text", "smoke_text"]);
-  const smoke = nested(esp32, ["sensors.smoke", "smoke"]);
-  const noiseText = nested(esp32, ["sensors.noise_text", "noise_text"]);
-  const noise = nested(esp32, ["sensors.noise", "noise"]);
-  const soundRaw = nested(esp32, ["sensors.sound_raw", "sound_raw"]);
+function updateSensors(dashboard) {
+  const room = dashboard.room || {};
+  const sensorOnline = isSensorOnline(room);
+  const temperature = nested(room, ["temperature"]);
+  const humidity = nested(room, ["humidity"]);
+  const aqi = nested(room, ["aqi"]);
+  const eco2 = nested(room, ["eco2"]);
+  const tvoc = nested(room, ["tvoc"]);
+  const lightStatus = nested(room, ["light_status"]);
+  const lightRaw = nested(room, ["light_raw"]);
+  const motionText = nested(room, ["motion_text"]);
+  const motion = nested(room, ["motion"]);
+  const smokeText = nested(room, ["smoke_text"]);
+  const smoke = nested(room, ["smoke"]);
+  const noiseText = nested(room, ["noise_text"]);
+  const noise = nested(room, ["noise"]);
+  const soundRaw = nested(room, ["sound_level"]);
   const updated =
-    nested(esp32, ["timestamp", "sensors.readable_time", "status.readableTime"]) ||
+    formatTimestamp(nested(room, ["sensor_timestamp_iso", "sensor_timestamp_ms"])) ||
+    nested(dashboard, ["updated_at_iso"]) ||
     "Unknown";
 
-  ids.temperature.textContent = formatNumber(temperature, " C");
-  ids.humidity.textContent = formatNumber(humidity, " %");
-  ids.aqi.textContent = aqi ?? "--";
-  ids.eco2.textContent = formatNumber(eco2, " ppm", 0);
-  ids.tvoc.textContent = formatNumber(tvoc, " ppb", 0);
-  ids.light.textContent = lightStatus || (lightRaw !== null ? String(lightRaw) : "--");
-  ids.motion.textContent = motionText || yesNo(motion, "Motion", "No motion");
-  ids.smoke.textContent = smokeText || yesNo(smoke, "Detected", "Clear");
-  ids.sound.textContent = noiseText || yesNo(noise, "Noise", soundRaw !== null ? String(soundRaw) : "Quiet");
+  if (!sensorOnline) {
+    setSensorBanner("offline", `Sensor feed offline. Last reading: ${updated}`);
+    setMetric("temperature", "Offline", "offline");
+    setMetric("humidity", "Offline", "offline");
+    setMetric("aqi", "Offline", "offline");
+    setMetric("eco2", "Offline", "offline");
+    setMetric("tvoc", "Offline", "offline");
+    setMetric("light", "Offline", "offline");
+    setMetric("motion", "Offline", "offline");
+    setMetric("smoke", "Offline", "offline");
+    setMetric("sound", "Offline", "offline");
+    ids.lastUpdated.textContent = updated;
+    return;
+  }
+
+  setSensorBanner("online", "Live ESP32 sensor feed is updating.");
+  setMetric("temperature", formatNumber(temperature, " C"), Number(temperature) > 27 ? "warning" : "good");
+  setMetric("humidity", formatNumber(humidity, " %"), "good");
+  setMetric("aqi", aqi ?? "--", Number(aqi) > 3 ? "warning" : "good");
+  setMetric("eco2", formatNumber(eco2, " ppm", 0), Number(eco2) > 1000 ? "warning" : "good");
+  setMetric("tvoc", formatNumber(tvoc, " ppb", 0), Number(tvoc) > 220 ? "warning" : "good");
+  setMetric("light", lightStatus || (lightRaw !== null ? String(lightRaw) : "--"), "normal");
+  setMetric("motion", motionText || yesNo(motion, "Motion", "No motion"), "normal");
+  setMetric("smoke", smokeText || yesNo(smoke, "Detected", "Clear"), smoke === true || smoke === 1 ? "warning" : "good");
+  setMetric("sound", noiseText || yesNo(noise, "Noise", soundRaw !== null ? String(soundRaw) : "Quiet"), "normal");
   ids.lastUpdated.textContent = updated;
 }
 
 function breakerStatus(device) {
-  const status = nested(device, ["status.switch", "switch", "isOn", "on"]);
+  const status = nested(device, ["state", "status.switch", "switch", "isOn", "on"]);
   const relay = nested(device, ["status.relay_status", "relay_status"]);
-  if (status === true || status === "true" || relay === "on") {
+  if (status === true || status === "true" || status === "on" || relay === "on") {
     return "ON";
   }
-  if (status === false || status === "false" || relay === "off") {
+  if (status === false || status === "false" || status === "off" || relay === "off") {
     return "OFF";
   }
   return "Unknown";
@@ -113,16 +184,23 @@ function updateBreakers(devices) {
   }
 }
 
-function updateSuggestions(esp32) {
-  const smoke = nested(esp32, ["sensors.smoke", "smoke"], 0);
-  const smokeText = String(nested(esp32, ["sensors.smoke_text", "smoke_text"], "")).toLowerCase();
-  const eco2 = Number(nested(esp32, ["sensors.eco2", "sensors.eCO2", "eco2", "eCO2"], 0));
-  const motion = nested(esp32, ["sensors.motion", "motion"], null);
-  const lightRaw = Number(nested(esp32, ["sensors.light_raw", "light_raw"], 0));
-  const lightText = String(nested(esp32, ["sensors.light_status", "light_status"], "")).toLowerCase();
+function updateSuggestions(dashboard) {
+  const room = dashboard.room || {};
+  const sensorOnline = isSensorOnline(room);
+  const smoke = nested(room, ["smoke"], 0);
+  const smokeText = String(nested(room, ["smoke_text"], "")).toLowerCase();
+  const eco2 = Number(nested(room, ["eco2"], 0));
+  const motion = nested(room, ["motion"], null);
+  const lightRaw = Number(nested(room, ["light_raw"], 0));
+  const lightText = String(nested(room, ["light_status"], "")).toLowerCase();
+  const recommendations = dashboard.recommendations || [];
 
-  if (smoke === 1 || smoke === true || smokeText.includes("detect")) {
+  if (!sensorOnline) {
+    ids.suggestionText.textContent = "The ESP32 sensor feed is offline. Check ESP32 power, Wi-Fi, and the Pi receiver service.";
+  } else if (smoke === 1 || smoke === true || smokeText.includes("detect")) {
     ids.suggestionText.textContent = "Warning: smoke or gas detected. Check the room immediately.";
+  } else if (recommendations.length > 0 && recommendations[0].message) {
+    ids.suggestionText.textContent = recommendations[0].message;
   } else if (eco2 >= 1000) {
     ids.suggestionText.textContent = "eCO2 is high. Ventilate the room or open a window.";
   } else if ((motion === 0 || motion === false) && (lightRaw >= 1000 || lightText.includes("bright"))) {
@@ -140,11 +218,12 @@ async function fetchLatest() {
       throw new Error(data.message || "Failed to load latest data");
     }
 
-    state.lastData = data;
+    const dashboard = data.dashboard || data;
+    state.lastData = dashboard;
     setStatus("online", "Online");
-    updateSensors(data.esp32 || {});
-    updateBreakers(data.devices || {});
-    updateSuggestions(data.esp32 || {});
+    updateSensors(dashboard);
+    updateBreakers(dashboard.devices || {});
+    updateSuggestions(dashboard);
   } catch (error) {
     setStatus("error", "Error");
     ids.commandMessage.textContent = error.message;

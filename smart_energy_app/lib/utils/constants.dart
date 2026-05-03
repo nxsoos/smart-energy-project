@@ -69,13 +69,14 @@ class TimeConstants {
 // Network Configuration
 class NetworkConfig {
   static const String defaultRaspberryPiIP = '192.168.1.100';
-  static const int apiPort = 5000;
+  static const int apiPort = 8000;
   static const int mqttPort = 1883;
   static const String firebaseRealtimeDatabaseUrl =
       AppConfig.firebaseRealtimeDatabaseUrl;
   static const String firebaseHomeId = AppConfig.firebaseHomeId;
+  static const String backendApiUrl = AppConfig.backendApiUrl;
 
-  static String get apiBaseUrl => 'http://$defaultRaspberryPiIP:$apiPort';
+  static String get apiBaseUrl => backendApiUrl;
   static String get mqttBrokerUrl => defaultRaspberryPiIP;
 
   // MQTT Topics

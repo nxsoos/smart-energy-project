@@ -6,6 +6,11 @@ class AppConfig {
 
   static const String firebaseHomeId = 'home_001';
 
+  static const String backendApiUrl = String.fromEnvironment(
+    'BACKEND_API_URL',
+    defaultValue: 'https://smart-energy-api-qs7uzdqawq-as.a.run.app',
+  );
+
   static const String aiServiceUrl =
       'https://smart-energy-ai-237804589333.asia-southeast1.run.app';
 }

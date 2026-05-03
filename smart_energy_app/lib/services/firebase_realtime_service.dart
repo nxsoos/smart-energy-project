@@ -89,6 +89,13 @@ class FirebaseRealtimeService {
   FirebaseRealtimeService()
     : _dio = Dio(
         BaseOptions(
+          baseUrl: NetworkConfig.apiBaseUrl,
+          connectTimeout: const Duration(seconds: 30),
+          receiveTimeout: const Duration(seconds: 30),
+        ),
+      ),
+      _firebaseDio = Dio(
+        BaseOptions(
           baseUrl: NetworkConfig.firebaseRealtimeDatabaseUrl,
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
@@ -96,6 +103,7 @@ class FirebaseRealtimeService {
       );
 
   final Dio _dio;
+  final Dio _firebaseDio;
   int _lastCommandTimestampMs = 0;
 
   DatabaseReference _firebaseRef(String path) {
@@ -127,12 +135,264 @@ class FirebaseRealtimeService {
     });
   }
 
+  Stream<SensorData> watchLiveSensorData({required String homeId}) {
+    final sensorRef = _firebaseRef('homes/$homeId/devices/esp32_01');
+
+    return sensorRef.onValue.map((event) {
+      final raw = _asMap(event.snapshot.value);
+      if (raw.isEmpty) {
+        throw StateError('No live sensor data found for $homeId.');
+      }
+      return _parseLiveSensorDevice(raw);
+    });
+  }
+
+  SensorData _parseLiveSensorDevice(Map<String, dynamic> raw) {
+    final sensors = _asMap(raw['sensors']);
+    final status = _asMap(raw['status']);
+    final source = {...sensors, ...status};
+
+    return SensorData(
+      timestamp: _asDateTime(
+        _pick(source, [
+          'timestamp_ms',
+          'lastSeenMs',
+          'last_seen_ms',
+          'readable_time',
+          'readableTime',
+          'timestamp',
+        ]),
+      ),
+      temperature: _asDouble(
+        _pick(source, ['temperature', 'latest_temperature']),
+      ),
+      humidity: _asDouble(_pick(source, ['humidity', 'latest_humidity'])),
+      isOccupied: _asBool(_pick(source, ['motion', 'motion_text'])),
+      eco2: _asDouble(_pick(source, ['eco2', 'eCO2'])),
+      tvoc: _asDouble(_pick(source, ['tvoc'])),
+      aqi: _asInt(_pick(source, ['aqi'])),
+      smokeRaw: _asInt(_pick(source, ['smoke_raw', 'smokeRaw'])),
+      lightRaw: _asInt(_pick(source, ['light_raw', 'lightRaw'])),
+      soundRaw: _asInt(_pick(source, ['sound_raw', 'soundRaw'])),
+      noise: _asInt(_pick(source, ['noise'])),
+      noiseStatus: _asString(
+        _pick(source, ['noise_text', 'noiseText']),
+        fallback: 'Unknown',
+      ),
+      lightStatus: _asString(
+        _pick(source, ['light_status', 'lightStatus']),
+        fallback: 'Unknown',
+      ),
+      smokeStatus: _asSmokeStatus(
+        _pick(source, ['smoke_text', 'smokeStatus', 'smoke_status']),
+        _pick(source, ['smoke']),
+        _asInt(_pick(source, ['smoke_raw', 'smokeRaw'])),
+      ),
+      ahtOk: _asBool(_pick(source, ['aht_ok', 'ahtOk']), fallback: true),
+      ens160Ok: _asBool(
+        _pick(source, ['ens160_ok', 'ens160Ok']),
+        fallback: true,
+      ),
+    );
+  }
+
   Future<DashboardData> fetchDashboardData({
     required String homeId,
     String? scenarioId,
     CancelToken? cancelToken,
   }) async {
-    final response = await _dio.get(
+    if (scenarioId != null) {
+      return _fetchDashboardDataFromFirebase(
+        homeId: homeId,
+        scenarioId: scenarioId,
+        cancelToken: cancelToken,
+      );
+    }
+
+    try {
+      final response = await _dio.get(
+        '/api/home/$homeId/dashboard',
+        cancelToken: cancelToken,
+      );
+      final data = _asMap(response.data);
+
+      if (data.isEmpty) {
+        throw Exception('No data found for $homeId.');
+      }
+
+      return _parseApiDashboardData(data, homeId: homeId);
+    } catch (_) {
+      return _fetchDashboardDataFromFirebase(
+        homeId: homeId,
+        cancelToken: cancelToken,
+      );
+    }
+  }
+
+  DashboardData _parseApiDashboardData(
+    Map<String, dynamic> data, {
+    required String homeId,
+  }) {
+    final room = _asMap(data['room']);
+    final energy = _asMap(data['energy']);
+    final devicesMap = _asMap(data['devices']);
+    final alerts = _asList(data['alerts']);
+    final recommendations = _asList(data['recommendations']);
+    final ai = _asMap(data['ai']);
+
+    final parsedDevices = devicesMap.entries
+        .map((entry) => _parseApiDevice(entry.key, _asMap(entry.value)))
+        .where(
+          (device) =>
+              device.type != DeviceType.socket ||
+              device.id.startsWith('breaker_'),
+        )
+        .toList();
+
+    final pendingCommands = <String>{};
+    for (final entry in devicesMap.entries) {
+      final commandState = _asString(
+        _pick(_asMap(entry.value), ['command_status']),
+      );
+      if (commandState.toLowerCase() == 'pending') {
+        pendingCommands.add(entry.key);
+      }
+    }
+
+    return DashboardData(
+      reading: EnergyReading(
+        timestamp: _asDateTime(
+          _pick(data, ['updated_at_ms', 'updated_at_iso']),
+        ),
+        voltage: _asDouble(
+          _pick(energy, ['voltage', 'voltage_v', 'voltage_V']),
+        ),
+        current: _asDouble(
+          _pick(energy, ['current', 'current_a', 'current_A']),
+        ),
+        power: _asDouble(_pick(energy, ['current_power_w', 'total_power_W'])),
+        energyToday: _asDouble(
+          _pick(energy, ['today_kwh', 'total_energy_kWh']),
+        ),
+        energyTotal: _asDouble(
+          _pick(energy, ['today_kwh', 'total_energy_kWh']),
+        ),
+        costToday: _asDouble(
+          _pick(energy, ['today_cost_bhd', 'total_cost_BHD']),
+        ),
+      ),
+      sensors: SensorData(
+        timestamp: _asDateTime(
+          _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) ??
+              _pick(data, ['updated_at_ms', 'updated_at_iso']),
+        ),
+        temperature: _asDouble(_pick(room, ['temperature'])),
+        humidity: _asDouble(_pick(room, ['humidity'])),
+        isOccupied: _asBool(_pick(room, ['motion'])),
+        eco2: _asDouble(_pick(room, ['eco2'])),
+        tvoc: _asDouble(_pick(room, ['tvoc'])),
+        aqi: _asInt(_pick(room, ['aqi'])),
+        smokeRaw: _asInt(_pick(room, ['smoke_raw'])),
+        lightRaw: _asInt(_pick(room, ['light_raw'])),
+        soundRaw: _asInt(_pick(room, ['sound_level'])),
+        noiseStatus: _asString(
+          _pick(room, ['noise_text']),
+          fallback: 'Unknown',
+        ),
+        lightStatus: _asString(
+          _pick(room, ['light_status']),
+          fallback: 'Unknown',
+        ),
+        smokeStatus: _asString(
+          _pick(room, ['smoke_text']),
+          fallback: 'Unknown',
+        ),
+        ahtOk: _asBool(_pick(room, ['aht_ok'])),
+        ens160Ok: _asBool(_pick(room, ['ens160_ok'])),
+      ),
+      devices: parsedDevices,
+      alerts: alerts
+          .map(
+            (item) => _alertFromBackend(
+              _asString(_pick(item, ['id', 'alert_key', 'alert_id'])),
+              item,
+            ),
+          )
+          .toList(),
+      tariffBhdPerKwh: ElectricityPricing.costPerKWh,
+      pendingDeviceCommands: pendingCommands,
+      deviceCommandErrors: const {},
+      aiDashboard: ai.isEmpty ? null : _parseApiAiDashboard(ai, data),
+      aiDailySummary: null,
+      aiRecommendation: recommendations.isEmpty
+          ? null
+          : _parseAiRecommendation(recommendations.first),
+      aiAlert: null,
+      scenarioId: null,
+      scenarioName: null,
+      scenarioDescription: null,
+      deviceControlEnabled: homeId != 'home_test',
+    );
+  }
+
+  Device _parseApiDevice(String deviceId, Map<String, dynamic> data) {
+    final state = _asString(_pick(data, ['state'])).toLowerCase();
+    final rawType = _asString(_pick(data, ['type']));
+    final name = _asString(_pick(data, ['name']), fallback: deviceId);
+    return Device(
+      id: _asString(_pick(data, ['device_id', 'id']), fallback: deviceId),
+      name: name,
+      type: _parseApiDeviceType(deviceId, name, rawType),
+      isOn: state == 'on' || _asBool(_pick(data, ['is_on', 'switch'])),
+      currentPower: _asDouble(_pick(data, ['power_w', 'currentPower'])),
+      branch: _branchFromDeviceId(deviceId),
+    );
+  }
+
+  DeviceType _parseApiDeviceType(String deviceId, String name, String rawType) {
+    final text = '$deviceId $name $rawType'.toLowerCase();
+    if (text.contains('ac') || text.contains('air')) {
+      return DeviceType.airConditioner;
+    }
+    if (text.contains('light') || text.contains('switch')) {
+      return DeviceType.light;
+    }
+    return _parseDeviceType(rawType);
+  }
+
+  AiDashboardSummary _parseApiAiDashboard(
+    Map<String, dynamic> ai,
+    Map<String, dynamic> root,
+  ) {
+    final status = _asString(_pick(ai, ['status']), fallback: 'unknown');
+    return AiDashboardSummary(
+      updatedAt: _asDateTime(_pick(root, ['updated_at_ms', 'updated_at_iso'])),
+      source: 'Smart Energy API',
+      modelName: '',
+      modelVersion: '',
+      inputSource: 'backend_api',
+      energyWaste: status != 'normal' && status != 'unknown',
+      wasteConfidence: _asDouble(_pick(ai, ['confidence'])),
+      abnormalUsage: status != 'normal' && status != 'unknown',
+      abnormalUsageConfidence: _asDouble(_pick(ai, ['confidence'])),
+      recommendationType: _asString(_pick(ai, ['recommended_action'])),
+      nextHourEnergyKwh: 0,
+      nextHourCostBhd: 0,
+      efficiencyScore: 0,
+      explanation: _asString(
+        _pick(ai, ['summary']),
+        fallback: 'AI analysis is not available yet.',
+      ),
+      controlSuggestion: _asString(_pick(ai, ['recommended_action'])),
+    );
+  }
+
+  Future<DashboardData> _fetchDashboardDataFromFirebase({
+    required String homeId,
+    String? scenarioId,
+    CancelToken? cancelToken,
+  }) async {
+    final response = await _firebaseDio.get(
       '/homes/$homeId.json',
       cancelToken: cancelToken,
     );
@@ -235,7 +495,7 @@ class FirebaseRealtimeService {
   Future<List<DemoScenario>> fetchDemoScenarios({
     CancelToken? cancelToken,
   }) async {
-    final response = await _dio.get(
+    final response = await _firebaseDio.get(
       '/homes/home_test.json',
       cancelToken: cancelToken,
     );
@@ -301,20 +561,27 @@ class FirebaseRealtimeService {
       throw ArgumentError.value(action, 'action', 'Unsupported command action');
     }
 
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final timestampMs = nowMs <= _lastCommandTimestampMs
-        ? _lastCommandTimestampMs + 1
-        : nowMs;
-    _lastCommandTimestampMs = timestampMs;
+    try {
+      await _dio.post(
+        '/api/home/$homeId/devices/$deviceId/command',
+        data: {'command': action, 'requested_by': 'flutter_app'},
+      );
+    } catch (_) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final timestampMs = nowMs <= _lastCommandTimestampMs
+          ? _lastCommandTimestampMs + 1
+          : nowMs;
+      _lastCommandTimestampMs = timestampMs;
 
-    await _firebaseRef('homes/$homeId/commands/$deviceId/latest').set({
-      'command_id': 'cmd_$timestampMs',
-      'device_id': deviceId,
-      'action': action,
-      'status': 'pending',
-      'requested_by': 'mobile_app',
-      'created_at': timestampMs,
-    });
+      await _firebaseRef('homes/$homeId/commands/$deviceId/latest').set({
+        'command_id': 'cmd_$timestampMs',
+        'device_id': deviceId,
+        'action': action,
+        'status': 'pending',
+        'requested_by': 'mobile_app',
+        'created_at': timestampMs,
+      });
+    }
   }
 
   Stream<DeviceCommandState> watchLatestCommandStatus(String deviceId) {
@@ -882,6 +1149,18 @@ class FirebaseRealtimeService {
       return value.map((key, val) => MapEntry(key.toString(), val));
     }
     return const {};
+  }
+
+  List<Map<String, dynamic>> _asList(dynamic value) {
+    if (value is List) {
+      return value.whereType<Map>().map(_asMap).toList();
+    }
+    if (value is Map) {
+      return value.entries
+          .map((entry) => {'id': entry.key.toString(), ..._asMap(entry.value)})
+          .toList();
+    }
+    return const [];
   }
 
   double _asDouble(dynamic value, {double fallback = 0.0}) {

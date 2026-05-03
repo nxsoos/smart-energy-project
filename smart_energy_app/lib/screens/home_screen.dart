@@ -73,7 +73,9 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<String, StreamSubscription<bool?>> _deviceSwitchSubscriptions =
       <String, StreamSubscription<bool?>>{};
   StreamSubscription<Alert>? _alertsSubscription;
+  StreamSubscription<SensorData>? _liveSensorSubscription;
   Timer? _sensorFreshnessTimer;
+  Timer? _dashboardRefreshTimer;
   late int _alertsListenerStartedAtMs;
   double _currentTariff = ElectricityPricing.costPerKWh;
   bool _isLoading = false;
@@ -114,18 +116,24 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      if (widget.enableRealtimeSync) {
+      setState(() {});
+    });
+    _dashboardRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted) {
+        return;
+      }
+
+      if (widget.enableRealtimeSync && !_isDemoHome) {
         _refreshData(
           showErrorSnackBar: false,
           updateLoading: false,
           cancelActiveRequest: false,
         );
-      } else {
-        setState(() {});
       }
     });
     if (widget.enableRealtimeSync) {
       _refreshData(showErrorSnackBar: false);
+      _startLiveSensorListener();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) {
           return;
@@ -138,6 +146,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _activeRequestToken?.cancel('Screen disposed');
+    _liveSensorSubscription?.cancel();
     _alertsSubscription?.cancel();
     for (final subscription in _commandStatusSubscriptions.values) {
       subscription.cancel();
@@ -146,7 +155,36 @@ class _HomeScreenState extends State<HomeScreen> {
       subscription.cancel();
     }
     _sensorFreshnessTimer?.cancel();
+    _dashboardRefreshTimer?.cancel();
     super.dispose();
+  }
+
+  void _startLiveSensorListener() {
+    _liveSensorSubscription?.cancel();
+    if (_isDemoHome || !widget.enableRealtimeSync) {
+      return;
+    }
+
+    _liveSensorSubscription = _firebaseRealtimeService
+        .watchLiveSensorData(homeId: _selectedHomeId)
+        .listen(
+          (sensorData) {
+            if (!mounted || _isDemoHome) {
+              return;
+            }
+
+            setState(() {
+              _sensorData = sensorData;
+              _hasLiveData = true;
+            });
+          },
+          onError: (_) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {});
+          },
+        );
   }
 
   void _startAlertsListener() {
@@ -508,7 +546,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _currentReading = dashboardData.reading;
-        _sensorData = dashboardData.sensors;
+        if (_isDemoHome || _isSensorFeedStale()) {
+          _sensorData = dashboardData.sensors;
+        }
         _devices = dashboardData.devices;
         _hasLiveData = true;
         _demoScenarios = demoScenarios;
@@ -548,8 +588,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       setState(() {
-        _loadError =
-            'Could not load live Firebase data. Check Firebase connection and pull to retry.';
+        _loadError = _friendlyLoadError(error);
         _hasLiveData = false;
         _devices = const [];
       });
@@ -557,7 +596,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (showErrorSnackBar) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Firebase connection failed. Pull to retry.'),
+            content: Text('Dashboard connection failed. Pull to retry.'),
           ),
         );
       }
@@ -577,12 +616,31 @@ class _HomeScreenState extends State<HomeScreen> {
     return error is DioException && error.type == DioExceptionType.cancel;
   }
 
+  String _friendlyLoadError(Object error) {
+    if (error is DioException) {
+      final statusCode = error.response?.statusCode;
+      final detail = error.response?.data?.toString();
+      if (statusCode != null) {
+        return 'Cloud Run API error $statusCode. ${detail ?? 'Pull to retry.'}';
+      }
+      return 'Cloud Run API connection failed: ${error.message ?? error.type.name}.';
+    }
+
+    final message = error.toString().replaceFirst('Exception: ', '');
+    if (message.trim().isNotEmpty) {
+      return message;
+    }
+
+    return 'Could not load dashboard data. Check the Cloud Run API connection and pull to retry.';
+  }
+
   void _selectHome(String homeId) {
     if (homeId == _selectedHomeId) {
       return;
     }
 
     _alertsSubscription?.cancel();
+    _liveSensorSubscription?.cancel();
     for (final subscription in _commandStatusSubscriptions.values) {
       subscription.cancel();
     }
@@ -608,6 +666,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     _refreshData(showErrorSnackBar: false);
+    _startLiveSensorListener();
     _startAlertsListener();
   }
 
@@ -1268,7 +1327,10 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Icon(Icons.power_settings_new, color: AppColors.textSecondary),
+            const Icon(
+              Icons.power_settings_new,
+              color: AppColors.textSecondary,
+            ),
             const SizedBox(width: 10),
             Expanded(
               child: Column(

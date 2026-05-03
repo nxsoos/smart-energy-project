@@ -1,0 +1,12 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.api
+      - -t
+      - asia-southeast1-docker.pkg.dev/$PROJECT_ID/smart-energy/smart-energy-api:latest
+      - .
+
+images:
+  - asia-southeast1-docker.pkg.dev/$PROJECT_ID/smart-energy/smart-energy-api:latest

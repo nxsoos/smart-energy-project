@@ -8,6 +8,7 @@ Type=simple
 User=ali
 WorkingDirectory=/home/ali/smart-energy-hub
 Environment=PYTHONUNBUFFERED=1
+Environment=SMART_ENERGY_API_URL=https://smart-energy-api-qs7uzdqawq-as.a.run.app
 ExecStart=/home/ali/smart-energy-hub/venv/bin/python /home/ali/smart-energy-hub/main.py
 Restart=always
 RestartSec=5

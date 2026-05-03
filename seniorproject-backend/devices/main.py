@@ -29,14 +29,14 @@ def log(message: str) -> None:
 
 
 def start_script(script_name: str) -> subprocess.Popen:
-    script_path = BASE_DIR / script_name
-    if not script_path.exists():
-        raise FileNotFoundError(f"Script not found: {script_path}")
-
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
     log(f"Starting {script_name}")
+    script_path = BASE_DIR / script_name
+    if not script_path.exists():
+        raise FileNotFoundError(f"Script not found: {script_path}")
+
     return subprocess.Popen(
         [str(PYTHON_BIN), str(script_path)],
         cwd=str(BASE_DIR),

@@ -7,3 +7,5 @@ scikit-learn==1.8.0
 joblib==1.5.3
 pydantic==2.12.5
 google-genai>=1.0.0
+python-dotenv
+requests

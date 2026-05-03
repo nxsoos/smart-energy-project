@@ -1,6 +1,6 @@
 :root {
   color-scheme: light;
-  --bg: #eef3f1;
+  --bg: #f3f7f5;
   --panel: #ffffff;
   --text: #17211d;
   --muted: #66736d;
@@ -23,7 +23,7 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: Inter, Arial, Helvetica, sans-serif;
 }
 
 .shell {
@@ -37,7 +37,12 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 18px;
+  margin-bottom: 22px;
+  padding: 18px;
+  background: linear-gradient(135deg, #157a4f, #1f8f5f);
+  color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(21, 122, 79, 0.22);
 }
 
 h1,
@@ -68,6 +73,10 @@ h3 {
   margin-top: 5px;
 }
 
+.topbar p {
+  color: rgba(255, 255, 255, 0.82);
+}
+
 .status-pill {
   min-width: 116px;
   padding: 13px 18px;
@@ -79,8 +88,9 @@ h3 {
 }
 
 .status-online {
-  color: var(--green);
-  background: var(--green-soft);
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.35);
 }
 
 .status-offline {
@@ -108,6 +118,33 @@ h3 {
   box-shadow: 0 5px 18px rgba(23, 33, 29, 0.08);
 }
 
+.sensor-banner {
+  margin: 0 0 12px;
+  padding: 16px 18px;
+  border-radius: 8px;
+  font-size: 18px;
+  font-weight: 800;
+  border: 1px solid var(--border);
+}
+
+.sensor-banner-online {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: #aad9c3;
+}
+
+.sensor-banner-offline {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: #f4b3b3;
+}
+
+.sensor-banner-waiting {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: #f1ce91;
+}
+
 .sensor-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -130,6 +167,26 @@ h3 {
 .metric strong {
   font-size: 31px;
   line-height: 1.1;
+}
+
+.metric-good {
+  background: #f2fbf6;
+  border-color: #b9dfc9;
+}
+
+.metric-warning {
+  background: var(--amber-soft);
+  border-color: #f1ce91;
+}
+
+.metric-offline {
+  background: #fff1f1;
+  border-color: #f4b3b3;
+}
+
+.metric-offline span,
+.metric-offline strong {
+  color: var(--red);
 }
 
 .breaker-grid {
