@@ -22,6 +22,9 @@ MODEL_PATH = Path(os.environ.get("MODEL_PATH", "devices/models/smart_energy_ai.j
 EFFICIENCY_SCORE_CHANGE_THRESHOLD = 3
 NEXT_HOUR_ENERGY_CHANGE_THRESHOLD = 0.01
 NEXT_HOUR_COST_CHANGE_THRESHOLD = 0.001
+LOW_TOTAL_POWER_W = 5.0
+ACTIVE_DEVICE_POWER_W = 10.0
+FRESH_DATA_MAX_AGE_MS = 3 * 60 * 1000
 
 app = FastAPI(
     title="Smart Energy AI",
@@ -154,6 +157,18 @@ def calculate_occupancy_score(
     return round(min(1.0, max(motion_score, noise_score)), 4)
 
 
+def timestamp_age_ms(value: Any, current_ms: int) -> int | None:
+    timestamp = as_number(value, 0)
+    if timestamp <= 0:
+        return None
+    return max(0, current_ms - int(timestamp))
+
+
+def is_fresh_timestamp(value: Any, current_ms: int, max_age_ms: int = FRESH_DATA_MAX_AGE_MS) -> bool:
+    age = timestamp_age_ms(value, current_ms)
+    return age is not None and age <= max_age_ms
+
+
 def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str, Any]:
     try:
         home_ref = db.reference(f"/homes/{home_id}")
@@ -174,6 +189,8 @@ def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str,
             "dashboard_environment": backend_ref.child("dashboard/environment").get(),
             "current_state": backend_ref.child("current_state").get(),
             "occupancy": home_ref.child("occupancy/room1").get(),
+            "breaker_01_status": home_ref.child("devices/breaker_01/status").get(),
+            "breaker_02_status": home_ref.child("devices/breaker_02/status").get(),
         }
     except HTTPException:
         raise
@@ -431,6 +448,8 @@ def build_ai_payload(
     dashboard_energy = ensure_dict(source["dashboard_energy"])
     dashboard_environment = ensure_dict(source["dashboard_environment"])
     occupancy = ensure_dict(source.get("occupancy"))
+    breaker_01_status = ensure_dict(source.get("breaker_01_status"))
+    breaker_02_status = ensure_dict(source.get("breaker_02_status"))
 
     if not latest_summary and not dashboard_energy and not dashboard_environment:
         raise HTTPException(
@@ -450,6 +469,12 @@ def build_ai_payload(
 
     switch_branch = get_branch_energy(branches, "breaker_01")
     ac_branch = get_branch_energy(branches, "breaker_02")
+    switch_live_power_w = as_number(
+        first_present(breaker_01_status.get("power_W"), breaker_01_status.get("power_w"))
+    )
+    ac_live_power_w = as_number(
+        first_present(breaker_02_status.get("power_W"), breaker_02_status.get("power_w"))
+    )
 
     using_hourly_summary = bool(latest_summary.get("hour_id"))
     input_source = "latest_hourly_summary" if using_hourly_summary else "dashboard_fallback"
@@ -486,6 +511,40 @@ def build_ai_payload(
     sound_recent = bool(occupancy.get("sound_recent"))
     sound_active = bool(occupancy.get("sound_active"))
     derived_light_on = bool(occupancy.get("light_on")) or light_is_bright
+    current_ms = now_ms()
+    energy_timestamp = first_present(
+        dashboard_energy.get("updated_at_ms"),
+        dashboard_energy.get("timestamp_ms"),
+    )
+    breaker_status_timestamp = max(
+        int(as_number(breaker_01_status.get("last_seen_ms"), 0)),
+        int(as_number(breaker_02_status.get("last_seen_ms"), 0)),
+    ) or None
+    sensor_timestamp = first_present(
+        dashboard_environment.get("sensor_timestamp_ms"),
+        dashboard_environment.get("updated_at_ms"),
+        dashboard_environment.get("timestamp_ms"),
+        occupancy.get("updated_at_ms"),
+    )
+    breaker_data_fresh = is_fresh_timestamp(energy_timestamp, current_ms) or is_fresh_timestamp(
+        breaker_status_timestamp,
+        current_ms,
+    )
+    sensor_data_fresh = is_fresh_timestamp(sensor_timestamp, current_ms)
+    dashboard_current_power_w = as_number(
+        first_present(
+            dashboard_energy.get("current_power_w"),
+            dashboard_energy.get("total_power_W"),
+            dashboard_energy.get("total_avg_power_W"),
+        )
+    )
+    total_avg_power_w = as_number(
+        first_present(energy.get("total_avg_power_W"), energy.get("total_power_W"))
+    )
+    total_power_for_guardrails = max(dashboard_current_power_w, switch_live_power_w + ac_live_power_w)
+    if total_power_for_guardrails <= 0 and not breaker_data_fresh:
+        total_power_for_guardrails = total_avg_power_w
+    power_is_low = total_power_for_guardrails <= LOW_TOTAL_POWER_W
 
     noise_count = (
         as_number(latest_summary.get("noise_count"))
@@ -530,21 +589,27 @@ def build_ai_payload(
         "sound_active": sound_active,
         "light_on_while_empty": occupancy_state in {"empty", "probably_empty"} and derived_light_on,
         "device_on_while_empty": occupancy_state in {"empty", "probably_empty"}
-        and as_number(first_present(energy.get("total_avg_power_W"), energy.get("total_power_W"))) > 10,
+        and total_power_for_guardrails > ACTIVE_DEVICE_POWER_W,
         "empty_room_power_w": (
-            as_number(first_present(energy.get("total_avg_power_W"), energy.get("total_power_W")))
+            total_power_for_guardrails
             if occupancy_state in {"empty", "probably_empty"}
             else 0
         ),
+        "power_is_low": power_is_low,
+        "total_power_for_guardrails_W": round(total_power_for_guardrails, 3),
+        "switch_live_power_W": round(switch_live_power_w, 3),
+        "ac_live_power_W": round(ac_live_power_w, 3),
+        "breaker_data_fresh": breaker_data_fresh,
+        "sensor_data_fresh": sensor_data_fresh,
+        "energy_data_age_ms": timestamp_age_ms(energy_timestamp, current_ms),
+        "sensor_data_age_ms": timestamp_age_ms(sensor_timestamp, current_ms),
         "switch_avg_power_W": switch_branch["avg_power_W"],
         "switch_peak_power_W": switch_branch["peak_power_W"],
         "switch_energy_kWh": switch_branch["energy_kWh"],
         "ac_avg_power_W": ac_branch["avg_power_W"],
         "ac_peak_power_W": ac_branch["peak_power_W"],
         "ac_energy_kWh": ac_branch["energy_kWh"],
-        "total_avg_power_W": as_number(
-            first_present(energy.get("total_avg_power_W"), energy.get("total_power_W"))
-        ),
+        "total_avg_power_W": total_avg_power_w,
         "total_peak_power_W": as_number(
             first_present(energy.get("total_peak_power_W"), energy.get("total_power_W"))
         ),
@@ -629,12 +694,39 @@ def apply_post_processing_rules(result: dict[str, Any], payload: dict[str, Any])
     result["prediction_status"] = "ok"
     result["post_processing_rules"] = []
 
+    if payload.get("breaker_data_fresh") is False:
+        set_classifier_result(result, "waste_event", False)
+        set_classifier_result(result, "anomaly_label", "breaker_data_stale")
+        set_classifier_result(result, "recommendation_type", "check_breaker_data")
+        result["energy_efficiency_score"] = 0
+        result["prediction_status"] = "needs_fresh_breaker_data"
+        result["explanation"] = (
+            "AI is waiting for fresh breaker readings before judging energy waste."
+        )
+        result["post_processing_rules"].append("stale_breaker_data_guardrail")
+        return result
+
+    if payload.get("power_is_low") is True:
+        set_classifier_result(result, "waste_event", False)
+        set_classifier_result(result, "anomaly_label", "normal")
+        set_classifier_result(result, "recommendation_type", "none")
+        result["energy_efficiency_score"] = max(
+            as_number(result.get("energy_efficiency_score"), 100),
+            95,
+        )
+        result["prediction_status"] = "normal_low_power"
+        result["explanation"] = (
+            "No active waste detected. Current breaker power is very low."
+        )
+        result["post_processing_rules"].append("low_power_no_waste_guardrail")
+        return result
+
     if has_missing_required_sensor_data(payload):
         set_classifier_result(result, "waste_event", False)
         set_classifier_result(result, "anomaly_label", "insufficient_data")
         set_classifier_result(result, "recommendation_type", "check_sensor_data")
         result["energy_efficiency_score"] = 0
-        result["prediction_status"] = "insufficient_data"
+        result["prediction_status"] = "needs_fresh_sensor_data"
         result["explanation"] = (
             "AI prediction was limited because required sensor data is missing. "
             "Check sensor connection and wait for fresh readings."
@@ -799,7 +891,11 @@ def make_control_suggestion(
     waste_detected = bool(prediction["waste_event"]["value"])
     anomaly = prediction["anomaly_label"]["value"]
 
-    if waste_detected and anomaly == "ac_running_while_empty" and payload.get("ac_avg_power_W", 0) > 0:
+    if (
+        waste_detected
+        and anomaly == "ac_running_while_empty"
+        and payload.get("ac_live_power_W", payload.get("ac_avg_power_W", 0)) > ACTIVE_DEVICE_POWER_W
+    ):
         return {
             "device_id": "breaker_02",
             "action": "turn_off",
@@ -808,16 +904,77 @@ def make_control_suggestion(
             "reason": "AC power is active while occupancy appears low.",
         }
 
-    if waste_detected and anomaly == "light_on_no_motion" and payload.get("switch_avg_power_W", 0) > 0:
+    if (
+        waste_detected
+        and anomaly in {"light_on_no_motion", "empty_room_power_active"}
+        and payload.get("switch_live_power_W", payload.get("switch_avg_power_W", 0)) > ACTIVE_DEVICE_POWER_W
+    ):
         return {
             "device_id": "breaker_01",
             "action": "turn_off",
             "priority": "medium",
             "requires_user_approval": True,
-            "reason": "Switch Breaker is active while motion appears low.",
+            "reason": "Switch Breaker is active while the room appears empty.",
         }
 
     return None
+
+
+def build_ai_status(prediction: dict[str, Any], payload: dict[str, Any]) -> dict[str, str]:
+    prediction_status = str(prediction.get("prediction_status", "ok"))
+    waste_detected = bool(prediction["waste_event"]["value"])
+    anomaly = str(prediction["anomaly_label"]["value"])
+    recommendation_type = str(prediction["recommendation_type"]["value"])
+
+    if prediction_status == "needs_fresh_breaker_data":
+        return {
+            "code": "needs_data",
+            "label": "Needs Data",
+            "tone": "warning",
+            "summary": "Waiting for fresh breaker readings.",
+            "action_title": "Check breaker data",
+        }
+    if prediction_status == "needs_fresh_sensor_data":
+        return {
+            "code": "needs_data",
+            "label": "Needs Data",
+            "tone": "warning",
+            "summary": "Waiting for fresh room sensor readings.",
+            "action_title": "Check room sensor",
+        }
+    if prediction_status == "normal_low_power" or (
+        not waste_detected and anomaly == "normal" and recommendation_type == "none"
+    ):
+        return {
+            "code": "normal",
+            "label": "Normal",
+            "tone": "safe",
+            "summary": "Energy use is low or normal right now.",
+            "action_title": "No action needed",
+        }
+    if waste_detected and payload.get("empty_room_power_w", 0) > ACTIVE_DEVICE_POWER_W:
+        return {
+            "code": "likely_waste",
+            "label": "Likely Waste",
+            "tone": "danger",
+            "summary": "Power is active while the room appears empty.",
+            "action_title": "Review device power",
+        }
+    if waste_detected:
+        return {
+            "code": "possible_waste",
+            "label": "Possible Waste",
+            "tone": "warning",
+            "summary": "AI found a possible energy-saving opportunity.",
+            "action_title": "Review recommendation",
+        }
+    return {
+        "code": "watching",
+        "label": "Watching",
+        "tone": "info",
+        "summary": "AI is monitoring an unusual but non-waste condition.",
+        "action_title": "Keep monitoring",
+    }
 
 
 def build_firebase_result(
@@ -828,6 +985,7 @@ def build_firebase_result(
     scenario_id: str | None = None,
 ) -> dict[str, Any]:
     control_suggestion = make_control_suggestion(prediction, payload)
+    ai_status = build_ai_status(prediction, payload)
     created_at = now_ms()
     created_at_iso = ms_to_iso(created_at)
 
@@ -844,6 +1002,12 @@ def build_firebase_result(
         "model_version": prediction["model_version"],
         "input_source": input_source,
         "prediction_status": prediction.get("prediction_status", "ok"),
+        "ai_status": ai_status,
+        "ai_status_code": ai_status["code"],
+        "ai_status_label": ai_status["label"],
+        "ai_status_tone": ai_status["tone"],
+        "ai_status_summary": ai_status["summary"],
+        "ai_action_title": ai_status["action_title"],
         "post_processing_rules": prediction.get("post_processing_rules", []),
         # Flat fields keep app screens simple while the nested predictions object
         # preserves the full model output with confidences.
@@ -864,6 +1028,7 @@ def build_firebase_result(
             "energy_efficiency_score": prediction["energy_efficiency_score"],
             "explanation": prediction["explanation"],
             "prediction_status": prediction.get("prediction_status", "ok"),
+            "ai_status": ai_status,
             "post_processing_rules": prediction.get("post_processing_rules", []),
         },
         "control_suggestion": control_suggestion,
@@ -1468,6 +1633,12 @@ def build_ai_dashboard_summary(result: dict[str, Any]) -> dict[str, Any]:
         "model_version": result["model_version"],
         "input_source": result["input_source"],
         "prediction_status": result.get("prediction_status", "ok"),
+        "ai_status": result.get("ai_status", {}),
+        "ai_status_code": result.get("ai_status_code", "watching"),
+        "ai_status_label": result.get("ai_status_label", "Watching"),
+        "ai_status_tone": result.get("ai_status_tone", "info"),
+        "ai_status_summary": result.get("ai_status_summary", ""),
+        "ai_action_title": result.get("ai_action_title", ""),
         "post_processing_rules": result.get("post_processing_rules", []),
         "history_written": result["history_written"],
         "change_reason": result["change_reason"],
@@ -1488,7 +1659,7 @@ def build_ai_dashboard_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 def build_ai_recommendation(result: dict[str, Any]) -> dict[str, Any] | None:
     predictions = result["predictions"]
-    if result.get("prediction_status") == "insufficient_data":
+    if result.get("prediction_status") in {"insufficient_data", "needs_fresh_sensor_data"}:
         return {
             "recommendation_id": "ai_energy_insight",
             "type": "device_health",
@@ -1500,6 +1671,33 @@ def build_ai_recommendation(result: dict[str, Any]) -> dict[str, Any] | None:
             "related_alert_key": None,
             "ai_prediction_id": result["created_at"],
             "recommendation_type": "check_sensor_data",
+            "status": "active",
+            "timestamp_ms": result["created_at"],
+            "timestamp_iso": ms_to_iso(result["created_at"]),
+            "timezone": TIMEZONE,
+            "created_at": result["created_at"],
+            "created_at_ms": result["created_at"],
+            "created_at_iso": ms_to_iso(result["created_at"]),
+            "updated_at": result["created_at"],
+            "updated_at_ms": result["created_at"],
+            "updated_at_iso": ms_to_iso(result["created_at"]),
+            "resolved_at": None,
+            "resolved_at_ms": None,
+            "resolved_at_iso": None,
+        }
+
+    if result.get("prediction_status") == "needs_fresh_breaker_data":
+        return {
+            "recommendation_id": "ai_energy_insight",
+            "type": "device_health",
+            "priority": "medium",
+            "title": "AI needs fresh breaker data",
+            "message": predictions["explanation"],
+            "source": "smart_energy_ai",
+            "related_device_id": "breaker_01",
+            "related_alert_key": None,
+            "ai_prediction_id": result["created_at"],
+            "recommendation_type": "check_breaker_data",
             "status": "active",
             "timestamp_ms": result["created_at"],
             "timestamp_iso": ms_to_iso(result["created_at"]),
@@ -1559,7 +1757,12 @@ def build_ai_recommendation(result: dict[str, Any]) -> dict[str, Any] | None:
 
 def build_ai_alert(result: dict[str, Any]) -> dict[str, Any] | None:
     predictions = result["predictions"]
-    if result.get("prediction_status") == "insufficient_data":
+    if result.get("prediction_status") in {
+        "insufficient_data",
+        "needs_fresh_sensor_data",
+        "needs_fresh_breaker_data",
+        "normal_low_power",
+    }:
         return None
 
     waste_detected = bool(predictions["waste_event"]["value"])
@@ -1638,11 +1841,14 @@ def build_daily_ai_summary(
     predictions = latest_result["predictions"]
     total_ai_checks_today = previous_total_checks + 1
     history_records_today = previous_history_records + (1 if history_written else 0)
+    count_this_as_new_moment = history_written or not same_day
     waste_predictions_today = previous_waste_count + (
-        1 if predictions["waste_event"]["value"] is True else 0
+        1 if count_this_as_new_moment and predictions["waste_event"]["value"] is True else 0
     )
     abnormal_predictions_today = previous_abnormal_count + (
-        1 if predictions["anomaly_label"]["value"] != "normal" else 0
+        1
+        if count_this_as_new_moment and predictions["anomaly_label"]["value"] != "normal"
+        else 0
     )
     efficiency_score_sum = previous_score_sum + as_number(
         predictions["energy_efficiency_score"]
@@ -1712,19 +1918,18 @@ def build_daily_summary_text(
 
     if waste_predictions_today == 0 and abnormal_predictions_today == 0:
         return (
-            f"AI checked this home {total_ai_checks_today} times today "
-            f"with {history_records_today} meaningful history records. "
-            f"Average efficiency score is {average_efficiency_score}. "
-            f"Latest status: {latest_explanation}"
+            f"AI reviewed this home {total_ai_checks_today} times today. "
+            f"Most checks found normal usage. "
+            f"It stored {history_records_today} meaningful changes. "
+            f"Latest insight: {latest_explanation}"
         )
 
     return (
-        f"AI checked this home {total_ai_checks_today} times today and found "
-        f"{waste_predictions_today} waste events and "
-        f"{abnormal_predictions_today} abnormal usage events. "
-        f"It stored {history_records_today} meaningful history records. "
+        f"AI reviewed this home {total_ai_checks_today} times today. "
+        f"It found {waste_predictions_today} possible waste moments and "
+        f"{abnormal_predictions_today} unusual usage moments after grouping repeated checks. "
         f"Average efficiency score is {average_efficiency_score}. "
-        f"Latest status: {latest_explanation}"
+        f"Latest insight: {latest_explanation}"
     )
 
 

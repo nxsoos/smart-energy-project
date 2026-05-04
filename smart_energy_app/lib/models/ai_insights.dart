@@ -9,6 +9,11 @@ class AiDashboardSummary {
   final bool abnormalUsage;
   final double abnormalUsageConfidence;
   final String recommendationType;
+  final String statusCode;
+  final String statusLabel;
+  final String statusTone;
+  final String statusSummary;
+  final String actionTitle;
   final double nextHourEnergyKwh;
   final double nextHourCostBhd;
   final double efficiencyScore;
@@ -26,6 +31,11 @@ class AiDashboardSummary {
     required this.abnormalUsage,
     required this.abnormalUsageConfidence,
     required this.recommendationType,
+    required this.statusCode,
+    required this.statusLabel,
+    required this.statusTone,
+    required this.statusSummary,
+    required this.actionTitle,
     required this.nextHourEnergyKwh,
     required this.nextHourCostBhd,
     required this.efficiencyScore,

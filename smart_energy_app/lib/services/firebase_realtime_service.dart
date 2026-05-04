@@ -416,6 +416,16 @@ class FirebaseRealtimeService {
     final automationLogs = _asList(data['automation_logs']);
     final ai = _asMap(data['ai']);
     final aiDailySummary = _asMap(data['ai_daily_summary']);
+    final latestRecommendation = recommendations.isEmpty
+        ? const <String, dynamic>{}
+        : _asMap(recommendations.first);
+    final effectiveAi = ai.isNotEmpty
+        ? ai
+        : _buildFallbackAiDashboard(
+            aiDailySummary: aiDailySummary,
+            recommendation: latestRecommendation,
+            root: data,
+          );
 
     final parsedDevices = devicesMap.entries
         .map((entry) => _parseApiDevice(entry.key, _asMap(entry.value)))
@@ -502,11 +512,13 @@ class FirebaseRealtimeService {
       tariffBhdPerKwh: ElectricityPricing.costPerKWh,
       pendingDeviceCommands: pendingCommands,
       deviceCommandErrors: const {},
-      aiDashboard: ai.isEmpty ? null : _parseApiAiDashboard(ai, data),
-      aiDailySummary: _parseAiDailySummary(aiDailySummary),
-      aiRecommendation: recommendations.isEmpty
+      aiDashboard: effectiveAi.isEmpty
           ? null
-          : _parseAiRecommendation(recommendations.first),
+          : _parseApiAiDashboard(effectiveAi, data),
+      aiDailySummary: _parseAiDailySummary(aiDailySummary),
+      aiRecommendation: latestRecommendation.isEmpty
+          ? null
+          : _parseAiRecommendation(latestRecommendation),
       aiAlert: null,
       control: _parseControl(_asMap(data['control'])),
       actionSuggestions: actionSuggestions.map(_parseActionSuggestion).toList(),
@@ -599,6 +611,20 @@ class FirebaseRealtimeService {
       recommendationType: _asString(
         _pick(ai, ['recommendation_type', 'recommended_action']),
       ),
+      statusCode: _asString(_pick(ai, ['ai_status_code']), fallback: status),
+      statusLabel: _asString(
+        _pick(ai, ['ai_status_label']),
+        fallback: _friendlyAiStatus(status),
+      ),
+      statusTone: _asString(_pick(ai, ['ai_status_tone']), fallback: 'info'),
+      statusSummary: _asString(
+        _pick(ai, ['ai_status_summary']),
+        fallback: 'AI is reviewing current energy use.',
+      ),
+      actionTitle: _asString(
+        _pick(ai, ['ai_action_title']),
+        fallback: 'Review insight',
+      ),
       nextHourEnergyKwh: _asDouble(
         _pick(ai, ['next_hour_energy_kWh', 'next_hour_energy']),
       ),
@@ -607,7 +633,7 @@ class FirebaseRealtimeService {
       ),
       efficiencyScore: _asDouble(_pick(ai, ['efficiency_score'])),
       explanation: _asString(
-        _pick(ai, ['summary']),
+        _pick(ai, ['explanation', 'summary']),
         fallback: 'AI analysis is not available yet.',
       ),
       controlSuggestion: _asString(_pick(ai, ['recommended_action'])),
@@ -1097,6 +1123,100 @@ class FirebaseRealtimeService {
     );
   }
 
+  Map<String, dynamic> _buildFallbackAiDashboard({
+    required Map<String, dynamic> aiDailySummary,
+    required Map<String, dynamic> recommendation,
+    required Map<String, dynamic> root,
+  }) {
+    if (aiDailySummary.isEmpty && recommendation.isEmpty) {
+      return const {};
+    }
+
+    final recommendationType = _asString(
+      _pick(recommendation, ['recommendation_type', 'recommendationType']),
+    );
+    final recommendationPriority = _asString(
+      _pick(recommendation, ['priority']),
+      fallback: 'low',
+    ).toLowerCase();
+    final hasActiveRecommendation =
+        recommendation.isNotEmpty &&
+        _asString(_pick(recommendation, ['status']), fallback: 'active')
+                .toLowerCase() ==
+            'active';
+    final needsData =
+        recommendationType.contains('check_') ||
+        _asString(_pick(recommendation, ['type'])).toLowerCase() ==
+            'device_health';
+    final possibleWaste =
+        hasActiveRecommendation &&
+        !needsData &&
+        (recommendationPriority == 'high' ||
+            recommendationPriority == 'medium' ||
+            recommendationType.contains('turn_off') ||
+            recommendationType.contains('energy'));
+    final statusCode = needsData
+        ? 'needs_data'
+        : possibleWaste
+        ? 'possible_waste'
+        : 'watching';
+    final statusLabel = _friendlyAiStatus(statusCode);
+    final statusTone = needsData
+        ? 'warning'
+        : possibleWaste
+        ? 'warning'
+        : 'info';
+    final message = _asString(
+      _pick(recommendation, ['message']),
+      fallback: _asString(
+        _pick(aiDailySummary, ['latest_explanation', 'summary']),
+        fallback: 'AI is reviewing current energy use.',
+      ),
+    );
+
+    return {
+      'updated_at':
+          _pick(recommendation, ['updated_at_ms', 'updated_at_iso']) ??
+          _pick(aiDailySummary, ['updated_at_ms', 'updated_at_iso']) ??
+          _pick(root, ['updated_at_ms', 'updated_at_iso']),
+      'source': 'Smart Energy AI',
+      'prediction_status': statusCode,
+      'ai_status_code': statusCode,
+      'ai_status_label': statusLabel,
+      'ai_status_tone': statusTone,
+      'ai_status_summary': needsData
+          ? 'AI needs fresh data before judging waste.'
+          : possibleWaste
+          ? 'AI found a possible energy-saving opportunity.'
+          : 'AI is monitoring recent energy patterns.',
+      'ai_action_title': needsData
+          ? 'Check data'
+          : possibleWaste
+          ? 'Review action'
+          : 'Keep monitoring',
+      'energy_waste': possibleWaste,
+      'waste_confidence': possibleWaste ? 0.65 : 0.0,
+      'abnormal_usage': possibleWaste || needsData,
+      'abnormal_usage_confidence': possibleWaste || needsData ? 0.65 : 0.0,
+      'recommendation_type': recommendationType.isEmpty
+          ? 'none'
+          : recommendationType,
+      'next_hour_energy_kWh': _pick(aiDailySummary, [
+        'predicted_next_hour_energy_total_kWh',
+        'predicted_next_hour_energy_total_kwh',
+      ]),
+      'next_hour_cost_BHD': _pick(aiDailySummary, [
+        'predicted_next_hour_cost_total_BHD',
+        'predicted_next_hour_cost_total_bhd',
+      ]),
+      'efficiency_score': _pick(aiDailySummary, [
+        'average_efficiency_score',
+        'averageEfficiencyScore',
+      ]),
+      'explanation': message,
+    };
+  }
+
   String _prettyScenarioName(String value) {
     return value
         .replaceAll('_', ' ')
@@ -1115,6 +1235,25 @@ class FirebaseRealtimeService {
       case 'assist':
       default:
         return 'Assist';
+    }
+  }
+
+  String _friendlyAiStatus(String value) {
+    switch (value.toLowerCase()) {
+      case 'normal':
+      case 'normal_low_power':
+        return 'Normal';
+      case 'needs_data':
+      case 'needs_fresh_sensor_data':
+      case 'needs_fresh_breaker_data':
+      case 'insufficient_data':
+        return 'Needs Data';
+      case 'likely_waste':
+        return 'Likely Waste';
+      case 'possible_waste':
+        return 'Possible Waste';
+      default:
+        return 'Watching';
     }
   }
 
@@ -1217,6 +1356,28 @@ class FirebaseRealtimeService {
       recommendationType: _asString(
         _pick(data, ['recommendation_type', 'recommendationType']),
         fallback: 'general',
+      ),
+      statusCode: _asString(
+        _pick(data, ['ai_status_code', 'status_code', 'statusCode']),
+        fallback: _asString(_pick(data, ['prediction_status']), fallback: 'watching'),
+      ),
+      statusLabel: _asString(
+        _pick(data, ['ai_status_label', 'status_label', 'statusLabel']),
+        fallback: _friendlyAiStatus(
+          _asString(_pick(data, ['prediction_status']), fallback: 'watching'),
+        ),
+      ),
+      statusTone: _asString(
+        _pick(data, ['ai_status_tone', 'status_tone', 'statusTone']),
+        fallback: 'info',
+      ),
+      statusSummary: _asString(
+        _pick(data, ['ai_status_summary', 'status_summary', 'statusSummary']),
+        fallback: 'AI is reviewing current energy use.',
+      ),
+      actionTitle: _asString(
+        _pick(data, ['ai_action_title', 'action_title', 'actionTitle']),
+        fallback: 'Review insight',
       ),
       nextHourEnergyKwh: _asDouble(
         _pick(data, ['next_hour_energy_kWh', 'next_hour_energy_kwh']),

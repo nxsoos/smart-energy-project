@@ -2554,6 +2554,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final scoreColor = _efficiencyColor(ai.efficiencyScore);
+    final statusColor = _aiStatusColor(ai.statusTone, ai.statusCode);
 
     return Card(
       elevation: 2,
@@ -2577,12 +2578,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'AI Dashboard Summary',
+                      Text(
+                        'AI Status: ${ai.statusLabel}',
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w800,
-                          color: AppColors.textPrimary,
+                          color: statusColor,
                         ),
                       ),
                       Text(
@@ -2595,45 +2596,75 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 ),
-                _buildSourceChip('Smart Energy AI'),
+                _buildInsightPill(
+                  icon: Icons.auto_awesome_outlined,
+                  label: _prettyLabel(ai.statusCode),
+                  color: statusColor,
+                ),
               ],
             ),
-            const SizedBox(height: 16),
-            GridView.count(
-              crossAxisCount: 2,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
-              childAspectRatio: 1.55,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: statusColor.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: statusColor.withValues(alpha: 0.20)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.insights_outlined, color: statusColor),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          ai.statusSummary,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: statusColor,
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          ai.explanation,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            height: 1.35,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
               children: [
-                _buildAiMetricTile(
-                  title: 'Efficiency Score',
-                  value: ai.efficiencyScore.toStringAsFixed(0),
-                  unit: '/100',
-                  icon: Icons.speed_outlined,
-                  color: scoreColor,
+                Expanded(
+                  child: _buildAiMetricTile(
+                    title: 'Efficiency',
+                    value: ai.efficiencyScore.toStringAsFixed(0),
+                    unit: '/100',
+                    icon: Icons.speed_outlined,
+                    color: scoreColor,
+                  ),
                 ),
-                _buildAiMetricTile(
-                  title: 'Next Hour Energy',
-                  value: ai.nextHourEnergyKwh.toStringAsFixed(2),
-                  unit: 'kWh',
-                  icon: Icons.bolt_outlined,
-                  color: AppColors.primary,
-                ),
-                _buildAiMetricTile(
-                  title: 'Next Hour Cost',
-                  value: ai.nextHourCostBhd.toStringAsFixed(3),
-                  unit: 'BD',
-                  icon: Icons.payments_outlined,
-                  color: Colors.indigo,
-                ),
-                _buildAiMetricTile(
-                  title: 'Recommendation',
-                  value: _prettyLabel(ai.recommendationType),
-                  unit: '',
-                  icon: Icons.tips_and_updates_outlined,
-                  color: Colors.teal,
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _buildAiMetricTile(
+                    title: 'Next Hour',
+                    value: ai.nextHourEnergyKwh.toStringAsFixed(2),
+                    unit: 'kWh',
+                    icon: Icons.bolt_outlined,
+                    color: AppColors.primary,
+                  ),
                 ),
               ],
             ),
@@ -2654,26 +2685,16 @@ class _HomeScreenState extends State<HomeScreen> {
                       : AppColors.energySafe,
                 ),
                 _buildInsightPill(
-                  icon: ai.abnormalUsage
-                      ? Icons.troubleshoot_outlined
-                      : Icons.verified_outlined,
-                  label: ai.abnormalUsage
-                      ? 'Abnormal usage (${_asPercent(ai.abnormalUsageConfidence)})'
-                      : 'Usage looks normal',
-                  color: ai.abnormalUsage
-                      ? Colors.deepOrange
-                      : AppColors.energySafe,
+                  icon: Icons.payments_outlined,
+                  label: '${ai.nextHourCostBhd.toStringAsFixed(3)} BD next hour',
+                  color: Colors.indigo,
+                ),
+                _buildInsightPill(
+                  icon: Icons.tips_and_updates_outlined,
+                  label: ai.actionTitle,
+                  color: statusColor,
                 ),
               ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              ai.explanation,
-              style: const TextStyle(
-                fontSize: 14,
-                height: 1.35,
-                color: AppColors.textPrimary,
-              ),
             ),
             if (ai.controlSuggestion.isNotEmpty) ...[
               const SizedBox(height: 10),
@@ -2762,13 +2783,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 _buildInsightPill(
                   icon: Icons.flash_on_outlined,
-                  label: '${summary.wastePredictionCount} waste predictions',
+                  label: '${summary.wastePredictionCount} waste moments',
                   color: AppColors.energyWarning,
                 ),
                 _buildInsightPill(
                   icon: Icons.timeline_outlined,
                   label:
-                      '${summary.abnormalPredictionCount} abnormal predictions',
+                      '${summary.abnormalPredictionCount} unusual moments',
                   color: Colors.deepOrange,
                 ),
                 _buildInsightPill(
@@ -2787,6 +2808,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildAiRecommendationCard(AiRecommendation recommendation) {
     final color = _priorityColor(recommendation.priority);
+    final isDataCheck =
+        recommendation.type.toLowerCase() == 'device_health' ||
+        recommendation.recommendationType.toLowerCase().contains('check_');
+    final title = isDataCheck ? 'AI Data Check' : 'Recommended Action';
 
     return Card(
       elevation: 2,
@@ -2798,14 +2823,26 @@ class _HomeScreenState extends State<HomeScreen> {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.lightbulb_outline, color: color),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    isDataCheck
+                        ? Icons.sensors_outlined
+                        : Icons.tips_and_updates_outlined,
+                    color: color,
+                  ),
+                ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        recommendation.title,
+                        title,
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w800,
@@ -2813,7 +2850,14 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       const SizedBox(height: 4),
-                      _buildSourceChip('Smart Energy AI'),
+                      Text(
+                        recommendation.title,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textSecondary,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -2832,6 +2876,23 @@ class _HomeScreenState extends State<HomeScreen> {
                 height: 1.35,
                 color: AppColors.textPrimary,
               ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _buildSourceChip('Smart Energy AI'),
+                _buildInsightPill(
+                  icon: isDataCheck
+                      ? Icons.sync_problem_outlined
+                      : Icons.offline_bolt_outlined,
+                  label: isDataCheck
+                      ? 'Data quality'
+                      : _prettyLabel(recommendation.recommendationType),
+                  color: color,
+                ),
+              ],
             ),
           ],
         ),
@@ -3251,6 +3312,28 @@ class _HomeScreenState extends State<HomeScreen> {
         return Colors.blue;
       default:
         return Colors.teal;
+    }
+  }
+
+  Color _aiStatusColor(String tone, String code) {
+    switch (tone.toLowerCase()) {
+      case 'safe':
+        return AppColors.energySafe;
+      case 'warning':
+        return AppColors.energyWarning;
+      case 'danger':
+        return AppColors.energyDanger;
+    }
+    switch (code.toLowerCase()) {
+      case 'normal':
+        return AppColors.energySafe;
+      case 'needs_data':
+      case 'possible_waste':
+        return AppColors.energyWarning;
+      case 'likely_waste':
+        return AppColors.energyDanger;
+      default:
+        return AppColors.primary;
     }
   }
 
