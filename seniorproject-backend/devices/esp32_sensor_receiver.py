@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+import sys
+from pathlib import Path
 from typing import Any
 
 import firebase_admin
@@ -16,6 +17,11 @@ HOME_ID = "home_001"
 SOURCE = "raspberry_pi_hub"
 ESP32_SOURCE_ID = "room1_esp32"
 APP_DEVICE_ID = "esp32_01"
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from timestamp_utils import TIMEZONE, now_timestamp
 
 app = Flask(__name__)
 
@@ -33,27 +39,41 @@ def initialize_firebase() -> None:
     )
 
 
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def timestamp_key(now: datetime) -> str:
-    return now.strftime("%Y%m%d_%H%M%S_%f")
-
-
 def home_ref(path: str):
     return db.reference(f"/homes/{HOME_ID}/{path}")
 
 
 def build_payload(data: dict[str, Any]) -> dict[str, Any]:
-    now = utc_now()
+    timestamp = now_timestamp()
+    timestamp_ms = timestamp["timestamp_ms"]
+    sensors = data.get("sensors") if isinstance(data.get("sensors"), dict) else {}
+    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    esp32_uptime_ms = sensors.get("timestamp_ms", status.get("lastSeenMs"))
     return {
         **data,
+        "sensors": {
+            **sensors,
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": timestamp["timestamp_iso"],
+            "timezone": TIMEZONE,
+            "esp32_uptime_ms": esp32_uptime_ms,
+        },
+        "status": {
+            **status,
+            "last_seen_ms": timestamp_ms,
+            "last_seen_iso": timestamp["timestamp_iso"],
+            "lastSeenMs": timestamp_ms,
+        },
         "home_id": HOME_ID,
         "source": SOURCE,
         "esp32_source_id": ESP32_SOURCE_ID,
-        "timestamp": now.isoformat(),
-        "timestamp_key": timestamp_key(now),
+        **timestamp,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": timestamp["timestamp_iso"],
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": timestamp["timestamp_iso"],
+        "esp32_uptime_ms": esp32_uptime_ms,
+        "timestamp_key": f"sensor_{timestamp_ms}",
     }
 
 
@@ -67,14 +87,19 @@ def build_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(status, dict):
         status = {}
 
-    timestamp = sensors.get("timestamp", status.get("lastSeen"))
-    timestamp_ms = sensors.get("timestamp_ms", status.get("lastSeenMs"))
-    readable_time = sensors.get("readable_time", status.get("readableTime"))
+    timestamp_ms = payload.get("timestamp_ms")
+    timestamp_iso = payload.get("timestamp_iso")
+    esp32_uptime_ms = payload.get("esp32_uptime_ms")
 
     return {
-        "timestamp": timestamp,
         "timestamp_ms": timestamp_ms,
-        "readable_time": readable_time,
+        "timestamp_iso": timestamp_iso,
+        "timezone": TIMEZONE,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": timestamp_iso,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": timestamp_iso,
+        "esp32_uptime_ms": esp32_uptime_ms,
         "ntp_synced": status.get("ntp_synced"),
         "temperature": sensors.get("temperature"),
         "humidity": sensors.get("humidity"),
@@ -96,7 +121,8 @@ def build_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "home_id": payload.get("home_id"),
         "source": payload.get("source"),
         "esp32_source_id": payload.get("esp32_source_id"),
-        "received_at": payload.get("timestamp"),
+        "received_at_ms": timestamp_ms,
+        "received_at_iso": timestamp_iso,
         "timestamp_key": payload.get("timestamp_key"),
     }
 

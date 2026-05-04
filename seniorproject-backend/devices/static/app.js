@@ -23,7 +23,9 @@ const ids = {
   controlModeDescription: document.getElementById("controlModeDescription"),
   actionSuggestions: document.getElementById("actionSuggestions"),
   automationMessage: document.getElementById("automationMessage"),
+  nextSchedule: document.getElementById("nextSchedule"),
   settingsModal: document.getElementById("settingsModal"),
+  settingsSchedules: document.getElementById("settingsSchedules"),
 };
 
 function nested(source, keys, fallback = null) {
@@ -81,10 +83,18 @@ function timestampMs(value) {
 }
 
 function isSensorOnline(room) {
-  const rawTimestamp = nested(room, ["sensor_timestamp_ms", "sensor_timestamp_iso"]);
+  const rawTimestamp = nested(room, [
+    "sensor_timestamp_ms",
+    "timestamp_ms",
+    "last_seen_ms",
+    "lastSeenMs",
+    "sensor_timestamp_iso",
+    "timestamp_iso",
+    "last_seen_iso",
+  ]);
   const lastSeenMs = timestampMs(rawTimestamp);
   const isFresh = lastSeenMs !== null && Date.now() - lastSeenMs <= SENSOR_STALE_AFTER_MS;
-  return room.feed_online === true && isFresh;
+  return isFresh || room.feed_online === true;
 }
 
 function setMetric(id, value, mode = "normal") {
@@ -295,6 +305,16 @@ function updateAutomationMessage(dashboard) {
   ids.automationMessage.classList.remove("hidden");
 }
 
+function updateNextSchedule(dashboard) {
+  const schedule = dashboard.next_schedule;
+  ids.nextSchedule.classList.add("hidden");
+  if (!schedule) {
+    return;
+  }
+  ids.nextSchedule.textContent = schedule.message || `Next schedule: ${schedule.name} at ${schedule.time}`;
+  ids.nextSchedule.classList.remove("hidden");
+}
+
 async function fetchLatest() {
   try {
     const response = await fetch("/api/latest", { cache: "no-store" });
@@ -312,10 +332,128 @@ async function fetchLatest() {
     updateControlMode(dashboard);
     updateActionSuggestionCards(dashboard);
     updateAutomationMessage(dashboard);
+    updateNextSchedule(dashboard);
   } catch (error) {
     setStatus("error", "Error");
     ids.commandMessage.textContent = error.message;
   }
+}
+
+async function loadSettingsPanel() {
+  const [settingsResponse, schedulesResponse] = await Promise.all([
+    fetch("/api/settings", { cache: "no-store" }),
+    fetch("/api/schedules", { cache: "no-store" }),
+  ]);
+  const settingsData = await settingsResponse.json();
+  const schedulesData = await schedulesResponse.json();
+  const settings = settingsData.settings || {};
+  document.getElementById("prefCost").value = settings.cost_per_kwh ?? 0.029;
+  document.getElementById("prefComfortMin").value = settings.comfort_temperature_min ?? 22;
+  document.getElementById("prefComfortMax").value = settings.comfort_temperature_max ?? 25;
+  document.getElementById("prefHighTemp").value = settings.high_temperature_threshold ?? 28;
+  document.getElementById("prefLightWaste").value = settings.light_waste_minutes ?? 5;
+  document.getElementById("prefOccupancy").value = settings.occupancy_empty_minutes ?? 10;
+  document.getElementById("prefOffline").value = settings.device_offline_minutes ?? 2;
+  document.getElementById("prefQuiet").checked = settings.quiet_hours_enabled !== false;
+  document.getElementById("prefAi").checked = settings.ai_recommendations_enabled !== false;
+  document.getElementById("prefAuto").checked = settings.auto_control_enabled !== false;
+  document.getElementById("prefNotifications").checked = settings.notifications_enabled !== false;
+  document.getElementById("prefSchedules").checked = settings.schedules_enabled !== false;
+  renderSchedules(schedulesData.schedules || []);
+}
+
+function renderSchedules(schedules) {
+  ids.settingsSchedules.innerHTML = "";
+  if (!schedules.length) {
+    ids.settingsSchedules.textContent = "No schedules yet.";
+    return;
+  }
+  for (const schedule of schedules) {
+    const row = document.createElement("article");
+    row.className = "schedule-row";
+    row.innerHTML = `
+      <strong>${schedule.name}</strong>
+      <p>${schedule.device_name} - ${schedule.command === "turn_on" ? "On" : "Off"} at ${schedule.time}</p>
+      <p>${(schedule.days || []).join(", ")}</p>
+      <div class="schedule-actions">
+        <button class="btn btn-muted" data-schedule-id="${schedule.schedule_id}" data-schedule-action="toggle">${schedule.enabled ? "Disable" : "Enable"}</button>
+        <button class="btn btn-on" data-schedule-id="${schedule.schedule_id}" data-schedule-action="run">Run</button>
+        <button class="btn btn-off" data-schedule-id="${schedule.schedule_id}" data-schedule-action="delete">Delete</button>
+      </div>
+    `;
+    ids.settingsSchedules.appendChild(row);
+  }
+}
+
+async function savePreferences() {
+  const payload = {
+    cost_per_kwh: Number(document.getElementById("prefCost").value),
+    comfort_temperature_min: Number(document.getElementById("prefComfortMin").value),
+    comfort_temperature_max: Number(document.getElementById("prefComfortMax").value),
+    high_temperature_threshold: Number(document.getElementById("prefHighTemp").value),
+    light_waste_minutes: Number(document.getElementById("prefLightWaste").value),
+    occupancy_empty_minutes: Number(document.getElementById("prefOccupancy").value),
+    device_offline_minutes: Number(document.getElementById("prefOffline").value),
+    quiet_hours_enabled: document.getElementById("prefQuiet").checked,
+    ai_recommendations_enabled: document.getElementById("prefAi").checked,
+    auto_control_enabled: document.getElementById("prefAuto").checked,
+    notifications_enabled: document.getElementById("prefNotifications").checked,
+    schedules_enabled: document.getElementById("prefSchedules").checked,
+  };
+  const response = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || data.message || "Preference update failed");
+  }
+  ids.commandMessage.textContent = "Preferences saved.";
+  await fetchLatest();
+}
+
+async function addDemoSchedule() {
+  const response = await fetch("/api/schedules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: "Turn off Switch Breaker at night",
+      device_id: "breaker_01",
+      command: "turn_off",
+      time: "23:30",
+      days: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+      enabled: true,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || data.message || "Schedule create failed");
+  }
+  await loadSettingsPanel();
+  await fetchLatest();
+}
+
+async function handleScheduleAction(scheduleId, action) {
+  let response;
+  if (action === "run") {
+    response = await fetch(`/api/schedules/${scheduleId}/run-now`, { method: "POST" });
+  } else if (action === "delete") {
+    response = await fetch(`/api/schedules/${scheduleId}`, { method: "DELETE" });
+  } else {
+    const row = document.querySelector(`[data-schedule-id="${scheduleId}"][data-schedule-action="toggle"]`);
+    response = await fetch(`/api/schedules/${scheduleId}/enabled`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: row?.textContent === "Enable" }),
+    });
+  }
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || data.message || "Schedule update failed");
+  }
+  await loadSettingsPanel();
+  await fetchLatest();
 }
 
 async function changeMode(mode) {
@@ -397,6 +535,9 @@ document.querySelectorAll("[data-device-id][data-action]").forEach((button) => {
 
 document.getElementById("settingsButton").addEventListener("click", () => {
   ids.settingsModal.classList.remove("hidden");
+  loadSettingsPanel().catch((error) => {
+    ids.commandMessage.textContent = `Settings failed: ${error.message}`;
+  });
 });
 
 document.getElementById("closeSettingsButton").addEventListener("click", () => {
@@ -406,6 +547,28 @@ document.getElementById("closeSettingsButton").addEventListener("click", () => {
 document.querySelectorAll(".mode-option").forEach((button) => {
   button.addEventListener("click", () => {
     changeMode(button.dataset.mode);
+  });
+});
+
+document.getElementById("savePrefsButton").addEventListener("click", () => {
+  savePreferences().catch((error) => {
+    ids.commandMessage.textContent = `Preferences failed: ${error.message}`;
+  });
+});
+
+document.getElementById("addScheduleButton").addEventListener("click", () => {
+  addDemoSchedule().catch((error) => {
+    ids.commandMessage.textContent = `Schedule failed: ${error.message}`;
+  });
+});
+
+ids.settingsSchedules.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-schedule-id][data-schedule-action]");
+  if (!button) {
+    return;
+  }
+  handleScheduleAction(button.dataset.scheduleId, button.dataset.scheduleAction).catch((error) => {
+    ids.commandMessage.textContent = `Schedule failed: ${error.message}`;
   });
 });
 

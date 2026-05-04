@@ -15,7 +15,7 @@ import {
   resolveAlertToHistory,
 } from "../alerts";
 import { resolveRecommendation, upsertRecommendation } from "../recommendations";
-import { getBahrainDayId } from "../utils";
+import { getBahrainDayId, msToIso, nowTimestamp } from "../utils";
 
 export const analyzeBreakerLog = onValueCreated(
   {
@@ -130,11 +130,14 @@ export const analyzeBreakerLog = onValueCreated(
       // 2) UPDATE CURRENT BREAKER ENERGY STATE
       // --------------------------------------------------
       const breakerState = {
+        ...nowTimestamp(measurementTimestampMs),
         breaker_id: breakerId,
         name: breakerName,
         type: breakerType,
         last_log_id: logId,
         last_seen_at: measurementTimestampMs,
+        last_seen_ms: measurementTimestampMs,
+        last_seen_iso: msToIso(measurementTimestampMs),
 
         voltage_V: voltageV,
         current_A: currentA,
@@ -163,7 +166,10 @@ export const analyzeBreakerLog = onValueCreated(
       await breakerStateRef.set(breakerState);
 
       await breakerStatusRef.update({
+        ...nowTimestamp(measurementTimestampMs),
         lastSeenMs: measurementTimestampMs,
+        last_seen_ms: measurementTimestampMs,
+        last_seen_iso: msToIso(measurementTimestampMs),
       });
 
       // --------------------------------------------------
@@ -186,6 +192,7 @@ export const analyzeBreakerLog = onValueCreated(
       const todayCostBHD = todayEnergyKwh * ELECTRICITY_TARIFF_BHD_PER_KWH;
 
       await todayRef.set({
+        ...nowTimestamp(now),
         breaker_id: breakerId,
         name: breakerName,
 
@@ -196,6 +203,8 @@ export const analyzeBreakerLog = onValueCreated(
         last_voltage_V: voltageV,
         last_current_A: currentA,
         last_seen_at: now,
+        last_seen_ms: now,
+        last_seen_iso: msToIso(now),
 
         tariff_BHD_per_kWh: ELECTRICITY_TARIFF_BHD_PER_KWH,
       });
@@ -240,21 +249,29 @@ export const analyzeBreakerLog = onValueCreated(
             switch: branch.switch ?? null,
             relay_status: branch.relay_status ?? null,
             last_seen_at: branch.last_seen_at ?? null,
+            last_seen_ms: branch.last_seen_ms ?? branch.last_seen_at ?? null,
+            last_seen_iso: branch.last_seen_iso ?? msToIso(branch.last_seen_at),
           };
         }
       }
 
       await totalStateRef.set({
+        ...nowTimestamp(now),
         total_power_W: Number(totalPowerW.toFixed(2)),
         total_estimated_energy_kWh: Number(totalEstimatedEnergyKwh.toFixed(6)),
         total_estimated_cost_BHD: Number(totalEstimatedCostBHD.toFixed(6)),
         tariff_BHD_per_kWh: ELECTRICITY_TARIFF_BHD_PER_KWH,
         updated_at: now,
+        updated_at_ms: now,
+        updated_at_iso: msToIso(now),
         branches,
       });
 
       await backendRef.child("dashboard/energy").set({
+        ...nowTimestamp(now),
         updated_at: now,
+        updated_at_ms: now,
+        updated_at_iso: msToIso(now),
 
         total_power_W: Number(totalPowerW.toFixed(2)),
         total_estimated_energy_kWh: Number(totalEstimatedEnergyKwh.toFixed(6)),
@@ -363,8 +380,11 @@ export const analyzeBreakerLog = onValueCreated(
       : 0;
 
       await backendRef.child("dashboard/alerts").update({
+        ...nowTimestamp(now),
         active_energy_alerts_count: activeEnergyAlertsCount,
         updated_at: now,
+        updated_at_ms: now,
+        updated_at_iso: msToIso(now),
       });
 
       logger.info("Breaker log processed successfully", {

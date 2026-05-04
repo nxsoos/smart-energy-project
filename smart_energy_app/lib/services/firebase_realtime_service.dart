@@ -23,6 +23,8 @@ class DashboardData {
   final ControlModeInfo control;
   final List<ActionSuggestion> actionSuggestions;
   final List<AutomationLog> automationLogs;
+  final Map<String, dynamic> settingsSummary;
+  final ScheduleInfo? nextSchedule;
   final String? scenarioId;
   final String? scenarioName;
   final String? scenarioDescription;
@@ -48,11 +50,89 @@ class DashboardData {
     ),
     this.actionSuggestions = const [],
     this.automationLogs = const [],
+    this.settingsSummary = const {},
+    this.nextSchedule,
     this.scenarioId,
     this.scenarioName,
     this.scenarioDescription,
     this.deviceControlEnabled = true,
   });
+}
+
+class HomeSettings {
+  const HomeSettings(this.values);
+
+  final Map<String, dynamic> values;
+
+  double get costPerKwh => _asDoubleValue(values['cost_per_kwh'], 0.029);
+  double get comfortMin =>
+      _asDoubleValue(values['comfort_temperature_min'], 22);
+  double get comfortMax =>
+      _asDoubleValue(values['comfort_temperature_max'], 25);
+  double get highTempThreshold =>
+      _asDoubleValue(values['high_temperature_threshold'], 28);
+  int get lightWasteMinutes => _asIntValue(values['light_waste_minutes'], 5);
+  int get occupancyEmptyMinutes =>
+      _asIntValue(values['occupancy_empty_minutes'], 10);
+  int get deviceOfflineMinutes =>
+      _asIntValue(values['device_offline_minutes'], 2);
+  bool get quietHoursEnabled =>
+      _asBoolValue(values['quiet_hours_enabled'], true);
+  String get quietHoursStart =>
+      values['quiet_hours_start']?.toString() ?? '23:00';
+  String get quietHoursEnd => values['quiet_hours_end']?.toString() ?? '06:00';
+  bool get aiRecommendationsEnabled =>
+      _asBoolValue(values['ai_recommendations_enabled'], true);
+  bool get autoControlEnabled =>
+      _asBoolValue(values['auto_control_enabled'], true);
+  bool get notificationsEnabled =>
+      _asBoolValue(values['notifications_enabled'], true);
+  bool get schedulesEnabled => _asBoolValue(values['schedules_enabled'], true);
+
+  static double _asDoubleValue(dynamic value, double fallback) {
+    if (value is num) {
+      return value.toDouble();
+    }
+    return double.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  static int _asIntValue(dynamic value, int fallback) {
+    if (value is num) {
+      return value.toInt();
+    }
+    return int.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  static bool _asBoolValue(dynamic value, bool fallback) {
+    if (value is bool) {
+      return value;
+    }
+    return fallback;
+  }
+}
+
+class ScheduleInfo {
+  const ScheduleInfo({
+    required this.id,
+    required this.name,
+    required this.deviceId,
+    required this.deviceName,
+    required this.command,
+    required this.time,
+    required this.days,
+    required this.enabled,
+    this.nextRunAt,
+  });
+
+  final String id;
+  final String name;
+  final String deviceId;
+  final String deviceName;
+  final String command;
+  final String time;
+  final List<String> days;
+  final bool enabled;
+  final DateTime? nextRunAt;
 }
 
 class ControlModeInfo {
@@ -235,13 +315,16 @@ class FirebaseRealtimeService {
 
     return SensorData(
       timestamp: _asDateTime(
-        _pick(source, [
+        _pick(sensors, [
           'timestamp_ms',
+          'timestamp_iso',
+          'readable_time',
+          'timestamp',
+        ]) ??
+            _pick(status, [
           'lastSeenMs',
           'last_seen_ms',
-          'readable_time',
           'readableTime',
-          'timestamp',
         ]),
       ),
       temperature: _asDouble(
@@ -419,6 +502,8 @@ class FirebaseRealtimeService {
       actionSuggestions: actionSuggestions.map(_parseActionSuggestion).toList(),
       automationLogs: automationLogs.map(_parseAutomationLog).toList()
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
+      settingsSummary: _asMap(data['settings_summary']),
+      nextSchedule: _parseOptionalSchedule(_asMap(data['next_schedule'])),
       scenarioId: null,
       scenarioName: null,
       scenarioDescription: null,
@@ -615,6 +700,8 @@ class FirebaseRealtimeService {
       ).map(_parseActionSuggestion).toList(),
       automationLogs: _asList(automationLogs).map(_parseAutomationLog).toList()
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
+      settingsSummary: _asMap(sourceHome['settings_summary']),
+      nextSchedule: null,
       scenarioId: _asNullableString(
         _pick(metadata, ['scenario_id', 'active_scenario', 'scenario_name']),
       ),
@@ -702,6 +789,86 @@ class FirebaseRealtimeService {
           ),
         )
         .toList();
+  }
+
+  Future<HomeSettings> fetchSettings({
+    required String homeId,
+    CancelToken? cancelToken,
+  }) async {
+    final response = await _dio.get(
+      '/api/home/$homeId/settings',
+      cancelToken: cancelToken,
+    );
+    return HomeSettings(_asMap(_asMap(response.data)['settings']));
+  }
+
+  Future<HomeSettings> updateSettings({
+    required String homeId,
+    required Map<String, dynamic> values,
+  }) async {
+    final response = await _dio.put('/api/home/$homeId/settings', data: values);
+    return HomeSettings(_asMap(_asMap(response.data)['settings']));
+  }
+
+  Future<List<ScheduleInfo>> fetchSchedules({
+    required String homeId,
+    CancelToken? cancelToken,
+  }) async {
+    final response = await _dio.get(
+      '/api/home/$homeId/schedules',
+      cancelToken: cancelToken,
+    );
+    return _asList(
+      _asMap(response.data)['schedules'],
+    ).map(_parseSchedule).toList();
+  }
+
+  Future<ScheduleInfo> createSchedule({
+    required String homeId,
+    required Map<String, dynamic> values,
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/schedules',
+      data: values,
+    );
+    return _parseSchedule(_asMap(_asMap(response.data)['schedule']));
+  }
+
+  Future<ScheduleInfo> updateScheduleEnabled({
+    required String homeId,
+    required String scheduleId,
+    required bool enabled,
+  }) async {
+    final response = await _dio.patch(
+      '/api/home/$homeId/schedules/$scheduleId/enabled',
+      data: {'enabled': enabled, 'updated_by': 'flutter_app'},
+    );
+    return _parseSchedule(_asMap(_asMap(response.data)['schedule']));
+  }
+
+  Future<void> deleteSchedule({
+    required String homeId,
+    required String scheduleId,
+  }) async {
+    await _dio.delete(
+      '/api/home/$homeId/schedules/$scheduleId',
+      queryParameters: {'deleted_by': 'flutter_app'},
+    );
+  }
+
+  Future<String> runScheduleNow({
+    required String homeId,
+    required String scheduleId,
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/schedules/$scheduleId/run-now',
+    );
+    final data = _asMap(response.data);
+    final log = _asMap(data['log']);
+    return _asString(
+      _pick(log, ['message']) ?? _pick(data, ['message']),
+      fallback: 'Schedule run requested.',
+    );
   }
 
   Future<String> updateControlMode({
@@ -990,6 +1157,29 @@ class FirebaseRealtimeService {
       reason: _asString(_pick(data, ['reason']), fallback: 'Automatic action.'),
       createdAt: _asDateTime(
         _pick(data, ['created_at_ms', 'created_at_iso', 'created_at']),
+      ),
+    );
+  }
+
+  ScheduleInfo? _parseOptionalSchedule(Map<String, dynamic> data) {
+    if (data.isEmpty) {
+      return null;
+    }
+    return _parseSchedule(data);
+  }
+
+  ScheduleInfo _parseSchedule(Map<String, dynamic> data) {
+    return ScheduleInfo(
+      id: _asString(_pick(data, ['schedule_id', 'id'])),
+      name: _asString(_pick(data, ['name']), fallback: 'Device schedule'),
+      deviceId: _asString(_pick(data, ['device_id'])),
+      deviceName: _asString(_pick(data, ['device_name']), fallback: 'Device'),
+      command: _asString(_pick(data, ['command']), fallback: 'turn_off'),
+      time: _asString(_pick(data, ['time']), fallback: '23:30'),
+      days: _asListOfStrings(_pick(data, ['days'])),
+      enabled: _asBool(_pick(data, ['enabled']), fallback: true),
+      nextRunAt: _parseOptionalDateTime(
+        _pick(data, ['next_run_at_ms', 'next_run_at_iso']),
       ),
     );
   }
@@ -1540,6 +1730,13 @@ class FirebaseRealtimeService {
       return value.entries
           .map((entry) => {'id': entry.key.toString(), ..._asMap(entry.value)})
           .toList();
+    }
+    return const [];
+  }
+
+  List<String> _asListOfStrings(dynamic value) {
+    if (value is List) {
+      return value.map((item) => item.toString()).toList();
     }
     return const [];
   }

@@ -1,6 +1,7 @@
 import { admin } from "./firebase";
 import { ALERT_COOLDOWN_MS, ALERT_RESOLVE_AFTER_MS } from "./config";
 import type { ActiveAlertRecord, AlertCreateInput, AlertLifecycleOptions } from "./types";
+import { msToIso, nowTimestamp } from "./utils";
 
 const DEFAULT_ALERT_OPTIONS: AlertLifecycleOptions = {
   mirrorToEnergy: false,
@@ -77,6 +78,7 @@ export async function createOrUpdateActiveAlert(
   const nextAlert: ActiveAlertRecord = {
     ...(existing ?? {}),
     ...(input.additionalFields ?? {}),
+    ...nowTimestamp(timestampMs),
     alert_key: alertKey,
     type: input.type,
     subtype: input.subtype,
@@ -87,12 +89,24 @@ export async function createOrUpdateActiveAlert(
       typeof existing?.first_detected_at === "number"
         ? existing.first_detected_at
         : timestampMs,
+    created_at_ms:
+      typeof existing?.created_at_ms === "number"
+        ? (existing.created_at_ms as number)
+        : timestampMs,
+    created_at_iso:
+      typeof existing?.created_at_iso === "string"
+        ? (existing.created_at_iso as string)
+        : msToIso(timestampMs),
     last_seen_at: timestampMs,
+    last_seen_ms: timestampMs,
+    last_seen_iso: msToIso(timestampMs),
     last_triggered_at: cooldownPassed
       ? timestampMs
       : typeof existing?.last_triggered_at === "number"
       ? existing.last_triggered_at
       : timestampMs,
+    updated_at_ms: timestampMs,
+    updated_at_iso: msToIso(timestampMs),
     last_seen_normal_at: null,
     alert_count: alertCount,
     source: input.source,
@@ -128,8 +142,13 @@ export async function markAlertResolving(
           : timestampMs;
 
       await ref.activeRef.update({
+        ...nowTimestamp(timestampMs),
         status: "resolving",
         last_seen_at: timestampMs,
+        last_seen_ms: timestampMs,
+        last_seen_iso: msToIso(timestampMs),
+        updated_at_ms: timestampMs,
+        updated_at_iso: msToIso(timestampMs),
         last_seen_normal_at: lastSeenNormalAt,
       });
     })
@@ -169,12 +188,17 @@ export async function resolveAlertToHistory(
           ? alert.first_detected_at
           : timestampMs;
 
-      const historyKey = `${alertKey}_${firstDetectedAt}`;
+      const historyKey = `alert_${timestampMs}`;
 
       await ref.historyRef.child(historyKey).set({
         ...alert,
+        ...nowTimestamp(timestampMs),
         status: "resolved",
         resolved_at: timestampMs,
+        resolved_at_ms: timestampMs,
+        resolved_at_iso: msToIso(timestampMs),
+        updated_at_ms: timestampMs,
+        updated_at_iso: msToIso(timestampMs),
         duration_ms: timestampMs - firstDetectedAt,
       });
 

@@ -15,7 +15,14 @@ import {
   hasHourlyEnergyData,
   summarizeHourlyBreakerEnergy,
 } from "../energySummary";
-import { getBahrainDayId, getBahrainHourId, roundTo } from "../utils";
+import {
+  BAHRAIN_OFFSET_MS,
+  getBahrainDayId,
+  getBahrainHourId,
+  msToIso,
+  nowTimestamp,
+  roundTo,
+} from "../utils";
 
 export const generateHourlySummaries = onSchedule(
   {
@@ -26,9 +33,6 @@ export const generateHourlySummaries = onSchedule(
   async () => {
     try {
       const now = Date.now();
-
-      // Bahrain is UTC+3 and does not use daylight saving time
-      const BAHRAIN_OFFSET_MS = 3 * 60 * 60 * 1000;
 
       // Previous completed Bahrain hour
       const currentBahrainHourStart =
@@ -199,9 +203,14 @@ export const generateHourlySummaries = onSchedule(
             : "no_data";
 
         const summary = {
+          ...nowTimestamp(now),
           hour_id: hourId,
           hour_start: hourStart,
+          hour_start_ms: hourStart,
+          hour_start_iso: msToIso(hourStart),
           hour_end: hourEnd,
+          hour_end_ms: hourEnd,
+          hour_end_iso: msToIso(hourEnd),
           sample_count: sampleCount,
           avg_temperature: avgTemperature,
           avg_humidity: avgHumidity,
@@ -213,6 +222,8 @@ export const generateHourlySummaries = onSchedule(
           high_temp_count: highTempCount,
           energy: hourlyEnergy,
           created_at: now,
+          created_at_ms: now,
+          created_at_iso: msToIso(now),
           status,
         };
 
@@ -251,7 +262,6 @@ export const generateDailySummaries = onSchedule(
     try {
       const now = Date.now();
 
-      const BAHRAIN_OFFSET_MS = 3 * 60 * 60 * 1000;
       const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
       // Get previous completed Bahrain day
@@ -537,9 +547,14 @@ export const generateDailySummaries = onSchedule(
         };
 
         const dailySummary = {
+          ...nowTimestamp(now),
           day_id: dayId,
           day_start: dayStart,
+          day_start_ms: dayStart,
+          day_start_iso: msToIso(dayStart),
           day_end: dayEnd,
+          day_end_ms: dayEnd,
+          day_end_iso: msToIso(dayEnd),
           hour_count: hourCount,
           sample_count: sampleCount,
           avg_temperature: avgTemperature,
@@ -552,6 +567,8 @@ export const generateDailySummaries = onSchedule(
           high_temp_count: highTempCount,
           energy: dailyEnergy,
           created_at: now,
+          created_at_ms: now,
+          created_at_iso: msToIso(now),
           status: hourCount > 0 ? "completed" : "no_data",
         };
 

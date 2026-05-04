@@ -1,9 +1,16 @@
 import type { BreakerId } from "./config";
 
 export type PendingCondition = {
+  timestamp_ms?: number;
+  timestamp_iso?: string | null;
+  timezone?: string;
   active: boolean;
   started_at: number;
+  started_at_ms?: number;
+  started_at_iso?: string | null;
   last_seen_at: number;
+  last_seen_ms?: number;
+  last_seen_iso?: string | null;
   alert_sent: boolean;
   type: string;
   source_log?: string;
@@ -33,6 +40,9 @@ export type RecommendationPriority = "low" | "medium" | "high";
 export type RecommendationStatus = "active" | "dismissed" | "resolved";
 
 export type RecommendationRecord = {
+  timestamp_ms?: number;
+  timestamp_iso?: string | null;
+  timezone?: string;
   recommendation_id: string;
   type: RecommendationType;
   priority: RecommendationPriority;
@@ -43,8 +53,14 @@ export type RecommendationRecord = {
   related_alert_key: string | null;
   status: RecommendationStatus;
   created_at: number;
+  created_at_ms?: number;
+  created_at_iso?: string | null;
   resolved_at: number | null;
+  resolved_at_ms?: number | null;
+  resolved_at_iso?: string | null;
   updated_at?: number;
+  updated_at_ms?: number;
+  updated_at_iso?: string | null;
 };
 
 export type UpsertRecommendationInput = {

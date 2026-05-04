@@ -3,6 +3,7 @@ import * as logger from "firebase-functions/logger";
 import { admin } from "../firebase";
 import { DATABASE_REGION, ONE_DAY_MS, RAW_LOG_RETENTION_DAYS } from "../config";
 import { cleanupPathByTimestamp } from "../cleanup";
+import { msToIso, nowTimestamp } from "../utils";
 
 export const cleanupOldRawLogs = onSchedule(
   {
@@ -65,10 +66,16 @@ export const cleanupOldRawLogs = onSchedule(
 
           const completedAt = Date.now();
           const summary = {
+            ...nowTimestamp(completedAt),
             run_id: runId,
             started_at: startedAt,
+            started_at_ms: startedAt,
+            started_at_iso: msToIso(startedAt),
             completed_at: completedAt,
+            completed_at_ms: completedAt,
+            completed_at_iso: msToIso(completedAt),
             cutoff_ms: cutoffMs,
+            cutoff_iso: msToIso(cutoffMs),
             retention_days: RAW_LOG_RETENTION_DAYS,
             deleted: {
               sensor_logs: deletedSensorLogs,
@@ -86,10 +93,16 @@ export const cleanupOldRawLogs = onSchedule(
             error instanceof Error ? error.message : "Unknown cleanup error";
 
           const failedSummary = {
+            ...nowTimestamp(completedAt),
             run_id: runId,
             started_at: startedAt,
+            started_at_ms: startedAt,
+            started_at_iso: msToIso(startedAt),
             completed_at: completedAt,
+            completed_at_ms: completedAt,
+            completed_at_iso: msToIso(completedAt),
             cutoff_ms: cutoffMs,
+            cutoff_iso: msToIso(cutoffMs),
             retention_days: RAW_LOG_RETENTION_DAYS,
             deleted: {
               sensor_logs: 0,

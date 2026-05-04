@@ -2,6 +2,7 @@ import { admin } from "./firebase";
 import { DEVICE_OFFLINE_AFTER_MS } from "./config";
 import type { DeviceHealthStatus } from "./types";
 import { createOrUpdateActiveAlert, markAlertResolving, resolveAlertToHistory } from "./alerts";
+import { msToIso } from "./utils";
 
 export async function checkAndUpdateDeviceHealth(
   homeId: string,
@@ -19,6 +20,15 @@ export async function checkAndUpdateDeviceHealth(
     .ref(`/homes/${homeId}/devices/${deviceId}/status`);
 
   const statusSnap = await deviceStatusRef.get();
+  const settingsSnap = await admin.database().ref(`/homes/${homeId}/settings`).get();
+  const settings =
+    settingsSnap.exists() && typeof settingsSnap.val() === "object" && settingsSnap.val() !== null
+      ? (settingsSnap.val() as Record<string, unknown>)
+      : {};
+  const offlineAfterMs =
+    typeof settings.device_offline_minutes === "number" && settings.device_offline_minutes > 0
+      ? settings.device_offline_minutes * 60 * 1000
+      : DEVICE_OFFLINE_AFTER_MS;
   const status = statusSnap.exists()
     ? (statusSnap.val() as Record<string, unknown>)
     : {};
@@ -90,7 +100,7 @@ export async function checkAndUpdateDeviceHealth(
       },
       timestampMs
     );
-  } else if (timestampMs - lastSeenMsRaw > DEVICE_OFFLINE_AFTER_MS) {
+  } else if (timestampMs - lastSeenMsRaw > offlineAfterMs) {
     healthStatus = "offline";
     online = false;
     offlineSince = offlineSince ?? timestampMs;
@@ -124,8 +134,14 @@ export async function checkAndUpdateDeviceHealth(
   const statusUpdates: Record<string, unknown> = {
     health_status: healthStatus,
     lastSeenMs: lastSeenMsRaw,
+    last_seen_ms: lastSeenMsRaw,
+    last_seen_iso: msToIso(lastSeenMsRaw),
     last_health_check_at: timestampMs,
+    last_health_check_at_ms: timestampMs,
+    last_health_check_at_iso: msToIso(timestampMs),
     offline_since: offlineSince,
+    offline_since_ms: offlineSince,
+    offline_since_iso: msToIso(offlineSince),
   };
   if (!isBreaker || tuyaOnline === null) {
     statusUpdates.online = online;

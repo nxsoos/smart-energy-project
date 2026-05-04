@@ -71,19 +71,51 @@ def normalize_bool(value: Any) -> bool | None:
     return None
 
 
+def timestamp_ms_from_source(*sources: dict[str, Any]) -> int | None:
+    for key in [
+        "timestamp_ms",
+        "last_seen_ms",
+        "lastSeenMs",
+        "sensor_timestamp_ms",
+    ]:
+        for source in sources:
+            value = source.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    parsed = int(float(value))
+                except ValueError:
+                    continue
+                if parsed > 0:
+                    return parsed
+
+    for key in ["timestamp_iso", "last_seen_iso", "sensor_timestamp_iso"]:
+        for source in sources:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                try:
+                    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+                except ValueError:
+                    continue
+    return None
+
+
 def format_live_room(esp32: dict[str, Any]) -> dict[str, Any]:
     sensors = as_dict(esp32.get("sensors"))
     status = as_dict(esp32.get("status"))
     source = {**sensors, **status}
     motion = normalize_bool(source.get("motion"))
     smoke = normalize_bool(source.get("smoke"))
-    timestamp_ms = source.get("timestamp_ms") or source.get("lastSeenMs")
+    timestamp_ms = timestamp_ms_from_source(sensors, status)
     age_ms = None
     if isinstance(timestamp_ms, (int, float)):
         age_ms = int(time.time() * 1000) - int(timestamp_ms)
 
     feed_online = normalize_bool(source.get("online"))
-    if age_ms is not None and age_ms > SENSOR_STALE_AFTER_MS:
+    if age_ms is not None and age_ms <= SENSOR_STALE_AFTER_MS:
+        feed_online = True
+    elif age_ms is not None and age_ms > SENSOR_STALE_AFTER_MS:
         feed_online = False
     elif feed_online is None:
         feed_online = age_ms is not None and age_ms <= SENSOR_STALE_AFTER_MS
@@ -92,6 +124,7 @@ def format_live_room(esp32: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "sensor_timestamp_ms": timestamp_ms,
+        "sensor_timestamp_iso": source.get("timestamp_iso") or source.get("last_seen_iso"),
         "sensor_age_ms": age_ms,
         "feed_online": feed_online,
         "temperature": source.get("temperature"),
@@ -226,6 +259,8 @@ def latest():
                 "control": data.get("control", {}),
                 "action_suggestions": data.get("action_suggestions", []),
                 "automation_logs": data.get("automation_logs", []),
+                "settings_summary": data.get("settings_summary", {}),
+                "next_schedule": data.get("next_schedule"),
                 "ai": data.get("ai", {}),
             }
         )
@@ -352,6 +387,106 @@ def decide_action_suggestion(suggestion_id: str, decision: str):
                 detail = detail.get("message", "Action suggestion update failed")
             return jsonify({"success": False, "message": detail}), response.status_code
         return jsonify(result)
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.get("/api/settings")
+def get_settings():
+    try:
+        response = requests.get(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.put("/api/settings")
+def update_settings():
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "JSON body is required"}), 400
+        data["updated_by"] = "pi_dashboard"
+        response = requests.put(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
+            json=data,
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.get("/api/schedules")
+def get_schedules():
+    try:
+        response = requests.get(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.post("/api/schedules")
+def create_schedule():
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "JSON body is required"}), 400
+        data["created_by"] = "pi_dashboard"
+        response = requests.post(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
+            json=data,
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.patch("/api/schedules/<schedule_id>/enabled")
+def update_schedule_enabled(schedule_id: str):
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "JSON body is required"}), 400
+        data["updated_by"] = "pi_dashboard"
+        response = requests.patch(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/enabled",
+            json=data,
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.post("/api/schedules/<schedule_id>/run-now")
+def run_schedule_now(schedule_id: str):
+    try:
+        response = requests.post(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/run-now",
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.delete("/api/schedules/<schedule_id>")
+def delete_schedule(schedule_id: str):
+    try:
+        response = requests.delete(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}",
+            params={"deleted_by": "pi_dashboard"},
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
     except Exception as error:
         return jsonify({"success": False, "message": str(error)}), 500
 

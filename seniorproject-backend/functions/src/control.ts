@@ -1,4 +1,5 @@
 import { admin } from "./firebase";
+import { msToIso, nowTimestamp } from "./utils";
 
 export type ControlMode = "manual" | "assist" | "auto";
 export type SuggestedAction = {
@@ -36,10 +37,6 @@ const SAFE_AUTO_ACTIONS: Record<string, Set<string>> = {
   breaker_01: new Set(["turn_off"]),
   breaker_02: new Set(["turn_on", "turn_off"]),
 };
-
-function iso(timestampMs: number): string {
-  return new Date(timestampMs).toISOString();
-}
 
 function targetState(command: string): string {
   return command === "turn_on" ? "on" : "off";
@@ -82,10 +79,11 @@ export async function getControlMode(homeId: string): Promise<ControlMode> {
 
   const now = Date.now();
   await ref.set({
+    ...nowTimestamp(now),
     mode: "assist",
     updated_by: "system_default",
     updated_at_ms: now,
-    updated_at_iso: iso(now),
+    updated_at_iso: msToIso(now),
   });
   return "assist";
 }
@@ -133,6 +131,7 @@ export async function createActionSuggestion(
 
   const suggestionId = `sug_${now}`;
   await activeRef.child(suggestionId).set({
+      ...nowTimestamp(now),
       suggestion_id: suggestionId,
       home_id: homeId,
       device_id: action.deviceId,
@@ -143,7 +142,7 @@ export async function createActionSuggestion(
       source: action.source,
       status: "waiting_for_user",
       created_at_ms: now,
-      created_at_iso: iso(now),
+      created_at_iso: msToIso(now),
       actions: ["approve", "dismiss"],
     });
   return suggestionId;
@@ -153,6 +152,13 @@ export async function tryCreateAutomaticCommand(
   homeId: string,
   action: SuggestedAction
 ): Promise<boolean> {
+  const settings = asRecord(
+    (await admin.database().ref(`/homes/${homeId}/settings`).get()).val()
+  );
+  if (settings.auto_control_enabled === false) {
+    return false;
+  }
+
   const deviceRef = admin.database().ref(`/homes/${homeId}/devices/${action.deviceId}`);
   const device = asRecord((await deviceRef.get()).val());
   const automation = await ensureAutomation(homeId, action.deviceId);
@@ -202,6 +208,7 @@ export async function tryCreateAutomaticCommand(
   const now = Date.now();
   const commandId = `cmd_${now}`;
   const commandRecord = {
+    ...nowTimestamp(now),
     command_id: commandId,
     home_id: homeId,
     device_id: action.deviceId,
@@ -214,7 +221,7 @@ export async function tryCreateAutomaticCommand(
     reason: action.reason,
     status: "pending",
     requested_at_ms: now,
-    requested_at_iso: iso(now),
+    requested_at_iso: msToIso(now),
     sent_at_ms: null,
     sent_at_iso: null,
     confirmed_at_ms: null,
@@ -242,6 +249,8 @@ export async function tryCreateAutomaticCommand(
     [`commands/${action.deviceId}/latest`]: {
       ...commandRecord,
       created_at: now,
+      created_at_ms: now,
+      created_at_iso: msToIso(now),
       source: "backend_automation",
     },
     [`devices/${action.deviceId}/command_in_progress`]: true,
@@ -281,7 +290,7 @@ export async function tryCreateAutomaticCommand(
       command_id: commandId,
       source: "backend_automation",
       created_at_ms: now,
-      created_at_iso: iso(now),
+      created_at_iso: msToIso(now),
     },
   });
 

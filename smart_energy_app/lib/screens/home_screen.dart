@@ -70,6 +70,8 @@ class _HomeScreenState extends State<HomeScreen> {
   );
   List<ActionSuggestion> _actionSuggestions = const [];
   List<AutomationLog> _automationLogs = const [];
+  Map<String, dynamic> _settingsSummary = const {};
+  ScheduleInfo? _nextSchedule;
   bool _isUpdatingControlMode = false;
   final List<Alert> _alerts = [];
   final Set<String> _seenAlertIds = <String>{};
@@ -636,6 +638,8 @@ class _HomeScreenState extends State<HomeScreen> {
         _controlMode = dashboardData.control;
         _actionSuggestions = dashboardData.actionSuggestions;
         _automationLogs = dashboardData.automationLogs;
+        _settingsSummary = dashboardData.settingsSummary;
+        _nextSchedule = dashboardData.nextSchedule;
       });
 
       try {
@@ -778,21 +782,59 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showSettingsSheet() async {
-    final options = await _firebaseRealtimeService.fetchControlModes(
-      homeId: _selectedHomeId,
-    );
+    final results = await Future.wait<dynamic>([
+      _firebaseRealtimeService.fetchControlModes(homeId: _selectedHomeId),
+      _firebaseRealtimeService.fetchSettings(homeId: _selectedHomeId),
+      _firebaseRealtimeService.fetchSchedules(homeId: _selectedHomeId),
+    ]);
+    final options = results[0] as List<ControlModeOption>;
+    var settings = results[1] as HomeSettings;
+    var schedules = results[2] as List<ScheduleInfo>;
     if (!mounted) {
       return;
     }
 
+    final costController = TextEditingController(
+      text: settings.costPerKwh.toStringAsFixed(3),
+    );
+    final comfortMinController = TextEditingController(
+      text: settings.comfortMin.toStringAsFixed(0),
+    );
+    final comfortMaxController = TextEditingController(
+      text: settings.comfortMax.toStringAsFixed(0),
+    );
+    final highTempController = TextEditingController(
+      text: settings.highTempThreshold.toStringAsFixed(0),
+    );
+    final lightWasteController = TextEditingController(
+      text: settings.lightWasteMinutes.toString(),
+    );
+    final occupancyController = TextEditingController(
+      text: settings.occupancyEmptyMinutes.toString(),
+    );
+    final offlineController = TextEditingController(
+      text: settings.deviceOfflineMinutes.toString(),
+    );
+    var quietEnabled = settings.quietHoursEnabled;
+    var aiEnabled = settings.aiRecommendationsEnabled;
+    var autoEnabled = settings.autoControlEnabled;
+    var notificationsEnabled = settings.notificationsEnabled;
+    var schedulesEnabled = settings.schedulesEnabled;
+
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => StatefulBuilder(
         builder: (context, setSheetState) {
           return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+            child: SingleChildScrollView(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 14,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+              ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -811,8 +853,13 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       IconButton(
+                        tooltip: 'Close settings',
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
                         icon: const Icon(Icons.close),
-                        onPressed: () => Navigator.pop(context),
+                        onPressed: () => Navigator.of(context).pop(),
                       ),
                     ],
                   ),
@@ -838,6 +885,171 @@ class _HomeScreenState extends State<HomeScreen> {
                         setSheetState(() {
                           _isUpdatingControlMode = false;
                         });
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'System Preferences',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 10),
+                  _buildNumberField(costController, 'Cost per kWh'),
+                  _buildNumberField(
+                    comfortMinController,
+                    'Comfort temperature min',
+                  ),
+                  _buildNumberField(
+                    comfortMaxController,
+                    'Comfort temperature max',
+                  ),
+                  _buildNumberField(
+                    highTempController,
+                    'High temperature threshold',
+                  ),
+                  _buildNumberField(
+                    lightWasteController,
+                    'Light waste delay minutes',
+                  ),
+                  _buildNumberField(
+                    occupancyController,
+                    'Occupancy empty delay minutes',
+                  ),
+                  _buildNumberField(
+                    offlineController,
+                    'Device offline delay minutes',
+                  ),
+                  SwitchListTile(
+                    value: quietEnabled,
+                    onChanged: (value) =>
+                        setSheetState(() => quietEnabled = value),
+                    title: const Text('Quiet hours'),
+                    subtitle: Text(
+                      '${settings.quietHoursStart} - ${settings.quietHoursEnd}',
+                    ),
+                  ),
+                  SwitchListTile(
+                    value: aiEnabled,
+                    onChanged: (value) =>
+                        setSheetState(() => aiEnabled = value),
+                    title: const Text('AI recommendations'),
+                  ),
+                  SwitchListTile(
+                    value: autoEnabled,
+                    onChanged: (value) =>
+                        setSheetState(() => autoEnabled = value),
+                    title: const Text('Auto control'),
+                  ),
+                  SwitchListTile(
+                    value: notificationsEnabled,
+                    onChanged: (value) =>
+                        setSheetState(() => notificationsEnabled = value),
+                    title: const Text('Notifications'),
+                  ),
+                  SwitchListTile(
+                    value: schedulesEnabled,
+                    onChanged: (value) =>
+                        setSheetState(() => schedulesEnabled = value),
+                    title: const Text('Schedules'),
+                  ),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () async {
+                        final updated = await _saveSettings(
+                          costController: costController,
+                          comfortMinController: comfortMinController,
+                          comfortMaxController: comfortMaxController,
+                          highTempController: highTempController,
+                          lightWasteController: lightWasteController,
+                          occupancyController: occupancyController,
+                          offlineController: offlineController,
+                          quietEnabled: quietEnabled,
+                          aiEnabled: aiEnabled,
+                          autoEnabled: autoEnabled,
+                          notificationsEnabled: notificationsEnabled,
+                          schedulesEnabled: schedulesEnabled,
+                        );
+                        if (updated != null) {
+                          setSheetState(() {
+                            settings = updated;
+                          });
+                        }
+                      },
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('Save Preferences'),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Schedules',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: () async {
+                          final created = await _showCreateScheduleDialog();
+                          if (created == true) {
+                            final next = await _firebaseRealtimeService
+                                .fetchSchedules(homeId: _selectedHomeId);
+                            setSheetState(() => schedules = next);
+                            await _refreshData(
+                              showErrorSnackBar: false,
+                              updateLoading: false,
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add'),
+                      ),
+                    ],
+                  ),
+                  ...schedules.map(
+                    (schedule) => _buildScheduleTile(
+                      schedule,
+                      onChanged: (enabled) async {
+                        await _firebaseRealtimeService.updateScheduleEnabled(
+                          homeId: _selectedHomeId,
+                          scheduleId: schedule.id,
+                          enabled: enabled,
+                        );
+                        final next = await _firebaseRealtimeService
+                            .fetchSchedules(homeId: _selectedHomeId);
+                        setSheetState(() => schedules = next);
+                        await _refreshData(
+                          showErrorSnackBar: false,
+                          updateLoading: false,
+                        );
+                      },
+                      onRunNow: () async {
+                        final message = await _firebaseRealtimeService
+                            .runScheduleNow(
+                              homeId: _selectedHomeId,
+                              scheduleId: schedule.id,
+                            );
+                        if (!mounted) {
+                          return;
+                        }
+                        _showSnackBarDeferred(SnackBar(content: Text(message)));
+                      },
+                      onDelete: () async {
+                        await _firebaseRealtimeService.deleteSchedule(
+                          homeId: _selectedHomeId,
+                          scheduleId: schedule.id,
+                        );
+                        final next = await _firebaseRealtimeService
+                            .fetchSchedules(homeId: _selectedHomeId);
+                        setSheetState(() => schedules = next);
+                        await _refreshData(
+                          showErrorSnackBar: false,
+                          updateLoading: false,
+                        );
                       },
                     ),
                   ),
@@ -872,6 +1084,216 @@ class _HomeScreenState extends State<HomeScreen> {
         const SnackBar(content: Text('Could not update control mode.')),
       );
     }
+  }
+
+  Future<HomeSettings?> _saveSettings({
+    required TextEditingController costController,
+    required TextEditingController comfortMinController,
+    required TextEditingController comfortMaxController,
+    required TextEditingController highTempController,
+    required TextEditingController lightWasteController,
+    required TextEditingController occupancyController,
+    required TextEditingController offlineController,
+    required bool quietEnabled,
+    required bool aiEnabled,
+    required bool autoEnabled,
+    required bool notificationsEnabled,
+    required bool schedulesEnabled,
+  }) async {
+    final comfortMin = double.tryParse(comfortMinController.text);
+    final comfortMax = double.tryParse(comfortMaxController.text);
+    final highTemp = double.tryParse(highTempController.text);
+    if (comfortMin == null ||
+        comfortMax == null ||
+        highTemp == null ||
+        comfortMin >= comfortMax ||
+        highTemp <= comfortMax) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Check temperature preference values.')),
+      );
+      return null;
+    }
+
+    try {
+      final updated = await _firebaseRealtimeService.updateSettings(
+        homeId: _selectedHomeId,
+        values: {
+          'cost_per_kwh': double.tryParse(costController.text) ?? 0.029,
+          'comfort_temperature_min': comfortMin,
+          'comfort_temperature_max': comfortMax,
+          'high_temperature_threshold': highTemp,
+          'light_waste_minutes': int.tryParse(lightWasteController.text) ?? 5,
+          'occupancy_empty_minutes':
+              int.tryParse(occupancyController.text) ?? 10,
+          'device_offline_minutes': int.tryParse(offlineController.text) ?? 2,
+          'quiet_hours_enabled': quietEnabled,
+          'ai_recommendations_enabled': aiEnabled,
+          'auto_control_enabled': autoEnabled,
+          'notifications_enabled': notificationsEnabled,
+          'schedules_enabled': schedulesEnabled,
+          'updated_by': 'flutter_app',
+        },
+      );
+      await _refreshData(showErrorSnackBar: false, updateLoading: false);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Preferences saved.')));
+      }
+      return updated;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save preferences: $error')),
+        );
+      }
+      return null;
+    }
+  }
+
+  Future<bool?> _showCreateScheduleDialog() async {
+    final nameController = TextEditingController(text: 'Turn off at night');
+    var deviceId = 'breaker_01';
+    var command = 'turn_off';
+    var time = const TimeOfDay(hour: 23, minute: 30);
+    final selectedDays = <String>{
+      'Sun',
+      'Mon',
+      'Tue',
+      'Wed',
+      'Thu',
+      'Fri',
+      'Sat',
+    };
+
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Add Schedule'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Schedule name',
+                    ),
+                  ),
+                  DropdownButtonFormField<String>(
+                    initialValue: deviceId,
+                    decoration: const InputDecoration(labelText: 'Device'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'breaker_01',
+                        child: Text('Switch Breaker'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'breaker_02',
+                        child: Text('AC Breaker'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setDialogState(() => deviceId = value);
+                      }
+                    },
+                  ),
+                  DropdownButtonFormField<String>(
+                    initialValue: command,
+                    decoration: const InputDecoration(labelText: 'Command'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'turn_on',
+                        child: Text('Turn On'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'turn_off',
+                        child: Text('Turn Off'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setDialogState(() => command = value);
+                      }
+                    },
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Time'),
+                    subtitle: Text(_formatTimeOfDay(time)),
+                    trailing: const Icon(Icons.schedule),
+                    onTap: () async {
+                      final picked = await showTimePicker(
+                        context: context,
+                        initialTime: time,
+                      );
+                      if (picked != null) {
+                        setDialogState(() => time = picked);
+                      }
+                    },
+                  ),
+                  Wrap(
+                    spacing: 6,
+                    children: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+                        .map(
+                          (day) => FilterChip(
+                            label: Text(day),
+                            selected: selectedDays.contains(day),
+                            onSelected: (selected) {
+                              setDialogState(() {
+                                if (selected) {
+                                  selectedDays.add(day);
+                                } else {
+                                  selectedDays.remove(day);
+                                }
+                              });
+                            },
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: selectedDays.isEmpty
+                    ? null
+                    : () async {
+                        await _firebaseRealtimeService.createSchedule(
+                          homeId: _selectedHomeId,
+                          values: {
+                            'name': nameController.text.trim(),
+                            'device_id': deviceId,
+                            'command': command,
+                            'time': _formatTimeOfDay(time),
+                            'days': selectedDays.toList(),
+                            'enabled': true,
+                            'created_by': 'flutter_app',
+                          },
+                        );
+                        if (context.mounted) {
+                          Navigator.pop(context, true);
+                        }
+                      },
+                child: const Text('Create'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  String _formatTimeOfDay(TimeOfDay time) {
+    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   }
 
   Future<void> _approveSuggestion(ActionSuggestion suggestion) async {
@@ -985,6 +1407,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
               _buildControlModeCard(),
               const SizedBox(height: 16),
+
+              if (_nextSchedule != null) ...[
+                _buildNextScheduleCard(_nextSchedule!),
+                const SizedBox(height: 16),
+              ],
 
               if (_controlMode.mode == 'assist' &&
                   _actionSuggestions.isNotEmpty) ...[
@@ -1599,12 +2026,103 @@ class _HomeScreenState extends State<HomeScreen> {
                       color: AppColors.textSecondary,
                     ),
                   ),
+                  if (_settingsSummary.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Tariff ${_settingsSummary['cost_per_kwh'] ?? '--'} ${_settingsSummary['currency'] ?? 'BHD'}/kWh',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.textSecondary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
             IconButton(
               icon: const Icon(Icons.settings),
               onPressed: _showSettingsSheet,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNextScheduleCard(ScheduleInfo schedule) {
+    return Card(
+      elevation: 1,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.event_available_outlined,
+              color: AppColors.primary,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Next schedule: ${schedule.name} at ${schedule.time}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNumberField(TextEditingController controller, String label) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: TextField(
+        controller: controller,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+          isDense: true,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildScheduleTile(
+    ScheduleInfo schedule, {
+    required ValueChanged<bool> onChanged,
+    required VoidCallback onRunNow,
+    required VoidCallback onDelete,
+  }) {
+    final commandLabel = schedule.command == 'turn_on' ? 'On' : 'Off';
+    return Card(
+      elevation: 0,
+      child: ListTile(
+        leading: const Icon(Icons.schedule),
+        title: Text(
+          schedule.name,
+          style: const TextStyle(fontWeight: FontWeight.w800),
+        ),
+        subtitle: Text(
+          '${schedule.deviceName} - $commandLabel at ${schedule.time} - ${schedule.days.join(', ')}',
+        ),
+        trailing: Wrap(
+          spacing: 4,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.play_arrow),
+              onPressed: onRunNow,
+              tooltip: 'Run now',
+            ),
+            Switch(value: schedule.enabled, onChanged: onChanged),
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              onPressed: onDelete,
+              tooltip: 'Delete',
             ),
           ],
         ),

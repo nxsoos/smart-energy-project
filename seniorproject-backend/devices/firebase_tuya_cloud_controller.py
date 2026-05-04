@@ -1,6 +1,7 @@
 import time
 import traceback
-from datetime import datetime
+import sys
+from pathlib import Path
 from typing import Dict, Any
 
 import firebase_admin
@@ -8,6 +9,11 @@ from firebase_admin import credentials, db
 
 from tuya_connector import TuyaOpenAPI, TUYA_LOGGER
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from timestamp_utils import TIMEZONE, ms_to_iso, now_ms
 
 # Raspberry Pi hub role:
 # This is the default production script to run from main.py. It watches Firebase
@@ -68,10 +74,6 @@ DEVICES = {
 # Helpers
 # ============================================================
 
-def now_ms() -> int:
-    return int(time.time() * 1000)
-
-
 def as_int(value: Any, default: int = 0) -> int:
     if isinstance(value, bool):
         return default
@@ -86,11 +88,11 @@ def as_int(value: Any, default: int = 0) -> int:
 
 
 def readable_time() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return ms_to_iso(now_ms()) or ""
 
 
 def readable_iso() -> str:
-    return datetime.now().isoformat()
+    return ms_to_iso(now_ms()) or ""
 
 
 def initialize_firebase() -> None:
@@ -406,10 +408,14 @@ def write_command_state(
 
 def mark_command_sent(device_id: str, command: Dict[str, Any]) -> Dict[str, Any]:
     sent_at = now_ms()
+    sent_at_iso = ms_to_iso(sent_at)
     updates = {
+        "timestamp_ms": sent_at,
+        "timestamp_iso": sent_at_iso,
+        "timezone": TIMEZONE,
         "status": "sent",
         "sent_at_ms": sent_at,
-        "sent_at_iso": readable_iso(),
+        "sent_at_iso": sent_at_iso,
     }
     write_command_state(device_id, command, updates)
     return {**command, **updates}
@@ -422,15 +428,21 @@ def mark_command_done(
 ) -> None:
     command_id = command["command_id"]
     confirmed_at = now_ms()
-    readable = readable_time()
+    confirmed_at_iso = ms_to_iso(confirmed_at)
+    readable = confirmed_at_iso or readable_time()
     state = "on" if relay_on else "off"
     message = command_message(device_id, state)
 
     updates = {
+        "timestamp_ms": confirmed_at,
+        "timestamp_iso": confirmed_at_iso,
+        "timezone": TIMEZONE,
         "status": "confirmed",
         "confirmed_at_ms": confirmed_at,
-        "confirmed_at_iso": readable_iso(),
+        "confirmed_at_iso": confirmed_at_iso,
         "executed_at": confirmed_at,
+        "executed_at_ms": confirmed_at,
+        "executed_at_iso": confirmed_at_iso,
         "executed_readable_time": readable,
         "result": {
             **command.get("result", {}),
@@ -467,6 +479,8 @@ def mark_command_done(
             "relay_status": state,
             "online": True,
             "lastSeenMs": confirmed_at,
+            "last_seen_ms": confirmed_at,
+            "last_seen_iso": confirmed_at_iso,
             "readableTime": readable,
             "last_command_id": command_id,
         }
@@ -482,18 +496,24 @@ def mark_command_failed(
 ) -> None:
     command_id = command.get("command_id", f"unknown_{now_ms()}")
     failed_at = now_ms()
-    readable = readable_time()
+    failed_at_iso = ms_to_iso(failed_at)
+    readable = failed_at_iso or readable_time()
     mapped = friendly_error(error_message)
     state_update = actual_state or command.get("previous_state")
 
     updates = {
+        "timestamp_ms": failed_at,
+        "timestamp_iso": failed_at_iso,
+        "timezone": TIMEZONE,
         "status": status,
         "error": mapped["user_message"],
         "failed_at_ms": failed_at if status == "failed" else command.get("failed_at_ms"),
-        "failed_at_iso": readable_iso() if status == "failed" else command.get("failed_at_iso"),
+        "failed_at_iso": failed_at_iso if status == "failed" else command.get("failed_at_iso"),
         "timeout_at_ms": failed_at if status == "timeout" else command.get("timeout_at_ms"),
-        "timeout_at_iso": readable_iso() if status == "timeout" else command.get("timeout_at_iso"),
+        "timeout_at_iso": failed_at_iso if status == "timeout" else command.get("timeout_at_iso"),
         "executed_at": failed_at,
+        "executed_at_ms": failed_at,
+        "executed_at_iso": failed_at_iso,
         "executed_readable_time": readable,
         "result": {
             **command.get("result", {}),
@@ -528,6 +548,8 @@ def mark_command_failed(
 
     status_updates = {
         "lastSeenMs": failed_at,
+        "last_seen_ms": failed_at,
+        "last_seen_iso": failed_at_iso,
         "readableTime": readable,
         "last_error": mapped["user_message"],
         "last_command_id": command_id,
@@ -549,10 +571,14 @@ def mark_command_cancelled(
     message: str,
 ) -> None:
     cancelled_at = now_ms()
+    cancelled_at_iso = ms_to_iso(cancelled_at)
     updates = {
+        "timestamp_ms": cancelled_at,
+        "timestamp_iso": cancelled_at_iso,
+        "timezone": TIMEZONE,
         "status": "cancelled",
         "cancelled_at_ms": cancelled_at,
-        "cancelled_at_iso": readable_iso(),
+        "cancelled_at_iso": cancelled_at_iso,
         "result": {
             **command.get("result", {}),
             "success": False,

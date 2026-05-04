@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-import time
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -14,11 +14,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import credentials, db
 from pydantic import BaseModel, Field
 
+from timestamp_utils import (
+    TIMEZONE,
+    ms_to_iso,
+    now_ms,
+)
+
 
 load_dotenv()
 
 SERVICE_NAME = "smart_energy_api"
-BAHRAIN_TZ = ZoneInfo("Asia/Bahrain")
+BAHRAIN_TZ = ZoneInfo(TIMEZONE)
 DEFAULT_HOME_ID = "home_001"
 CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02"}
 VALID_COMMANDS = {"turn_on", "turn_off"}
@@ -31,7 +37,12 @@ USER_COMMAND_REQUESTERS = {
     "api",
     "mobile_app",
     "user_approved_ai_suggestion",
+    "schedule",
+    "schedule_manual_run",
 }
+VALID_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+PY_WEEKDAY_TO_DAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 DEFAULT_DEVICE_NAMES = {
     "esp32_01": "Room Sensor",
@@ -87,6 +98,36 @@ DEFAULT_AUTOMATION_BY_DEVICE = {
 SAFE_AUTO_ACTIONS = {
     "breaker_01": {"turn_off"},
     "breaker_02": {"turn_on", "turn_off"},
+}
+
+DEFAULT_SETTINGS = {
+    "currency": "BHD",
+    "cost_per_kwh": 0.029,
+    "temperature_unit": "C",
+    "comfort_temperature_min": 22,
+    "comfort_temperature_max": 25,
+    "high_temperature_threshold": 28,
+    "humidity_min": 30,
+    "humidity_max": 70,
+    "light_waste_minutes": 5,
+    "occupancy_empty_minutes": 10,
+    "device_offline_minutes": 2,
+    "quiet_hours_enabled": True,
+    "quiet_hours_start": "23:00",
+    "quiet_hours_end": "06:00",
+    "ai_recommendations_enabled": True,
+    "auto_control_enabled": True,
+    "notifications_enabled": True,
+    "schedules_enabled": True,
+}
+
+SETTINGS_OPTIONS = {
+    "currency": ["BHD"],
+    "temperature_unit": ["C", "F"],
+    "cost_per_kwh": {"min": 0, "max": 1},
+    "comfort_temperature_min": {"min": 16, "max": 30},
+    "comfort_temperature_max": {"min": 18, "max": 35},
+    "high_temperature_threshold": {"min": 20, "max": 45},
 }
 
 app = FastAPI(
@@ -147,18 +188,55 @@ class SuggestionDecisionResponse(BaseModel):
     command_id: str | None = None
 
 
-def now_ms() -> int:
-    return int(time.time() * 1000)
+class SettingsUpdateRequest(BaseModel):
+    currency: str | None = None
+    cost_per_kwh: float | None = None
+    temperature_unit: str | None = None
+    comfort_temperature_min: float | None = None
+    comfort_temperature_max: float | None = None
+    high_temperature_threshold: float | None = None
+    humidity_min: float | None = None
+    humidity_max: float | None = None
+    light_waste_minutes: int | None = None
+    occupancy_empty_minutes: int | None = None
+    device_offline_minutes: int | None = None
+    quiet_hours_enabled: bool | None = None
+    quiet_hours_start: str | None = None
+    quiet_hours_end: str | None = None
+    ai_recommendations_enabled: bool | None = None
+    auto_control_enabled: bool | None = None
+    notifications_enabled: bool | None = None
+    schedules_enabled: bool | None = None
+    updated_by: str = "api"
 
 
-def now_iso() -> str:
-    return datetime.now(BAHRAIN_TZ).isoformat()
+class ScheduleCreateRequest(BaseModel):
+    name: str
+    device_id: str
+    command: str
+    time: str
+    days: list[str]
+    enabled: bool = True
+    created_by: str = "api"
+
+
+class ScheduleUpdateRequest(BaseModel):
+    name: str | None = None
+    device_id: str | None = None
+    command: str | None = None
+    time: str | None = None
+    days: list[str] | None = None
+    enabled: bool | None = None
+    updated_by: str = "api"
+
+
+class ScheduleEnabledRequest(BaseModel):
+    enabled: bool
+    updated_by: str = "api"
 
 
 def iso_from_ms(timestamp_ms: Any) -> str | None:
-    if not isinstance(timestamp_ms, (int, float)) or timestamp_ms <= 0:
-        return None
-    return datetime.fromtimestamp(timestamp_ms / 1000, tz=BAHRAIN_TZ).isoformat()
+    return ms_to_iso(timestamp_ms)
 
 
 def initialize_firebase() -> None:
@@ -276,6 +354,9 @@ def control_description(mode: str) -> str:
 def default_control_record(updated_by: str = "system_default") -> dict[str, Any]:
     timestamp_ms = now_ms()
     return {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
         "mode": "assist",
         "updated_by": updated_by,
         "updated_at_ms": timestamp_ms,
@@ -313,6 +394,103 @@ def ensure_device_automation(home_id: str, device_id: str) -> dict[str, Any]:
     return automation
 
 
+def default_settings_record(updated_by: str = "system_default") -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    return {
+        **DEFAULT_SETTINGS,
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+        "updated_by": updated_by,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+
+
+def ensure_settings(home_id: str) -> dict[str, Any]:
+    path = f"/homes/{home_id}/settings"
+    current = as_dict(safe_get(path, {}))
+    if not current:
+        settings = default_settings_record()
+        safe_set(path, settings)
+        return settings
+
+    merged = {**DEFAULT_SETTINGS, **current}
+    if any(key not in current for key in DEFAULT_SETTINGS):
+        safe_update(path, merged)
+    return merged
+
+
+def validate_hhmm(value: str) -> str:
+    if not isinstance(value, str) or not HHMM_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"{value} must use HH:MM format.")
+    return value
+
+
+def validate_settings(settings: dict[str, Any]) -> None:
+    if settings.get("currency") != "BHD":
+        raise HTTPException(status_code=400, detail="currency currently only supports BHD.")
+    if settings.get("temperature_unit") not in {"C", "F"}:
+        raise HTTPException(status_code=400, detail="temperature_unit must be C or F.")
+    if as_number(settings.get("cost_per_kwh"), -1) < 0:
+        raise HTTPException(status_code=400, detail="cost_per_kwh must be >= 0.")
+
+    comfort_min = as_number(settings.get("comfort_temperature_min"))
+    comfort_max = as_number(settings.get("comfort_temperature_max"))
+    high_threshold = as_number(settings.get("high_temperature_threshold"))
+    humidity_min = as_number(settings.get("humidity_min"))
+    humidity_max = as_number(settings.get("humidity_max"))
+
+    if comfort_min >= comfort_max:
+        raise HTTPException(
+            status_code=400,
+            detail="comfort_temperature_min must be less than comfort_temperature_max.",
+        )
+    if high_threshold <= comfort_max:
+        raise HTTPException(
+            status_code=400,
+            detail="high_temperature_threshold must be greater than comfort_temperature_max.",
+        )
+    if humidity_min >= humidity_max:
+        raise HTTPException(status_code=400, detail="humidity_min must be less than humidity_max.")
+
+    for field in [
+        "light_waste_minutes",
+        "occupancy_empty_minutes",
+        "device_offline_minutes",
+    ]:
+        if as_number(settings.get(field), -1) <= 0:
+            raise HTTPException(status_code=400, detail=f"{field} must be positive.")
+
+    for field in [
+        "quiet_hours_enabled",
+        "ai_recommendations_enabled",
+        "auto_control_enabled",
+        "notifications_enabled",
+        "schedules_enabled",
+    ]:
+        if not isinstance(settings.get(field), bool):
+            raise HTTPException(status_code=400, detail=f"{field} must be a boolean.")
+
+    validate_hhmm(str(settings.get("quiet_hours_start", "")))
+    validate_hhmm(str(settings.get("quiet_hours_end", "")))
+
+
+def settings_summary(settings: dict[str, Any]) -> dict[str, Any]:
+    unit = str(settings.get("temperature_unit", "C"))
+    suffix = "°F" if unit == "F" else "°C"
+    return {
+        "currency": settings.get("currency", "BHD"),
+        "cost_per_kwh": settings.get("cost_per_kwh", DEFAULT_SETTINGS["cost_per_kwh"]),
+        "comfort_range": (
+            f"{settings.get('comfort_temperature_min')}-"
+            f"{settings.get('comfort_temperature_max')}{suffix}"
+        ),
+        "high_temperature_threshold": settings.get("high_temperature_threshold"),
+        "quiet_hours_enabled": settings.get("quiet_hours_enabled"),
+    }
+
+
 def control_response(home_id: str, control: dict[str, Any]) -> dict[str, Any]:
     mode = str(control.get("mode", "assist")).lower()
     if mode not in VALID_CONTROL_MODES:
@@ -336,6 +514,10 @@ def check_auto_safety(
     command: str,
     device: dict[str, Any],
 ) -> None:
+    settings = ensure_settings(home_id)
+    if settings.get("auto_control_enabled") is False:
+        raise HTTPException(status_code=403, detail="Automatic control is disabled in settings.")
+
     automation = ensure_device_automation(home_id, device_id)
     if normalize_bool(automation.get("auto_allowed")) is not True:
         raise HTTPException(status_code=403, detail="Auto control is not allowed for this device.")
@@ -382,6 +564,9 @@ def write_automation_log(
     timestamp_ms = now_ms()
     log_id = f"auto_{timestamp_ms}"
     log = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
         "log_id": log_id,
         "home_id": home_id,
         "device_id": device_id,
@@ -405,6 +590,7 @@ def write_automation_log(
         {
             "last_auto_action": command,
             "last_auto_action_at_ms": timestamp_ms,
+            "last_auto_action_at_iso": iso_from_ms(timestamp_ms),
             "cooldown_until_ms": timestamp_ms + int(cooldown_ms),
         },
     )
@@ -703,7 +889,11 @@ def build_devices(bundle: dict[str, Any], home_id: str | None = None) -> dict[st
     return formatted
 
 
-def build_energy(bundle: dict[str, Any], devices: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def build_energy(
+    bundle: dict[str, Any],
+    devices: dict[str, dict[str, Any]],
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     dashboard_energy = bundle["backend_dashboard_energy"]
     current_total = bundle["backend_current_total"]
     latest = bundle["dashboard_latest"]
@@ -763,11 +953,18 @@ def build_energy(bundle: dict[str, Any], devices: dict[str, dict[str, Any]]) -> 
     source_current = as_number(
         first_present(source.get("current_A"), source.get("current_a"), source.get("current"))
     )
+    tariff = as_number(
+        (settings or {}).get("cost_per_kwh"),
+        as_number(first_present(source.get("tariff_BHD_per_kWh"), source.get("tariff")), 0.029),
+    )
+    today_kwh = source_energy if source_energy > 0 else device_energy_total
+    calculated_cost = today_kwh * tariff
 
     return {
         "current_power_w": device_power_total if device_power_total > 0 else source_power,
-        "today_kwh": source_energy if source_energy > 0 else device_energy_total,
-        "today_cost_bhd": source_cost if source_cost > 0 else device_cost_total,
+        "today_kwh": today_kwh,
+        "today_cost_bhd": calculated_cost if today_kwh > 0 else source_cost if source_cost > 0 else device_cost_total,
+        "tariff_BHD_per_kWh": tariff,
         "voltage_V": source_voltage
         if source_voltage > 0
         else round(sum(voltage_values) / len(voltage_values), 1)
@@ -783,6 +980,168 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
         **bundle["ai_latest"],
         **bundle["backend_latest_prediction"],
         **bundle["backend_dashboard_ai"],
+    }
+
+
+def validate_days(days: Any) -> list[str]:
+    if not isinstance(days, list) or not days:
+        raise HTTPException(status_code=400, detail="days must be a non-empty list.")
+    normalized = []
+    for day in days:
+        text = str(day).strip().title()[:3]
+        if text not in VALID_DAYS:
+            raise HTTPException(status_code=400, detail=f"Invalid day: {day}.")
+        if text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def calculate_next_run(time_text: str, days: list[str], timezone: str = "Asia/Bahrain") -> tuple[int | None, str | None]:
+    validate_hhmm(time_text)
+    days = validate_days(days)
+    tz = ZoneInfo(timezone)
+    now = datetime.now(tz).replace(second=0, microsecond=0)
+    hour, minute = [int(part) for part in time_text.split(":")]
+
+    for offset in range(0, 8):
+        candidate_date = now.date() + timedelta(days=offset)
+        candidate = datetime(
+            candidate_date.year,
+            candidate_date.month,
+            candidate_date.day,
+            hour,
+            minute,
+            tzinfo=tz,
+        )
+        if candidate <= now:
+            continue
+        if PY_WEEKDAY_TO_DAY[candidate.weekday()] in days:
+            timestamp_ms = int(candidate.timestamp() * 1000)
+            return timestamp_ms, iso_from_ms(timestamp_ms)
+    return None, None
+
+
+def schedule_history(
+    home_id: str,
+    schedule_id: str,
+    action: str,
+    changed_by: str,
+    previous: dict[str, Any] | None,
+    current: dict[str, Any] | None,
+) -> None:
+    timestamp_ms = now_ms()
+    history_id = f"schedule_{timestamp_ms}"
+    changed_fields = []
+    if previous is not None and current is not None:
+        changed_fields = sorted(
+            key for key in set(previous) | set(current) if previous.get(key) != current.get(key)
+        )
+    safe_set(
+        f"/homes/{home_id}/schedules_history/{history_id}",
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": iso_from_ms(timestamp_ms),
+            "timezone": TIMEZONE,
+            "history_id": history_id,
+            "schedule_id": schedule_id,
+            "action": action,
+            "changed_by": changed_by,
+            "changed_at_ms": timestamp_ms,
+            "changed_at_iso": iso_from_ms(timestamp_ms),
+            "previous_schedule": previous,
+            "new_schedule": current,
+            "changed_fields": changed_fields,
+        },
+    )
+
+
+def validate_schedule_payload(home_id: str, payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged = {**(existing or {}), **payload}
+    name = str(merged.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Schedule name is required.")
+
+    device_id = str(merged.get("device_id", "")).strip()
+    device = as_dict(safe_get(f"/homes/{home_id}/devices/{device_id}", {}))
+    if not device:
+        raise HTTPException(status_code=404, detail="Device does not exist.")
+    if not is_controllable_device(device_id, device):
+        raise HTTPException(status_code=400, detail="Device is not controllable.")
+
+    command = str(merged.get("command", "")).strip().lower()
+    if command not in VALID_COMMANDS:
+        raise HTTPException(status_code=400, detail="command must be turn_on or turn_off.")
+
+    time_text = validate_hhmm(str(merged.get("time", "")))
+    days = validate_days(merged.get("days"))
+    enabled = bool(merged.get("enabled", True))
+    timezone = str(merged.get("timezone") or "Asia/Bahrain")
+    next_run_ms, next_run_iso = calculate_next_run(time_text, days, timezone) if enabled else (None, None)
+
+    return {
+        **merged,
+        "name": name,
+        "device_id": device_id,
+        "device_name": device_message_name(device_id, device),
+        "command": command,
+        "target_state": command_to_target_state(command),
+        "time": time_text,
+        "days": days,
+        "enabled": enabled,
+        "timezone": timezone,
+        "next_run_at_ms": next_run_ms,
+        "next_run_at_iso": next_run_iso,
+    }
+
+
+def log_schedule_run(
+    home_id: str,
+    schedule: dict[str, Any],
+    status: str,
+    message: str,
+    command_id: str | None = None,
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    log_id = f"schedule_log_{timestamp_ms}"
+    log = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+        "log_id": log_id,
+        "schedule_id": schedule.get("schedule_id"),
+        "home_id": home_id,
+        "device_id": schedule.get("device_id"),
+        "command": schedule.get("command"),
+        "target_state": schedule.get("target_state"),
+        "status": status,
+        "command_id": command_id,
+        "message": message,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/schedule_logs/{log_id}", log)
+    return log
+
+
+def next_schedule_summary(home_id: str) -> dict[str, Any] | None:
+    schedules = [
+        item for item in object_to_list(safe_get(f"/homes/{home_id}/schedules", {}))
+        if item.get("enabled") is True and item.get("deleted") is not True and isinstance(item.get("next_run_at_ms"), (int, float))
+    ]
+    if not schedules:
+        return None
+    schedules.sort(key=lambda item: item.get("next_run_at_ms"))
+    schedule = schedules[0]
+    return {
+        "schedule_id": schedule.get("schedule_id") or schedule.get("id"),
+        "name": schedule.get("name"),
+        "device_id": schedule.get("device_id"),
+        "device_name": schedule.get("device_name"),
+        "command": schedule.get("command"),
+        "time": schedule.get("time"),
+        "next_run_at_ms": schedule.get("next_run_at_ms"),
+        "next_run_at_iso": schedule.get("next_run_at_iso"),
+        "message": f"Next schedule: {schedule.get('name')} at {schedule.get('time')}",
     }
     predictions = as_dict(latest.get("predictions"))
     waste = as_dict(predictions.get("waste_event"))
@@ -843,6 +1202,7 @@ def health() -> dict[str, Any]:
         "service": SERVICE_NAME,
         "timestamp_ms": timestamp_ms,
         "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
     }
 
 
@@ -852,6 +1212,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     devices = build_devices(bundle, home_id)
     timestamp_ms = now_ms()
     control = ensure_control(home_id)
+    settings = ensure_settings(home_id)
     control_mode = str(control.get("mode", "assist")).lower()
 
     alerts = active_only(
@@ -871,7 +1232,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
             "description": control_description(control_mode),
         },
         "room": build_room(bundle),
-        "energy": build_energy(bundle, devices),
+        "energy": build_energy(bundle, devices, settings),
         "devices": devices,
         "alerts": alerts,
         "recommendations": recommendations,
@@ -884,9 +1245,63 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         "ai": build_ai(bundle),
         "ai_daily_summary": as_dict(as_dict(bundle["backend_ai"]).get("daily_summary")),
         "system_health": bundle["system_health"] or bundle["backend_device_health"],
+        "settings_summary": settings_summary(settings),
+        "next_schedule": next_schedule_summary(home_id),
+        "timezone": TIMEZONE,
         "updated_at_ms": timestamp_ms,
         "updated_at_iso": iso_from_ms(timestamp_ms),
     }
+
+
+@app.get("/api/home/{home_id}/settings")
+def get_settings(home_id: str) -> dict[str, Any]:
+    settings = ensure_settings(home_id)
+    return {"home_id": home_id, "settings": settings, "options": SETTINGS_OPTIONS}
+
+
+@app.put("/api/home/{home_id}/settings")
+def update_settings(home_id: str, request: SettingsUpdateRequest) -> dict[str, Any]:
+    previous = ensure_settings(home_id)
+    updates = request.dict(exclude_unset=True)
+    updated_by = str(updates.pop("updated_by", "api"))
+    allowed = set(DEFAULT_SETTINGS.keys())
+    unknown = sorted(key for key in updates if key not in allowed)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unsupported settings fields: {', '.join(unknown)}")
+
+    merged = {**previous, **updates}
+    validate_settings(merged)
+
+    timestamp_ms = now_ms()
+    merged.update(
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": iso_from_ms(timestamp_ms),
+            "timezone": TIMEZONE,
+            "updated_by": updated_by,
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        }
+    )
+    changed_fields = sorted(key for key in updates if previous.get(key) != merged.get(key))
+    history_id = f"settings_{timestamp_ms}"
+    safe_update(f"/homes/{home_id}/settings", merged)
+    safe_set(
+        f"/homes/{home_id}/settings/history/{history_id}",
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": iso_from_ms(timestamp_ms),
+            "timezone": TIMEZONE,
+            "history_id": history_id,
+            "changed_by": updated_by,
+            "changed_at_ms": timestamp_ms,
+            "changed_at_iso": iso_from_ms(timestamp_ms),
+            "previous_settings": previous,
+            "new_settings": merged,
+            "changed_fields": changed_fields,
+        },
+    )
+    return {"home_id": home_id, "settings": merged, "options": SETTINGS_OPTIONS}
 
 
 @app.get("/api/home/{home_id}/control")
@@ -905,6 +1320,9 @@ def update_control_mode(
 
     timestamp_ms = now_ms()
     record = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
         "mode": mode,
         "updated_by": request.updated_by,
         "updated_at_ms": timestamp_ms,
@@ -915,7 +1333,14 @@ def update_control_mode(
     safe_update(f"/homes/{home_id}/control", record)
     safe_set(
         f"/homes/{home_id}/control/history/{history_id}",
-        {"history_id": history_id, "home_id": home_id, **record},
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": iso_from_ms(timestamp_ms),
+            "timezone": TIMEZONE,
+            "history_id": history_id,
+            "home_id": home_id,
+            **record,
+        },
     )
 
     return {
@@ -924,6 +1349,243 @@ def update_control_mode(
         "mode": mode,
         "message": f"Control mode updated to {control_label(mode)} Mode.",
     }
+
+
+@app.get("/api/home/{home_id}/schedules")
+def get_schedules(home_id: str) -> dict[str, Any]:
+    schedules = [
+        item for item in object_to_list(safe_get(f"/homes/{home_id}/schedules", {}))
+        if item.get("deleted") is not True
+    ]
+    schedules.sort(
+        key=lambda item: (
+            item.get("next_run_at_ms") is None,
+            as_number(item.get("next_run_at_ms"), 0),
+            str(item.get("name", "")),
+        )
+    )
+    return {"home_id": home_id, "count": len(schedules), "schedules": schedules}
+
+
+@app.post("/api/home/{home_id}/schedules")
+def create_schedule(home_id: str, request: ScheduleCreateRequest) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    schedule_id = f"sch_{timestamp_ms}"
+    payload = validate_schedule_payload(home_id, request.dict())
+    schedule = {
+        **payload,
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+        "schedule_id": schedule_id,
+        "home_id": home_id,
+        "last_run_at_ms": None,
+        "last_run_at_iso": None,
+        "created_by": request.created_by,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/schedules/{schedule_id}", schedule)
+    schedule_history(home_id, schedule_id, "created", request.created_by, None, schedule)
+    return {"home_id": home_id, "schedule": schedule}
+
+
+@app.put("/api/home/{home_id}/schedules/{schedule_id}")
+def update_schedule(
+    home_id: str,
+    schedule_id: str,
+    request: ScheduleUpdateRequest,
+) -> dict[str, Any]:
+    previous = as_dict(safe_get(f"/homes/{home_id}/schedules/{schedule_id}", {}))
+    if not previous or previous.get("deleted") is True:
+        raise HTTPException(status_code=404, detail="Schedule does not exist.")
+
+    updates = request.dict(exclude_unset=True)
+    updated_by = str(updates.pop("updated_by", "api"))
+    updated = validate_schedule_payload(home_id, updates, previous)
+    timestamp_ms = now_ms()
+    updated.update(
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": iso_from_ms(timestamp_ms),
+            "timezone": TIMEZONE,
+            "schedule_id": schedule_id,
+            "home_id": home_id,
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        }
+    )
+    safe_update(f"/homes/{home_id}/schedules/{schedule_id}", updated)
+    schedule_history(home_id, schedule_id, "updated", updated_by, previous, updated)
+    return {"home_id": home_id, "schedule": updated}
+
+
+@app.patch("/api/home/{home_id}/schedules/{schedule_id}/enabled")
+def set_schedule_enabled(
+    home_id: str,
+    schedule_id: str,
+    request: ScheduleEnabledRequest,
+) -> dict[str, Any]:
+    previous = as_dict(safe_get(f"/homes/{home_id}/schedules/{schedule_id}", {}))
+    if not previous or previous.get("deleted") is True:
+        raise HTTPException(status_code=404, detail="Schedule does not exist.")
+    next_ms, next_iso = (
+        calculate_next_run(str(previous.get("time")), validate_days(previous.get("days")), str(previous.get("timezone") or "Asia/Bahrain"))
+        if request.enabled
+        else (None, None)
+    )
+    timestamp_ms = now_ms()
+    updates = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+        "enabled": request.enabled,
+        "next_run_at_ms": next_ms,
+        "next_run_at_iso": next_iso,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    updated = {**previous, **updates}
+    safe_update(f"/homes/{home_id}/schedules/{schedule_id}", updates)
+    schedule_history(home_id, schedule_id, "enabled_changed", request.updated_by, previous, updated)
+    return {"home_id": home_id, "schedule": updated}
+
+
+@app.delete("/api/home/{home_id}/schedules/{schedule_id}")
+def delete_schedule(home_id: str, schedule_id: str, deleted_by: str = "api") -> dict[str, Any]:
+    previous = as_dict(safe_get(f"/homes/{home_id}/schedules/{schedule_id}", {}))
+    if not previous or previous.get("deleted") is True:
+        raise HTTPException(status_code=404, detail="Schedule does not exist.")
+    timestamp_ms = now_ms()
+    updates = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+        "deleted": True,
+        "enabled": False,
+        "next_run_at_ms": None,
+        "next_run_at_iso": None,
+        "deleted_at_ms": timestamp_ms,
+        "deleted_at_iso": iso_from_ms(timestamp_ms),
+        "deleted_by": deleted_by,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    updated = {**previous, **updates}
+    safe_update(f"/homes/{home_id}/schedules/{schedule_id}", updates)
+    schedule_history(home_id, schedule_id, "deleted", deleted_by, previous, updated)
+    return {"success": True, "home_id": home_id, "schedule_id": schedule_id}
+
+
+def run_schedule(home_id: str, schedule_id: str, manual: bool = False) -> dict[str, Any]:
+    settings = ensure_settings(home_id)
+    if settings.get("schedules_enabled") is False:
+        schedule = as_dict(safe_get(f"/homes/{home_id}/schedules/{schedule_id}", {}))
+        log = log_schedule_run(home_id, schedule, "failed", "Schedules are disabled in settings.")
+        return {"success": False, "home_id": home_id, "log": log}
+
+    schedule = as_dict(safe_get(f"/homes/{home_id}/schedules/{schedule_id}", {}))
+    if not schedule or schedule.get("deleted") is True:
+        raise HTTPException(status_code=404, detail="Schedule does not exist.")
+    if not manual and schedule.get("enabled") is not True:
+        log = log_schedule_run(home_id, schedule, "failed", "Schedule is disabled.")
+        return {"success": False, "home_id": home_id, "log": log}
+
+    device_id = str(schedule.get("device_id", ""))
+    device = as_dict(safe_get(f"/homes/{home_id}/devices/{device_id}", {}))
+    if not device or not is_controllable_device(device_id, device):
+        log = log_schedule_run(home_id, schedule, "failed", "Device is not available or controllable.")
+        return {"success": False, "home_id": home_id, "log": log}
+
+    formatted = format_device(device_id, device)
+    timestamp_ms = now_ms()
+    next_ms, next_iso = calculate_next_run(
+        str(schedule.get("time")),
+        validate_days(schedule.get("days")),
+        str(schedule.get("timezone") or "Asia/Bahrain"),
+    )
+    schedule_updates = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+        "last_run_at_ms": timestamp_ms,
+        "last_run_at_iso": iso_from_ms(timestamp_ms),
+        "next_run_at_ms": next_ms,
+        "next_run_at_iso": next_iso,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+
+    if formatted.get("online") is not True:
+        safe_update(f"/homes/{home_id}/schedules/{schedule_id}", schedule_updates)
+        log = log_schedule_run(home_id, schedule, "skipped_offline", "Device is offline. Schedule skipped.")
+        return {"success": False, "home_id": home_id, "log": log}
+    if normalize_bool(device.get("command_in_progress")) is True:
+        safe_update(f"/homes/{home_id}/schedules/{schedule_id}", schedule_updates)
+        log = log_schedule_run(home_id, schedule, "failed", "Another command is already in progress.")
+        return {"success": False, "home_id": home_id, "log": log}
+    if str(formatted.get("state", "")).lower() == str(schedule.get("target_state")):
+        safe_update(f"/homes/{home_id}/schedules/{schedule_id}", schedule_updates)
+        log = log_schedule_run(home_id, schedule, "already_in_state", "Device is already in the target state.")
+        return {"success": True, "home_id": home_id, "log": log}
+
+    response = create_device_command(
+        home_id,
+        device_id,
+        DeviceCommandRequest(
+            command=str(schedule.get("command")),
+            requested_by="schedule_manual_run" if manual else "schedule",
+            reason=f"Schedule: {schedule.get('name')}",
+        ),
+    )
+    safe_update(f"/homes/{home_id}/schedules/{schedule_id}", schedule_updates)
+    log = log_schedule_run(
+        home_id,
+        schedule,
+        "command_created",
+        "Schedule created command successfully.",
+        response.command_id,
+    )
+    return {
+        "success": True,
+        "home_id": home_id,
+        "schedule_id": schedule_id,
+        "command_id": response.command_id,
+        "log": log,
+    }
+
+
+@app.post("/api/home/{home_id}/schedules/{schedule_id}/run-now")
+def run_schedule_now(home_id: str, schedule_id: str) -> dict[str, Any]:
+    return run_schedule(home_id, schedule_id, manual=True)
+
+
+@app.post("/api/home/{home_id}/schedules/run-due")
+def run_due_schedules(home_id: str) -> dict[str, Any]:
+    now = now_ms()
+    schedules = [
+        item for item in object_to_list(safe_get(f"/homes/{home_id}/schedules", {}))
+        if item.get("enabled") is True
+        and item.get("deleted") is not True
+        and isinstance(item.get("next_run_at_ms"), (int, float))
+        and int(item.get("next_run_at_ms")) <= now
+    ]
+    results = []
+    for schedule in schedules:
+        schedule_id = str(schedule.get("schedule_id") or schedule.get("id"))
+        try:
+            results.append(run_schedule(home_id, schedule_id, manual=False))
+        except Exception as error:
+            log = log_schedule_run(
+                home_id,
+                schedule,
+                "failed",
+                f"Schedule runner failed: {error}",
+            )
+            results.append({"success": False, "home_id": home_id, "schedule_id": schedule_id, "log": log})
+    return {"home_id": home_id, "count": len(results), "results": results}
 
 
 @app.get("/api/home/{home_id}/action-suggestions/active")
@@ -968,6 +1630,9 @@ def approve_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
     timestamp_ms = now_ms()
     updated = {
         **suggestion,
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
         "status": "approved",
         "approved_at_ms": timestamp_ms,
         "approved_at_iso": iso_from_ms(timestamp_ms),
@@ -994,6 +1659,9 @@ def dismiss_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
     timestamp_ms = now_ms()
     updated = {
         **suggestion,
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
         "status": "dismissed",
         "dismissed_at_ms": timestamp_ms,
         "dismissed_at_iso": iso_from_ms(timestamp_ms),
@@ -1122,8 +1790,12 @@ def create_device_command(
 
     if current_state == target_state:
         timestamp_ms = now_ms()
+        command_id = f"cmd_{timestamp_ms}"
         already_record = {
-            "command_id": f"cmd_{timestamp_ms}",
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": iso_from_ms(timestamp_ms),
+            "timezone": TIMEZONE,
+            "command_id": command_id,
             "home_id": home_id,
             "device_id": device_id,
             "device_name": device_name,
@@ -1143,6 +1815,7 @@ def create_device_command(
                 "raw_error": None,
             },
         }
+        safe_set(f"/homes/{home_id}/commands/history/{command_id}", already_record)
         safe_set(
             f"/homes/{home_id}/commands/latest_by_device/{device_id}",
             already_record,
@@ -1183,6 +1856,9 @@ def create_device_command(
     timestamp_iso = iso_from_ms(timestamp_ms)
     command_id = f"cmd_{timestamp_ms}"
     command_record = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": timestamp_iso,
+        "timezone": TIMEZONE,
         "command_id": command_id,
         "home_id": home_id,
         "device_id": device_id,
@@ -1241,6 +1917,8 @@ def create_device_command(
         **command_record,
         "action": command,
         "created_at": timestamp_ms,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": timestamp_iso,
         "source": request.requested_by,
     }
     safe_set(f"/homes/{home_id}/commands/{device_id}/latest", legacy_command)
@@ -1302,6 +1980,9 @@ def run_scenario(home_id: str, scenario_id: str) -> ScenarioRunResponse:
     timestamp_ms = now_ms()
     request_id = f"scenario_{timestamp_ms}"
     scenario_request = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
         "request_id": request_id,
         "home_id": home_id,
         "scenario_id": scenario_id,

@@ -18,6 +18,7 @@ import {
 } from "../alerts";
 import { resolveRecommendation, upsertRecommendation } from "../recommendations";
 import { handleSuggestedAction } from "../control";
+import { msToIso, nowTimestamp } from "../utils";
 
 export const analyzeSensorLog = onValueCreated(
   {
@@ -41,6 +42,15 @@ export const analyzeSensorLog = onValueCreated(
         typeof log.timestamp_ms === "number" ? log.timestamp_ms : now;
 
       const backendRef = admin.database().ref(`/homes/${homeId}/backend`);
+      const settingsSnap = await admin.database().ref(`/homes/${homeId}/settings`).get();
+      const settings =
+        settingsSnap.exists() && typeof settingsSnap.val() === "object" && settingsSnap.val() !== null
+          ? (settingsSnap.val() as Record<string, unknown>)
+          : {};
+      const highTempThreshold =
+        typeof settings.high_temperature_threshold === "number"
+          ? settings.high_temperature_threshold
+          : HIGH_TEMP_THRESHOLD;
       const currentStateRef = backendRef.child("current_state");
       const esp32StatusRef = admin
         .database()
@@ -60,7 +70,7 @@ export const analyzeSensorLog = onValueCreated(
 
       const highTemp =
         typeof log.temperature === "number" &&
-        log.temperature >= HIGH_TEMP_THRESHOLD;
+        log.temperature >= highTempThreshold;
 
       const soundRaw =
         typeof log.sound_raw === "number" ? log.sound_raw : null;
@@ -123,9 +133,14 @@ export const analyzeSensorLog = onValueCreated(
 
         if (!pendingSnap.exists()) {
           const pending: PendingCondition = {
+            ...nowTimestamp(now),
             active: true,
             started_at: now,
+            started_at_ms: now,
+            started_at_iso: msToIso(now),
             last_seen_at: now,
+            last_seen_ms: now,
+            last_seen_iso: msToIso(now),
             alert_sent: false,
             type: "light_on_no_motion",
             source_log: logId,
@@ -134,8 +149,11 @@ export const analyzeSensorLog = onValueCreated(
           await lightNoMotionPendingRef.set(pending);
         } else {
           await lightNoMotionPendingRef.update({
+            ...nowTimestamp(now),
             active: true,
             last_seen_at: now,
+            last_seen_ms: now,
+            last_seen_iso: msToIso(now),
             source_log: logId,
           });
         }
@@ -163,9 +181,14 @@ export const analyzeSensorLog = onValueCreated(
 
         if (!pendingSnap.exists()) {
           const pending: PendingCondition = {
+            ...nowTimestamp(now),
             active: true,
             started_at: now,
+            started_at_ms: now,
+            started_at_iso: msToIso(now),
             last_seen_at: now,
+            last_seen_ms: now,
+            last_seen_iso: msToIso(now),
             alert_sent: false,
             type: "high_temperature",
             source_log: logId,
@@ -174,8 +197,11 @@ export const analyzeSensorLog = onValueCreated(
           await highTempPendingRef.set(pending);
         } else {
           await highTempPendingRef.update({
+            ...nowTimestamp(now),
             active: true,
             last_seen_at: now,
+            last_seen_ms: now,
+            last_seen_iso: msToIso(now),
             source_log: logId,
           });
         }
@@ -197,18 +223,33 @@ export const analyzeSensorLog = onValueCreated(
       }
 
       await esp32StatusRef.update({
+        ...nowTimestamp(measurementTimestampMs),
         lastSeenMs: measurementTimestampMs,
+        last_seen_ms: measurementTimestampMs,
+        last_seen_iso: msToIso(measurementTimestampMs),
       });
 
       await currentStateRef.set({
+        ...nowTimestamp(now),
         last_log_id: logId,
         last_processed_at: now,
+        last_processed_at_ms: now,
+        last_processed_at_iso: msToIso(now),
         occupancy_state: occupancyState,
         waste_risk: wasteRisk,
         recommendation,
         latest_temperature: log.temperature ?? null,
         latest_humidity: log.humidity ?? null,
         latest_sound_raw: soundRaw,
+        comfort_temperature_min:
+          typeof settings.comfort_temperature_min === "number"
+            ? settings.comfort_temperature_min
+            : null,
+        comfort_temperature_max:
+          typeof settings.comfort_temperature_max === "number"
+            ? settings.comfort_temperature_max
+            : null,
+        high_temperature_threshold: highTempThreshold,
         noise,
         noise_text: noiseText,
         motion: log.motion ?? null,
@@ -217,7 +258,10 @@ export const analyzeSensorLog = onValueCreated(
       });
 
       await backendRef.child("dashboard/environment").set({
+        ...nowTimestamp(now),
         updated_at: now,
+        updated_at_ms: now,
+        updated_at_iso: msToIso(now),
 
         temperature: log.temperature ?? null,
         humidity: log.humidity ?? null,
@@ -231,6 +275,15 @@ export const analyzeSensorLog = onValueCreated(
         occupancy_state: occupancyState,
         waste_risk: wasteRisk,
         recommendation,
+        comfort_temperature_min:
+          typeof settings.comfort_temperature_min === "number"
+            ? settings.comfort_temperature_min
+            : null,
+        comfort_temperature_max:
+          typeof settings.comfort_temperature_max === "number"
+            ? settings.comfort_temperature_max
+            : null,
+        high_temperature_threshold: highTempThreshold,
 
         last_log_id: logId,
       });
@@ -266,6 +319,18 @@ export const checkPendingConditions = onSchedule(
         const backendRef = admin.database().ref(`/homes/${homeId}/backend`);
         const pendingRef = backendRef.child("pending_conditions");
         const currentStateRef = backendRef.child("current_state");
+        const settingsSnap = await admin.database().ref(`/homes/${homeId}/settings`).get();
+        const settings =
+          settingsSnap.exists() && typeof settingsSnap.val() === "object" && settingsSnap.val() !== null
+            ? (settingsSnap.val() as Record<string, unknown>)
+            : {};
+        const lightDelayMs =
+          typeof settings.light_waste_minutes === "number" && settings.light_waste_minutes > 0
+            ? settings.light_waste_minutes * 60 * 1000
+            : LIGHT_NO_MOTION_DELAY_MS;
+        const highTempDelayMs =
+          HIGH_TEMP_DELAY_MS;
+        const aiRecommendationsEnabled = settings.ai_recommendations_enabled !== false;
 
         const pendingSnap = await pendingRef.get();
 
@@ -284,7 +349,7 @@ export const checkPendingConditions = onSchedule(
         ) {
           const duration = now - lightCondition.started_at;
 
-          if (duration >= LIGHT_NO_MOTION_DELAY_MS) {
+          if (duration >= lightDelayMs) {
             await createOrUpdateActiveAlert(
               backendRef,
               "light_on_no_motion",
@@ -304,31 +369,39 @@ export const checkPendingConditions = onSchedule(
             );
 
             await pendingRef.child("light_on_no_motion").update({
+              ...nowTimestamp(now),
               alert_sent: true,
               alert_sent_at: now,
+              alert_sent_at_ms: now,
+              alert_sent_at_iso: msToIso(now),
             });
 
             await currentStateRef.update({
+              ...nowTimestamp(now),
               waste_risk: "medium",
               recommendation:
                 "Turn off the lights if the room is actually empty.",
               last_alert_type: "energy_waste",
               last_alert_at: now,
+              last_alert_at_ms: now,
+              last_alert_at_iso: msToIso(now),
             });
 
-            await upsertRecommendation(
-              backendRef,
-              "light_on_no_motion",
-              {
-                type: "energy_saving",
-                priority: "medium",
-                title: "Possible energy waste",
-                message: "Turn off the lights if the room is actually empty.",
-                source: "backend_analysis",
-                related_alert_key: "light_on_no_motion",
-              },
-              now
-            );
+            if (aiRecommendationsEnabled) {
+              await upsertRecommendation(
+                backendRef,
+                "light_on_no_motion",
+                {
+                  type: "energy_saving",
+                  priority: "medium",
+                  title: "Possible energy waste",
+                  message: "Turn off the lights if the room is actually empty.",
+                  source: "backend_analysis",
+                  related_alert_key: "light_on_no_motion",
+                },
+                now
+              );
+            }
 
             await handleSuggestedAction(homeId, {
               deviceId: "breaker_01",
@@ -354,7 +427,7 @@ export const checkPendingConditions = onSchedule(
         ) {
           const duration = now - tempCondition.started_at;
 
-          if (duration >= HIGH_TEMP_DELAY_MS) {
+          if (duration >= highTempDelayMs) {
             await createOrUpdateActiveAlert(
               backendRef,
               "high_temperature",
@@ -374,31 +447,39 @@ export const checkPendingConditions = onSchedule(
             );
 
             await pendingRef.child("high_temperature").update({
+              ...nowTimestamp(now),
               alert_sent: true,
               alert_sent_at: now,
+              alert_sent_at_ms: now,
+              alert_sent_at_iso: msToIso(now),
             });
 
             await currentStateRef.update({
+              ...nowTimestamp(now),
               recommendation:
                 "Consider turning on cooling or adjusting the AC setting.",
               last_alert_type: "comfort",
               last_alert_at: now,
+              last_alert_at_ms: now,
+              last_alert_at_iso: msToIso(now),
             });
 
-            await upsertRecommendation(
-              backendRef,
-              "comfort_high_temperature",
-              {
-                type: "comfort",
-                priority: "medium",
-                title: "Room temperature is high",
-                message:
-                  "Consider turning on cooling or adjusting the AC setting.",
-                source: "backend_analysis",
-                related_alert_key: "high_temperature",
-              },
-              now
-            );
+            if (aiRecommendationsEnabled) {
+              await upsertRecommendation(
+                backendRef,
+                "comfort_high_temperature",
+                {
+                  type: "comfort",
+                  priority: "medium",
+                  title: "Room temperature is high",
+                  message:
+                    "Consider turning on cooling or adjusting the AC setting.",
+                  source: "backend_analysis",
+                  related_alert_key: "high_temperature",
+                },
+                now
+              );
+            }
 
             await handleSuggestedAction(homeId, {
               deviceId: "breaker_02",

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +13,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from firebase_admin import db
 
+from timestamp_utils import TIMEZONE, BAHRAIN_TZ, ms_to_iso, now_ms
+
 
 SERVICE_NAME = "smart-energy-ai"
-BAHRAIN_TZ = timezone(timedelta(hours=3))
 DEFAULT_HOME_ID = os.environ.get("DEFAULT_HOME_ID", "home_001")
 MODEL_PATH = Path(os.environ.get("MODEL_PATH", "devices/models/smart_energy_ai.joblib"))
 EFFICIENCY_SCORE_CHANGE_THRESHOLD = 3
@@ -51,10 +51,6 @@ class ChatResponse(BaseModel):
     answer: str
     used_data: bool
     timestamp: int
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def initialize_firebase() -> None:
@@ -787,11 +783,18 @@ def build_firebase_result(
     scenario_id: str | None = None,
 ) -> dict[str, Any]:
     control_suggestion = make_control_suggestion(prediction, payload)
+    created_at = now_ms()
+    created_at_iso = ms_to_iso(created_at)
 
     return {
         "home_id": home_id,
         "scenario_id": scenario_id,
-        "created_at": now_ms(),
+        "timestamp_ms": created_at,
+        "timestamp_iso": created_at_iso,
+        "timezone": TIMEZONE,
+        "created_at": created_at,
+        "created_at_ms": created_at,
+        "created_at_iso": created_at_iso,
         "model_name": prediction["model_name"],
         "model_version": prediction["model_version"],
         "input_source": input_source,
@@ -835,7 +838,7 @@ def write_ai_result(
 
         backend_ref = db.reference(backend_path)
         prediction_path = f"{backend_path}/ai/latest_prediction"
-        prediction_id = f"prediction_{result['created_at']}"
+        prediction_id = f"ai_{result['created_at']}"
         previous_prediction = ensure_dict(backend_ref.child("ai/latest_prediction").get())
         previous_daily_summary = ensure_dict(backend_ref.child("ai/daily_summary").get())
 
@@ -883,7 +886,11 @@ def build_ai_firebase_updates(
     if recommendation is None:
         updates["recommendations/ai_energy_insight/status"] = "resolved"
         updates["recommendations/ai_energy_insight/resolved_at"] = result["created_at"]
+        updates["recommendations/ai_energy_insight/resolved_at_ms"] = result["created_at"]
+        updates["recommendations/ai_energy_insight/resolved_at_iso"] = ms_to_iso(result["created_at"])
         updates["recommendations/ai_energy_insight/updated_at"] = result["created_at"]
+        updates["recommendations/ai_energy_insight/updated_at_ms"] = result["created_at"]
+        updates["recommendations/ai_energy_insight/updated_at_iso"] = ms_to_iso(result["created_at"])
     else:
         updates["recommendations/ai_energy_insight"] = recommendation
 
@@ -910,8 +917,15 @@ def build_deduplication_metadata(
     if changed:
         return {
             "timestamp": created_at,
+            "timestamp_ms": created_at,
+            "timestamp_iso": ms_to_iso(created_at),
+            "timezone": TIMEZONE,
             "last_checked_at": created_at,
+            "last_checked_at_ms": created_at,
+            "last_checked_at_iso": ms_to_iso(created_at),
             "last_changed_at": created_at,
+            "last_changed_at_ms": created_at,
+            "last_changed_at_iso": ms_to_iso(created_at),
             "same_status_count": 1,
             "checks_since_change": 0,
             "check_count": previous_check_count + 1,
@@ -921,8 +935,15 @@ def build_deduplication_metadata(
 
     return {
         "timestamp": created_at,
+        "timestamp_ms": created_at,
+        "timestamp_iso": ms_to_iso(created_at),
+        "timezone": TIMEZONE,
         "last_checked_at": created_at,
+        "last_checked_at_ms": created_at,
+        "last_checked_at_iso": ms_to_iso(created_at),
         "last_changed_at": previous_prediction.get("last_changed_at", created_at),
+        "last_changed_at_ms": previous_prediction.get("last_changed_at", created_at),
+        "last_changed_at_iso": ms_to_iso(previous_prediction.get("last_changed_at", created_at)),
         "same_status_count": max(previous_same_status_count, 1) + 1,
         "checks_since_change": previous_checks_since_change + 1,
         "check_count": previous_check_count + 1,
@@ -1364,9 +1385,14 @@ def log_chat_message(
         key = f"chat_{created_at}"
         db.reference(f"/homes/{home_id}/backend/ai/chat_history/{key}").set(
             {
+                "timestamp_ms": created_at,
+                "timestamp_iso": ms_to_iso(created_at),
+                "timezone": TIMEZONE,
                 "user_message": user_message,
                 "assistant_answer": assistant_answer,
                 "created_at": created_at,
+                "created_at_ms": created_at,
+                "created_at_iso": ms_to_iso(created_at),
                 "used_data": used_data,
                 "home_id": home_id,
             }
@@ -1380,9 +1406,18 @@ def build_ai_dashboard_summary(result: dict[str, Any]) -> dict[str, Any]:
     predictions = result["predictions"]
 
     return {
+        "timestamp_ms": result["created_at"],
+        "timestamp_iso": ms_to_iso(result["created_at"]),
+        "timezone": TIMEZONE,
         "updated_at": result["created_at"],
+        "updated_at_ms": result["created_at"],
+        "updated_at_iso": ms_to_iso(result["created_at"]),
         "last_checked_at": result["last_checked_at"],
+        "last_checked_at_ms": result["last_checked_at"],
+        "last_checked_at_iso": ms_to_iso(result["last_checked_at"]),
         "last_changed_at": result["last_changed_at"],
+        "last_changed_at_ms": result["last_changed_at"],
+        "last_changed_at_iso": ms_to_iso(result["last_changed_at"]),
         "source": "smart_energy_ai",
         "model_name": result["model_name"],
         "model_version": result["model_version"],
@@ -1421,9 +1456,18 @@ def build_ai_recommendation(result: dict[str, Any]) -> dict[str, Any] | None:
             "ai_prediction_id": result["created_at"],
             "recommendation_type": "check_sensor_data",
             "status": "active",
+            "timestamp_ms": result["created_at"],
+            "timestamp_iso": ms_to_iso(result["created_at"]),
+            "timezone": TIMEZONE,
             "created_at": result["created_at"],
+            "created_at_ms": result["created_at"],
+            "created_at_iso": ms_to_iso(result["created_at"]),
             "updated_at": result["created_at"],
+            "updated_at_ms": result["created_at"],
+            "updated_at_iso": ms_to_iso(result["created_at"]),
             "resolved_at": None,
+            "resolved_at_ms": None,
+            "resolved_at_iso": None,
         }
 
     waste_detected = bool(predictions["waste_event"]["value"])
@@ -1453,9 +1497,18 @@ def build_ai_recommendation(result: dict[str, Any]) -> dict[str, Any] | None:
         "ai_prediction_id": result["created_at"],
         "recommendation_type": recommendation_type,
         "status": "active",
+        "timestamp_ms": result["created_at"],
+        "timestamp_iso": ms_to_iso(result["created_at"]),
+        "timezone": TIMEZONE,
         "created_at": result["created_at"],
+        "created_at_ms": result["created_at"],
+        "created_at_iso": ms_to_iso(result["created_at"]),
         "updated_at": result["created_at"],
+        "updated_at_ms": result["created_at"],
+        "updated_at_iso": ms_to_iso(result["created_at"]),
         "resolved_at": None,
+        "resolved_at_ms": None,
+        "resolved_at_iso": None,
     }
 
 
@@ -1480,8 +1533,15 @@ def build_ai_alert(result: dict[str, Any]) -> dict[str, Any] | None:
         "level": alert_level,
         "status": "active",
         "message": predictions["explanation"],
+        "timestamp_ms": result["created_at"],
+        "timestamp_iso": ms_to_iso(result["created_at"]),
+        "timezone": TIMEZONE,
         "first_detected_at": result["created_at"],
+        "created_at_ms": result["created_at"],
+        "created_at_iso": ms_to_iso(result["created_at"]),
         "last_seen_at": result["created_at"],
+        "last_seen_ms": result["created_at"],
+        "last_seen_iso": ms_to_iso(result["created_at"]),
         "last_triggered_at": result["created_at"],
         "last_seen_normal_at": None,
         "alert_count": 1,
@@ -1550,7 +1610,12 @@ def build_daily_ai_summary(
 
     return {
         "day_id": day_id,
+        "timestamp_ms": created_at,
+        "timestamp_iso": ms_to_iso(created_at),
+        "timezone": TIMEZONE,
         "updated_at": created_at,
+        "updated_at_ms": created_at,
+        "updated_at_iso": ms_to_iso(created_at),
         "source": "smart_energy_ai",
         "total_ai_checks_today": total_ai_checks_today,
         "history_records_today": history_records_today,
@@ -1629,6 +1694,9 @@ def flatten_response(
         "home_id": home_id,
         "scenario_id": firebase_result.get("scenario_id"),
         "timestamp": firebase_result["created_at"],
+        "timestamp_ms": firebase_result["created_at"],
+        "timestamp_iso": ms_to_iso(firebase_result["created_at"]),
+        "timezone": TIMEZONE,
         "prediction_status": firebase_result.get("prediction_status", "ok"),
         "energy_waste": predictions["waste_event"]["value"],
         "abnormal_usage": predictions["anomaly_label"]["value"],

@@ -15,6 +15,7 @@ SCRIPTS = [
     "esp32_sensor_receiver.py",
     "dashboard_server.py",
     "tuya_breakers_to_firebase.py",
+    "schedule_runner.py",
 ]
 
 

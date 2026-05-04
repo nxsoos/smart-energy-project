@@ -389,6 +389,64 @@ h3 {
   background: var(--green-soft);
 }
 
+.pref-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.pref-grid label,
+.toggle-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.pref-grid input {
+  min-height: 48px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 20px;
+}
+
+.toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.toggle-grid input {
+  width: 22px;
+  height: 22px;
+}
+
+.compact {
+  margin-top: 18px;
+}
+
+.settings-schedules {
+  display: grid;
+  gap: 10px;
+}
+
+.schedule-row {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.schedule-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+
 @media (max-width: 760px) {
   .shell {
     padding: 12px;

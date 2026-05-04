@@ -1,8 +1,16 @@
 import json
 import time
 import logging
+import sys
+from pathlib import Path
 import requests
 from tuya_connector import TuyaOpenAPI, TUYA_LOGGER
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from timestamp_utils import TIMEZONE, ms_to_iso, now_ms
 
 # Raspberry Pi hub role:
 # This optional telemetry poller reads Tuya breaker metering/status data and
@@ -65,6 +73,7 @@ openapi.connect()
 # HELPERS
 # =========================================================
 def normalize_status(result, online):
+    timestamp_ms = now_ms()
     raw = {}
     for item in result:
         raw[item["code"]] = item["value"]
@@ -75,7 +84,9 @@ def normalize_status(result, online):
     voltage_present = voltage_v is not None and voltage_v > 0
 
     return {
-        "timestamp": int(time.time() * 1000),
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": ms_to_iso(timestamp_ms),
+        "timezone": TIMEZONE,
 
         "switch": raw.get("switch"),
         "online": online,
@@ -115,8 +126,9 @@ def build_device_payload(breaker_name, device_id, data):
             "switch": data.get("switch") if online else False,
             "relay_status": data.get("relay_status") if online else "off",
             "fault": data.get("fault"),
-            "lastSeen": data.get("timestamp"),
-            "lastSeenMs": data.get("timestamp"),
+            "last_seen_ms": data.get("timestamp_ms"),
+            "last_seen_iso": data.get("timestamp_iso"),
+            "lastSeenMs": data.get("timestamp_ms"),
         },
         "metering": {
             "voltage_V": data.get("voltage_V"),
@@ -135,8 +147,11 @@ def build_device_payload(breaker_name, device_id, data):
 
 def build_history_payload(data):
     return {
-        "timestamp": data.get("timestamp"),
-        "timestamp_ms": data.get("timestamp"),
+        "timestamp_ms": data.get("timestamp_ms"),
+        "timestamp_iso": data.get("timestamp_iso"),
+        "timezone": TIMEZONE,
+        "created_at_ms": data.get("timestamp_ms"),
+        "created_at_iso": data.get("timestamp_iso"),
         "switch": data.get("switch"),
         "online_state": data.get("online_state"),
         "relay_status": data.get("relay_status"),
@@ -162,13 +177,14 @@ def write_device_latest(firebase_key, breaker_name, device_id, data):
 
 def write_device_history(firebase_key, data):
     payload = build_history_payload(data)
-    ts = str(data["timestamp"])
-    url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/history/{firebase_key}/{ts}.json"
+    key = f"breaker_{data['timestamp_ms']}"
+    url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/history/{firebase_key}/{key}.json"
     r = requests.put(url, json=payload, timeout=15)
     r.raise_for_status()
 
 def write_device_offline(firebase_key, breaker_name, device_id, error):
-    timestamp = int(time.time() * 1000)
+    timestamp = now_ms()
+    timestamp_iso = ms_to_iso(timestamp)
     payload = {
         "type": "smart_breaker",
         "name": breaker_name,
@@ -179,7 +195,8 @@ def write_device_offline(firebase_key, breaker_name, device_id, error):
             "switch": False,
             "relay_status": "off",
             "lastSeenMs": timestamp,
-            "lastSeen": timestamp,
+            "last_seen_ms": timestamp,
+            "last_seen_iso": timestamp_iso,
             "last_error": str(error),
         },
         "metering": {
@@ -195,11 +212,12 @@ def write_device_offline(firebase_key, breaker_name, device_id, error):
     r.raise_for_status()
 
 def write_poll_error(firebase_key, error):
-    timestamp = int(time.time() * 1000)
+    timestamp = now_ms()
     payload = {
         "status": {
             "last_poll_error": str(error),
-            "last_poll_error_at": timestamp,
+            "last_poll_error_at_ms": timestamp,
+            "last_poll_error_at_iso": ms_to_iso(timestamp),
         }
     }
     url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/devices/{firebase_key}.json"
@@ -209,12 +227,12 @@ def write_poll_error(firebase_key, error):
 def remember_success(firebase_key):
     state = breaker_health[firebase_key]
     state["offline_count"] = 0
-    state["last_success_at"] = int(time.time() * 1000)
+    state["last_success_at"] = now_ms()
 
 def remember_failure(firebase_key):
     state = breaker_health[firebase_key]
     state["offline_count"] += 1
-    state["last_failure_at"] = int(time.time() * 1000)
+    state["last_failure_at"] = now_ms()
     return state["offline_count"]
 
 def fetch_breaker_status(device_id):

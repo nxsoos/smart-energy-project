@@ -85,6 +85,7 @@
 
       <section id="actionSuggestions" class="suggestion-list"></section>
       <section id="automationMessage" class="card auto-message hidden"></section>
+      <section id="nextSchedule" class="card auto-message hidden"></section>
     </main>
 
     <div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true">
@@ -108,6 +109,30 @@
             <span>The system can automatically control allowed devices to save energy.</span>
           </button>
         </div>
+        <h3>Preferences</h3>
+        <div class="pref-grid">
+          <label>Cost per kWh <input id="prefCost" type="number" step="0.001"></label>
+          <label>Comfort Min <input id="prefComfortMin" type="number" step="1"></label>
+          <label>Comfort Max <input id="prefComfortMax" type="number" step="1"></label>
+          <label>High Temp <input id="prefHighTemp" type="number" step="1"></label>
+          <label>Light Waste Min <input id="prefLightWaste" type="number" step="1"></label>
+          <label>Empty Room Min <input id="prefOccupancy" type="number" step="1"></label>
+          <label>Offline Min <input id="prefOffline" type="number" step="1"></label>
+        </div>
+        <div class="toggle-grid">
+          <label><input id="prefQuiet" type="checkbox"> Quiet hours</label>
+          <label><input id="prefAi" type="checkbox"> AI recommendations</label>
+          <label><input id="prefAuto" type="checkbox"> Auto control</label>
+          <label><input id="prefNotifications" type="checkbox"> Notifications</label>
+          <label><input id="prefSchedules" type="checkbox"> Schedules</label>
+        </div>
+        <button id="savePrefsButton" class="btn btn-on" type="button">Save Preferences</button>
+
+        <div class="modal-header compact">
+          <h3>Schedules</h3>
+          <button id="addScheduleButton" class="icon-btn dark" type="button">Add</button>
+        </div>
+        <div id="settingsSchedules" class="settings-schedules"></div>
       </div>
     </div>
 

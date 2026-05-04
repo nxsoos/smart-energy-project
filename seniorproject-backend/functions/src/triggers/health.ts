@@ -3,6 +3,7 @@ import * as logger from "firebase-functions/logger";
 import { admin } from "../firebase";
 import { DATABASE_REGION } from "../config";
 import { checkAndUpdateDeviceHealth } from "../deviceHealth";
+import { msToIso, nowTimestamp } from "../utils";
 
 export const checkDeviceHealth = onSchedule(
   {
@@ -33,7 +34,11 @@ export const checkDeviceHealth = onSchedule(
             online: health.online,
             health_status: health.health_status,
             lastSeenMs: health.lastSeenMs,
+            last_seen_ms: health.lastSeenMs,
+            last_seen_iso: msToIso(health.lastSeenMs),
             offline_since: health.offline_since,
+            offline_since_ms: health.offline_since,
+            offline_since_iso: msToIso(health.offline_since),
           };
         }
 
@@ -41,7 +46,10 @@ export const checkDeviceHealth = onSchedule(
           .database()
           .ref(`/homes/${homeId}/backend/device_health`)
           .set({
+            ...nowTimestamp(now),
             updated_at: now,
+            updated_at_ms: now,
+            updated_at_iso: msToIso(now),
             devices: deviceHealth,
           });
       }
