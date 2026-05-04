@@ -14,11 +14,420 @@ import {
   createOrUpdateActiveAlert,
   markAlertResolving,
   resolveAlertToHistory,
-  setAlertActiveOrResolve,
 } from "../alerts";
 import { resolveRecommendation, upsertRecommendation } from "../recommendations";
 import { handleSuggestedAction } from "../control";
 import { msToIso, nowTimestamp } from "../utils";
+
+const SMOKE_ALERT_ID = "smoke_detected_room1";
+const SMOKE_CONFIRMATION_COUNT = 2;
+const SMOKE_CONFIRMATION_MS = 7000;
+const SMOKE_CLEAR_DELAY_MS = 15000;
+
+function asRecord(value: unknown): Record<string, any> {
+  return typeof value === "object" && value !== null ? (value as Record<string, any>) : {};
+}
+
+function normalizeBool(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    return ["true", "1", "yes", "on", "detected", "smoke"].includes(value.trim().toLowerCase());
+  }
+  return false;
+}
+
+function defaultDeviceSafety(deviceId: string): Record<string, boolean> {
+  if (deviceId === "breaker_01") {
+    return { critical_device: false, emergency_shutdown_allowed: true, auto_shutdown_on_smoke: true };
+  }
+  if (deviceId === "breaker_02") {
+    return { critical_device: false, emergency_shutdown_allowed: true, auto_shutdown_on_smoke: false };
+  }
+  return { critical_device: true, emergency_shutdown_allowed: false, auto_shutdown_on_smoke: false };
+}
+
+async function writeSafetyEvent(
+  homeId: string,
+  type: string,
+  message: string,
+  actionsTaken: string[] = [],
+  timestampMs = Date.now()
+): Promise<void> {
+  const eventId = `safety_${timestampMs}_${type}`;
+  await admin.database().ref(`/homes/${homeId}/safety/events/${eventId}`).set({
+    ...nowTimestamp(timestampMs),
+    event_id: eventId,
+    type,
+    severity: type.includes("confirmed") || type.includes("emergency") ? "critical" : "medium",
+    message,
+    source: "mq2",
+    actions_taken: actionsTaken,
+    created_at_ms: timestampMs,
+    created_at_iso: msToIso(timestampMs),
+  });
+}
+
+async function createEmergencySuggestion(
+  homeId: string,
+  deviceId: string,
+  deviceName: string,
+  reason: string,
+  timestampMs: number
+): Promise<void> {
+  const suggestionId = `smoke_emergency_${deviceId}`;
+  const ref = admin.database().ref(`/homes/${homeId}/action_suggestions/active/${suggestionId}`);
+  const snap = await ref.get();
+  if (snap.exists()) {
+    return;
+  }
+  await ref.set({
+    ...nowTimestamp(timestampMs),
+    suggestion_id: suggestionId,
+    type: "emergency_action",
+    severity: "critical",
+    home_id: homeId,
+    device_id: deviceId,
+    device_name: deviceName,
+    suggested_command: "turn_off",
+    target_state: "off",
+    reason,
+    source: "safety_rule",
+    status: "waiting_for_user",
+    created_at_ms: timestampMs,
+    created_at_iso: msToIso(timestampMs),
+    actions: ["approve", "dismiss"],
+  });
+}
+
+async function createNotification(homeId: string, timestampMs: number): Promise<void> {
+  const notificationId = `notif_${timestampMs}`;
+  const notification = {
+    ...nowTimestamp(timestampMs),
+    notification_id: notificationId,
+    type: "critical_alert",
+    alert_type: "smoke_detected",
+    severity: "critical",
+    title: "Smoke/Gas Detected",
+    body: "Smoke or gas was detected in Room 1. Check immediately.",
+    home_id: homeId,
+    room_id: "room1",
+    read: false,
+    delivered: false,
+    created_at_ms: timestampMs,
+    created_at_iso: msToIso(timestampMs),
+  };
+  await admin.database().ref(`/homes/${homeId}/notifications/${notificationId}`).set(notification);
+
+  const tokens = asRecord(
+    (await admin.database().ref(`/homes/${homeId}/notification_tokens`).get()).val()
+  );
+  const activeTokens = Object.values(tokens)
+    .map((item) => asRecord(item))
+    .filter((item) => item.active === true && typeof item.token === "string")
+    .map((item) => item.token as string);
+  if (!activeTokens.length) {
+    return;
+  }
+  let delivered = false;
+  for (const token of activeTokens) {
+    try {
+      await admin.messaging().send({
+        token,
+        notification: { title: notification.title, body: notification.body },
+        data: {
+          home_id: homeId,
+          notification_id: notificationId,
+          alert_type: "smoke_detected",
+          severity: "critical",
+        },
+      });
+      delivered = true;
+    } catch (error) {
+      logger.warn("Failed to send smoke notification", { homeId, error });
+    }
+  }
+  if (delivered) {
+    await admin.database().ref(`/homes/${homeId}/notifications/${notificationId}`).update({
+      delivered: true,
+      delivered_at_ms: Date.now(),
+      delivered_at_iso: msToIso(Date.now()),
+    });
+  }
+}
+
+async function createEmergencyCommand(
+  homeId: string,
+  deviceId: string,
+  deviceName: string,
+  timestampMs: number
+): Promise<string> {
+  const commandId = `cmd_${timestampMs}_${deviceId}`;
+  const commandRecord = {
+    ...nowTimestamp(timestampMs),
+    command_id: commandId,
+    home_id: homeId,
+    device_id: deviceId,
+    device_name: deviceName,
+    command: "turn_off",
+    action: "turn_off",
+    target_state: "off",
+    requested_by: "emergency_auto_shutdown",
+    reason: "Smoke or gas emergency automatic shutdown for explicitly safe device.",
+    source: "smoke_emergency",
+    emergency: true,
+    alert_id: SMOKE_ALERT_ID,
+    status: "pending",
+    requested_at_ms: timestampMs,
+    requested_at_iso: msToIso(timestampMs),
+    sent_at_ms: null,
+    sent_at_iso: null,
+    confirmed_at_ms: null,
+    confirmed_at_iso: null,
+    failed_at_ms: null,
+    failed_at_iso: null,
+    timeout_at_ms: null,
+    timeout_at_iso: null,
+    result: { success: null, actual_state: null, error_code: null, user_message: null, raw_error: null },
+    retry_count: 0,
+    max_retries: 1,
+  };
+  await admin.database().ref(`/homes/${homeId}`).update({
+    [`commands/pending/${commandId}`]: commandRecord,
+    [`commands/history/${commandId}`]: commandRecord,
+    [`commands/latest_by_device/${deviceId}`]: commandRecord,
+    [`commands/${deviceId}/latest`]: {
+      ...commandRecord,
+      created_at: timestampMs,
+      created_at_ms: timestampMs,
+      created_at_iso: msToIso(timestampMs),
+      source: "smoke_emergency",
+    },
+    [`devices/${deviceId}/command_in_progress`]: true,
+    [`devices/${deviceId}/pending_command_id`]: commandId,
+    [`devices/${deviceId}/pending_target_state`]: "off",
+    [`devices/${deviceId}/last_requested_state`]: "off",
+    [`devices/${deviceId}/last_command_status`]: "pending",
+    [`devices/${deviceId}/last_command_message`]: "Emergency shutdown command accepted.",
+    [`automation_logs/auto_${timestampMs}_${deviceId}`]: {
+      log_id: `auto_${timestampMs}_${deviceId}`,
+      home_id: homeId,
+      device_id: deviceId,
+      device_name: deviceName,
+      command: "turn_off",
+      target_state: "off",
+      reason: "Smoke or gas emergency automatic shutdown.",
+      command_id: commandId,
+      source: "smoke_emergency",
+      created_at_ms: timestampMs,
+      created_at_iso: msToIso(timestampMs),
+    },
+  });
+  return commandId;
+}
+
+async function confirmSmokeEmergency(homeId: string, logId: string, timestampMs: number): Promise<void> {
+  const homeRef = admin.database().ref(`/homes/${homeId}`);
+  const existingAlert = await homeRef.child(`alerts/active/${SMOKE_ALERT_ID}`).get();
+  const alert = {
+    ...nowTimestamp(timestampMs),
+    alert_id: SMOKE_ALERT_ID,
+    alert_type: "smoke_detected",
+    category: "safety",
+    severity: "critical",
+    status: "active",
+    title: "Smoke/Gas Detected",
+    message: "Smoke or gas was detected in Room 1. Check the area immediately.",
+    room_id: "room1",
+    source: "mq2",
+    source_log: logId,
+    requires_user_attention: true,
+    created_at_ms: existingAlert.exists()
+      ? asRecord(existingAlert.val()).created_at_ms ?? timestampMs
+      : timestampMs,
+    created_at_iso: existingAlert.exists()
+      ? asRecord(existingAlert.val()).created_at_iso ?? msToIso(timestampMs)
+      : msToIso(timestampMs),
+    updated_at_ms: timestampMs,
+    updated_at_iso: msToIso(timestampMs),
+  };
+  await homeRef.child(`alerts/active/${SMOKE_ALERT_ID}`).set(alert);
+  if (!existingAlert.exists()) {
+    await homeRef.child(`alerts/history/alert_${timestampMs}_${SMOKE_ALERT_ID}`).set({
+      ...alert,
+      event: "created",
+    });
+  }
+  await homeRef.child("safety/emergency_mode").set({
+    ...nowTimestamp(timestampMs),
+    active: true,
+    reason: "smoke_detected",
+    severity: "critical",
+    started_at_ms: timestampMs,
+    started_at_iso: msToIso(timestampMs),
+    ended_at_ms: null,
+    ended_at_iso: null,
+    message: "Smoke or gas was detected. Normal automation is paused.",
+    updated_at_ms: timestampMs,
+    updated_at_iso: msToIso(timestampMs),
+  });
+
+  const emergencyTasks = [
+    createNotification(homeId, timestampMs),
+    writeSafetyEvent(homeId, "smoke_confirmed", "Smoke or gas was confirmed in Room 1.", [
+      "critical_alert_created",
+      "emergency_mode_enabled",
+      "notification_created",
+      "popup_required",
+    ], timestampMs),
+  ];
+  if (!existingAlert.exists()) {
+    emergencyTasks.push(
+      createEmergencySuggestion(
+        homeId,
+        "breaker_01",
+        "Switch Breaker",
+        "Smoke or gas was detected. Turning off this breaker may reduce electrical risk.",
+        timestampMs
+      ),
+      createEmergencySuggestion(
+        homeId,
+        "breaker_02",
+        "AC Breaker",
+        "Smoke or gas was detected. Turning off AC/fan simulation may help prevent spreading smoke or gas.",
+        timestampMs
+      )
+    );
+  }
+  await Promise.all(emergencyTasks);
+
+  const control = asRecord((await homeRef.child("control").get()).val());
+  if (String(control.mode ?? "assist").toLowerCase() !== "auto") {
+    return;
+  }
+  const devices = asRecord((await homeRef.child("devices").get()).val());
+  for (const deviceId of Object.keys(devices)) {
+    const device = asRecord(devices[deviceId]);
+    const safetySnap = await homeRef.child(`devices/${deviceId}/safety`).get();
+    const safety = { ...defaultDeviceSafety(deviceId), ...asRecord(safetySnap.val()) };
+    await homeRef.child(`devices/${deviceId}/safety`).update(safety);
+    if (safety.emergency_shutdown_allowed !== true || safety.auto_shutdown_on_smoke !== true) {
+      continue;
+    }
+    if (normalizeBool(device.command_in_progress)) {
+      continue;
+    }
+    const status = asRecord(device.status);
+    const online = normalizeBool(status.online);
+    const isOn = normalizeBool(status.switch) || String(status.state ?? "").toLowerCase() === "on";
+    if (online === false || !isOn) {
+      continue;
+    }
+    const commandId = await createEmergencyCommand(
+      homeId,
+      deviceId,
+      String(device.name ?? (deviceId === "breaker_01" ? "Switch Breaker" : "AC Breaker")),
+      timestampMs + Object.keys(devices).indexOf(deviceId)
+    );
+    await writeSafetyEvent(homeId, "emergency_shutdown_command_created", `Auto Mode created ${commandId}.`, [
+      "auto_shutdown_on_smoke",
+      deviceId,
+    ]);
+  }
+}
+
+async function handleSmokeConfirmation(homeId: string, logId: string, smokeDetected: boolean, timestampMs: number): Promise<void> {
+  const smokeRef = admin.database().ref(`/homes/${homeId}/safety/smoke_state`);
+  const current = asRecord((await smokeRef.get()).val());
+  if (smokeDetected) {
+    const firstDetectedAt =
+      current.status === "pending" || current.status === "confirmed"
+        ? Number(current.first_detected_at_ms ?? timestampMs)
+        : timestampMs;
+    const consecutive = Number(current.consecutive_detections ?? 0) + 1;
+    const confirmed =
+      consecutive >= SMOKE_CONFIRMATION_COUNT ||
+      timestampMs - firstDetectedAt >= SMOKE_CONFIRMATION_MS ||
+      current.status === "confirmed";
+    await smokeRef.set({
+      ...nowTimestamp(timestampMs),
+      status: confirmed ? "confirmed" : "pending",
+      consecutive_detections: consecutive,
+      first_detected_at_ms: firstDetectedAt,
+      first_detected_at_iso: msToIso(firstDetectedAt),
+      last_detected_at_ms: timestampMs,
+      last_detected_at_iso: msToIso(timestampMs),
+      last_clear_at_ms: null,
+      last_clear_at_iso: null,
+      updated_at_ms: timestampMs,
+      updated_at_iso: msToIso(timestampMs),
+    });
+    await writeSafetyEvent(
+      homeId,
+      confirmed ? "smoke_confirmed" : "smoke_pending",
+      confirmed ? "Smoke or gas was confirmed in Room 1." : "Smoke or gas detection is pending confirmation.",
+      confirmed ? ["confirmation_threshold_met"] : [],
+      timestampMs
+    );
+    if (confirmed) {
+      await confirmSmokeEmergency(homeId, logId, timestampMs);
+    }
+    return;
+  }
+
+  const lastClearAt =
+    typeof current.last_clear_at_ms === "number" ? current.last_clear_at_ms : timestampMs;
+  const remainsConfirmedDuringClearDelay = current.status === "confirmed" && timestampMs - lastClearAt < SMOKE_CLEAR_DELAY_MS;
+  await smokeRef.set({
+    ...nowTimestamp(timestampMs),
+    status: remainsConfirmedDuringClearDelay ? "confirmed" : "clear",
+    consecutive_detections: 0,
+    first_detected_at_ms: remainsConfirmedDuringClearDelay ? current.first_detected_at_ms ?? null : null,
+    first_detected_at_iso: remainsConfirmedDuringClearDelay ? current.first_detected_at_iso ?? null : null,
+    last_detected_at_ms: current.last_detected_at_ms ?? null,
+    last_detected_at_iso: current.last_detected_at_iso ?? null,
+    last_clear_at_ms: lastClearAt,
+    last_clear_at_iso: msToIso(lastClearAt),
+    updated_at_ms: timestampMs,
+    updated_at_iso: msToIso(timestampMs),
+  });
+
+  if (current.status === "pending") {
+    await writeSafetyEvent(homeId, "smoke_cleared", "Smoke/gas cleared before confirmation.", [], timestampMs);
+    return;
+  }
+  if (current.status === "confirmed" && timestampMs - lastClearAt >= SMOKE_CLEAR_DELAY_MS) {
+    const homeRef = admin.database().ref(`/homes/${homeId}`);
+    const alertSnap = await homeRef.child(`alerts/active/${SMOKE_ALERT_ID}`).get();
+    if (alertSnap.exists()) {
+      await homeRef.child(`alerts/history/alert_${timestampMs}_${SMOKE_ALERT_ID}`).set({
+        ...asRecord(alertSnap.val()),
+        ...nowTimestamp(timestampMs),
+        status: "resolved",
+        resolved_at_ms: timestampMs,
+        resolved_at_iso: msToIso(timestampMs),
+        updated_at_ms: timestampMs,
+        updated_at_iso: msToIso(timestampMs),
+      });
+      await homeRef.child(`alerts/active/${SMOKE_ALERT_ID}`).remove();
+    }
+    await homeRef.child("safety/emergency_mode").update({
+      active: false,
+      ended_at_ms: timestampMs,
+      ended_at_iso: msToIso(timestampMs),
+      updated_at_ms: timestampMs,
+      updated_at_iso: msToIso(timestampMs),
+    });
+    await writeSafetyEvent(homeId, "emergency_mode_disabled", "Smoke/gas cleared after safe delay.", [
+      "critical_alert_resolved",
+      "normal_automation_resumed",
+    ], timestampMs);
+  }
+}
 
 export const analyzeSensorLog = onValueCreated(
   {
@@ -129,29 +538,14 @@ export const analyzeSensorLog = onValueCreated(
       const currentOccupancyState =
         occupancyState === "unknown" ? fallbackOccupancyState : occupancyState;
 
-      // Immediate safety alert
-      if (log.smoke === 1) {
-        await setAlertActiveOrResolve(backendRef, {
-          alertKey: "smoke_detected",
-          isActive: true,
-          createInput: {
-            type: "safety",
-            subtype: "smoke_detected",
-            level: "critical",
-            message: "Smoke detected",
-            source: "sensor_analysis",
-            source_log: logId,
-          },
-          timestampMs: now,
-        });
-
+      // MQ2 smoke/gas safety handling uses confirmation before critical alert.
+      const smokeDetected =
+        normalizeBool(log.smoke) ||
+        normalizeBool(log.smoke_text) ||
+        normalizeBool(log.smoke_status);
+      await handleSmokeConfirmation(homeId, logId, smokeDetected, now);
+      if (smokeDetected) {
         setRecommendation("Check the room immediately for smoke or gas", 100);
-      } else {
-        await setAlertActiveOrResolve(backendRef, {
-          alertKey: "smoke_detected",
-          isActive: false,
-          timestampMs: now,
-        });
       }
 
       // Start/update light + no motion pending condition

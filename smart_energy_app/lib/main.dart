@@ -1,16 +1,33 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'screens/home_screen.dart';
+import 'services/firebase_realtime_service.dart';
 import 'utils/constants.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     await Firebase.initializeApp();
+    await _registerPushNotifications();
   } catch (_) {
     // Keep app running even when Firebase native config is not present.
   }
   runApp(const SmartEnergyApp());
+}
+
+Future<void> _registerPushNotifications() async {
+  final messaging = FirebaseMessaging.instance;
+  await messaging.requestPermission(alert: true, badge: true, sound: true);
+  final token = await messaging.getToken();
+  if (token == null || token.isEmpty) {
+    return;
+  }
+  await FirebaseRealtimeService().registerNotificationToken(
+    homeId: NetworkConfig.firebaseHomeId,
+    token: token,
+    platform: 'android',
+  );
 }
 
 class SmartEnergyApp extends StatelessWidget {

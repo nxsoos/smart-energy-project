@@ -1,5 +1,7 @@
 const state = {
   lastData: null,
+  smokeEmergencyDismissed: false,
+  smokeClearStartedAt: null,
 };
 
 const SENSOR_STALE_AFTER_MS = 2 * 60 * 1000;
@@ -28,6 +30,8 @@ const ids = {
   nextSchedule: document.getElementById("nextSchedule"),
   settingsModal: document.getElementById("settingsModal"),
   settingsSchedules: document.getElementById("settingsSchedules"),
+  emergencyOverlay: document.getElementById("emergencyOverlay"),
+  emergencyMessage: document.getElementById("emergencyMessage"),
 };
 
 function nested(source, keys, fallback = null) {
@@ -159,6 +163,8 @@ function updateSensors(dashboard) {
     nested(dashboard, ["updated_at_iso"]) ||
     "Unknown";
 
+  updateEmergencyOverlay(dashboard);
+
   ids.occupancyState.textContent = `${friendlyOccupancy(occupancy.state || room.occupancy_state)}${
     Number.isFinite(Number(occupancy.confidence)) ? ` (${Math.round(Number(occupancy.confidence) * 100)}%)` : ""
   }`;
@@ -190,6 +196,76 @@ function updateSensors(dashboard) {
   setMetric("smoke", smokeText || yesNo(smoke, "Detected", "Clear"), smoke === true || smoke === 1 ? "warning" : "good");
   setMetric("sound", noiseText || yesNo(noise, "Noise", soundRaw !== null ? String(soundRaw) : "Quiet"), "normal");
   ids.lastUpdated.textContent = updated;
+}
+
+function activeSmokeEmergency(dashboard) {
+  const safety = dashboard.safety || {};
+  const room = dashboard.room || {};
+  const roomSmoke = nested(room, ["smoke"], false);
+  const roomSmokeText = String(nested(room, ["smoke_text"], "")).toLowerCase();
+  const sensorTimestamp = Number(nested(room, ["sensor_timestamp_ms"], 0));
+  const roomSmokeDetected =
+    roomSmoke === true ||
+    roomSmoke === 1 ||
+    roomSmokeText.includes("detect") ||
+    roomSmokeText.includes("smoke") ||
+    roomSmokeText.includes("gas");
+  if (roomSmokeDetected) {
+    state.smokeClearStartedAt = null;
+  } else if (sensorTimestamp > 0 && state.smokeClearStartedAt === null) {
+    state.smokeClearStartedAt = Date.now();
+  }
+  if (!roomSmokeDetected && state.smokeClearStartedAt !== null && Date.now() - state.smokeClearStartedAt >= 15000) {
+    state.smokeEmergencyDismissed = false;
+    return null;
+  }
+  const smokeState = safety.smoke_state || {};
+  const lastClearAt = Number(smokeState.last_clear_at_ms || 0);
+  if (
+    String(smokeState.status || "").toLowerCase() === "clear" &&
+    lastClearAt > 0 &&
+    Date.now() - lastClearAt >= 15000
+  ) {
+    state.smokeEmergencyDismissed = false;
+    return null;
+  }
+  const emergency = safety.emergency_mode || {};
+  if (emergency.active === true && emergency.reason === "smoke_detected") {
+    return {
+      message: emergency.message || "Smoke or gas was detected in Room 1. Check immediately.",
+    };
+  }
+  const critical = Array.isArray(dashboard.critical_alerts) ? dashboard.critical_alerts : [];
+  return critical.find((alert) => String(alert.alert_type || alert.subtype || alert.type || "").includes("smoke"));
+}
+
+function updateEmergencyOverlay(dashboard) {
+  const alert = activeSmokeEmergency(dashboard);
+  if (!alert || state.smokeEmergencyDismissed) {
+    ids.emergencyOverlay.classList.add("hidden");
+    return;
+  }
+  ids.emergencyMessage.textContent = alert.message || "Smoke or gas was detected in Room 1. Check immediately.";
+  ids.emergencyOverlay.classList.remove("hidden");
+}
+
+function dismissEmergencyOverlay() {
+  state.smokeEmergencyDismissed = true;
+  ids.emergencyOverlay.classList.add("hidden");
+}
+
+async function emergencyApi(path, body = null) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : null,
+  });
+  const data = await response.json();
+  if (!response.ok || data.success === false) {
+    throw new Error(data.message || data.detail || "Emergency action failed");
+  }
+  ids.commandMessage.textContent = data.message || "Emergency action requested.";
+  await fetchLatest();
 }
 
 function breakerStatus(device) {
@@ -278,9 +354,22 @@ function updateControlMode(dashboard) {
 
 function updateActionSuggestionCards(dashboard) {
   const control = dashboard.control || {};
-  const suggestions = Array.isArray(dashboard.action_suggestions)
+  const rawSuggestions = Array.isArray(dashboard.action_suggestions)
     ? dashboard.action_suggestions
     : [];
+  const seenSuggestions = new Set();
+  const suggestions = rawSuggestions.filter((suggestion) => {
+    const key = [
+      suggestion.device_id || "",
+      suggestion.suggested_command || suggestion.command || "",
+      suggestion.reason || "",
+    ].join("|");
+    if (seenSuggestions.has(key)) {
+      return false;
+    }
+    seenSuggestions.add(key);
+    return true;
+  });
 
   ids.actionSuggestions.innerHTML = "";
   if (control.mode !== "assist" || suggestions.length === 0) {
@@ -503,6 +592,13 @@ async function changeMode(mode) {
 
 async function decideSuggestion(suggestionId, decision) {
   ids.commandMessage.textContent = "Updating suggestion...";
+  const button = Array.from(
+    ids.actionSuggestions.querySelectorAll("[data-suggestion-id]")
+  ).find((item) => item.dataset.suggestionId === suggestionId);
+  const card = button ? button.closest(".action-suggestion") : null;
+  if (card) {
+    card.remove();
+  }
   try {
     const response = await fetch(`/api/action-suggestions/${suggestionId}/${decision}`, {
       method: "POST",
@@ -560,6 +656,34 @@ document.getElementById("settingsButton").addEventListener("click", () => {
   ids.settingsModal.classList.remove("hidden");
   loadSettingsPanel().catch((error) => {
     ids.commandMessage.textContent = `Settings failed: ${error.message}`;
+  });
+});
+
+document.getElementById("emergencyAllOff").addEventListener("click", () => {
+  dismissEmergencyOverlay();
+  emergencyApi("/api/safety/smoke/actions/turn-off-safe-devices").catch((error) => {
+    ids.commandMessage.textContent = `Emergency action failed: ${error.message}`;
+  });
+});
+
+document.getElementById("emergencyBreaker1").addEventListener("click", () => {
+  dismissEmergencyOverlay();
+  emergencyApi("/api/command", { device_id: "breaker_01", action: "turn_off", emergency: true }).catch((error) => {
+    ids.commandMessage.textContent = `Emergency action failed: ${error.message}`;
+  });
+});
+
+document.getElementById("emergencyBreaker2").addEventListener("click", () => {
+  dismissEmergencyOverlay();
+  emergencyApi("/api/command", { device_id: "breaker_02", action: "turn_off", emergency: true }).catch((error) => {
+    ids.commandMessage.textContent = `Emergency action failed: ${error.message}`;
+  });
+});
+
+document.getElementById("emergencyMarkSafe").addEventListener("click", () => {
+  dismissEmergencyOverlay();
+  emergencyApi("/api/safety/smoke/actions/mark-safe").catch((error) => {
+    ids.commandMessage.textContent = `Mark safe failed: ${error.message}`;
   });
 });
 

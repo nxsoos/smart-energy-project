@@ -7,6 +7,18 @@
     <link rel="stylesheet" href="/static/style.css">
   </head>
   <body>
+    <section id="emergencyOverlay" class="emergency-overlay hidden">
+      <div class="emergency-panel">
+        <h1>Smoke/Gas Detected</h1>
+        <p id="emergencyMessage">Smoke or gas was detected in Room 1. Check immediately.</p>
+        <div class="emergency-actions">
+          <button id="emergencyAllOff" class="btn btn-off" type="button">Turn Off All Safe Devices</button>
+          <button id="emergencyBreaker1" class="btn btn-off" type="button">Turn Off Switch Breaker</button>
+          <button id="emergencyBreaker2" class="btn btn-off" type="button">Turn Off AC Breaker</button>
+          <button id="emergencyMarkSafe" class="btn btn-muted" type="button">I Checked - Mark Safe</button>
+        </div>
+      </div>
+    </section>
     <main class="shell">
       <header class="topbar">
         <div>

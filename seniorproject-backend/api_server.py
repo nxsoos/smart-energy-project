@@ -11,7 +11,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from firebase_admin import credentials, db
+from firebase_admin import credentials, db, messaging
 from pydantic import BaseModel, Field
 
 from occupancy_utils import DEFAULT_OCCUPANCY_SETTINGS
@@ -32,6 +32,7 @@ VALID_COMMANDS = {"turn_on", "turn_off"}
 DEVICE_STALE_AFTER_MS = 45 * 1000
 VALID_CONTROL_MODES = {"manual", "assist", "auto"}
 AUTO_REQUESTERS = {"ai", "backend_ai", "automation", "backend_automation"}
+EMERGENCY_REQUESTERS = {"user_emergency_action", "emergency_auto_shutdown"}
 USER_COMMAND_REQUESTERS = {
     "flutter_app",
     "pi_dashboard",
@@ -40,7 +41,11 @@ USER_COMMAND_REQUESTERS = {
     "user_approved_ai_suggestion",
     "schedule",
     "schedule_manual_run",
+    "user_emergency_action",
+    "emergency_auto_shutdown",
 }
+SMOKE_ALERT_ID = "smoke_detected_room1"
+SMOKE_CLEAR_DELAY_MS = 15 * 1000
 VALID_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 PY_WEEKDAY_TO_DAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -99,6 +104,25 @@ DEFAULT_AUTOMATION_BY_DEVICE = {
 SAFE_AUTO_ACTIONS = {
     "breaker_01": {"turn_off"},
     "breaker_02": {"turn_on", "turn_off"},
+}
+
+DEFAULT_DEVICE_SAFETY_BY_DEVICE = {
+    "breaker_01": {
+        "critical_device": False,
+        "emergency_shutdown_allowed": True,
+        "auto_shutdown_on_smoke": True,
+    },
+    "breaker_02": {
+        "critical_device": False,
+        "emergency_shutdown_allowed": True,
+        "auto_shutdown_on_smoke": False,
+    },
+}
+
+DEFAULT_UNKNOWN_DEVICE_SAFETY = {
+    "critical_device": True,
+    "emergency_shutdown_allowed": False,
+    "auto_shutdown_on_smoke": False,
 }
 
 DEFAULT_SETTINGS = {
@@ -164,6 +188,9 @@ class DeviceCommandRequest(BaseModel):
     requested_by: str = Field("api", description="flutter_app or pi_dashboard")
     reason: str | None = None
     source_suggestion_id: str | None = None
+    source: str | None = None
+    emergency: bool = False
+    alert_id: str | None = None
 
 
 class DeviceCommandResponse(BaseModel):
@@ -247,6 +274,12 @@ class ScheduleUpdateRequest(BaseModel):
     days: list[str] | None = None
     enabled: bool | None = None
     updated_by: str = "api"
+
+
+class NotificationTokenRequest(BaseModel):
+    user_id: str = "user_001"
+    token: str
+    platform: str = "android"
 
 
 class ScheduleEnabledRequest(BaseModel):
@@ -413,6 +446,179 @@ def ensure_device_automation(home_id: str, device_id: str) -> dict[str, Any]:
     return automation
 
 
+def ensure_device_safety(home_id: str, device_id: str) -> dict[str, Any]:
+    path = f"/homes/{home_id}/devices/{device_id}/safety"
+    current = as_dict(safe_get(path, {}))
+    fallback = DEFAULT_DEVICE_SAFETY_BY_DEVICE.get(device_id, DEFAULT_UNKNOWN_DEVICE_SAFETY)
+    if not current:
+        safe_set(path, fallback)
+        return dict(fallback)
+    merged = {**fallback, **current}
+    if merged != current:
+        safe_update(path, merged)
+    return merged
+
+
+def safety_event(
+    home_id: str,
+    event_type: str,
+    message: str,
+    severity: str = "critical",
+    actions_taken: list[str] | None = None,
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    event_id = f"safety_{timestamp_ms}"
+    event = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+        "event_id": event_id,
+        "type": event_type,
+        "severity": severity,
+        "message": message,
+        "source": "mq2",
+        "actions_taken": actions_taken or [],
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/safety/events/{event_id}", event)
+    return event
+
+
+def active_emergency_mode(home_id: str) -> dict[str, Any]:
+    emergency = as_dict(safe_get(f"/homes/{home_id}/safety/emergency_mode", {}))
+    return emergency if emergency.get("active") is True else {}
+
+
+def latest_smoke_is_clear_for(home_id: str, clear_delay_ms: int = SMOKE_CLEAR_DELAY_MS) -> bool:
+    esp32 = as_dict(safe_get(f"/homes/{home_id}/devices/esp32_01", {}))
+    sensors = as_dict(esp32.get("sensors"))
+    status = as_dict(esp32.get("status"))
+    smoke_state = as_dict(safe_get(f"/homes/{home_id}/safety/smoke_state", {}))
+    smoke = normalize_bool(sensors.get("smoke"))
+    smoke_text = str(sensors.get("smoke_text", "")).lower()
+    if smoke is True or "detect" in smoke_text or "smoke" in smoke_text or "gas" in smoke_text:
+        return False
+    clear_started_at_ms = as_number(smoke_state.get("last_clear_at_ms"))
+    if clear_started_at_ms <= 0:
+        clear_started_at_ms = as_number(
+            first_present(
+                sensors.get("timestamp_ms"),
+                status.get("last_seen_ms"),
+                status.get("lastSeenMs"),
+            )
+        )
+    latest_sensor_timestamp_ms = as_number(
+        first_present(
+            sensors.get("timestamp_ms"),
+            status.get("last_seen_ms"),
+            status.get("lastSeenMs"),
+        )
+    )
+    if clear_started_at_ms <= 0 or latest_sensor_timestamp_ms <= 0:
+        return False
+    if now_ms() - latest_sensor_timestamp_ms > 2 * 60 * 1000:
+        return False
+    return now_ms() - clear_started_at_ms >= clear_delay_ms
+
+
+def resolve_smoke_emergency_if_clear(home_id: str) -> None:
+    if not latest_smoke_is_clear_for(home_id):
+        return
+    timestamp_ms = now_ms()
+    alert = as_dict(safe_get(f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}", {}))
+    if alert:
+        safe_set(
+            f"/homes/{home_id}/alerts/history/alert_{timestamp_ms}_{SMOKE_ALERT_ID}",
+            {
+                **alert,
+                "status": "resolved",
+                "resolved_at_ms": timestamp_ms,
+                "resolved_at_iso": iso_from_ms(timestamp_ms),
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+        safe_set(f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}", None)
+    safe_update(
+        f"/homes/{home_id}/safety/emergency_mode",
+        {
+            "active": False,
+            "ended_at_ms": timestamp_ms,
+            "ended_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    safe_update(
+        f"/homes/{home_id}/safety/smoke_state",
+        {
+            "status": "clear",
+            "consecutive_detections": 0,
+            "last_clear_at_ms": timestamp_ms,
+            "last_clear_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+
+
+def create_notification_record(home_id: str, title: str, body: str) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    notification_id = f"notif_{timestamp_ms}"
+    notification = {
+        "notification_id": notification_id,
+        "type": "critical_alert",
+        "alert_type": "smoke_detected",
+        "severity": "critical",
+        "title": title,
+        "body": body,
+        "home_id": home_id,
+        "room_id": "room1",
+        "read": False,
+        "delivered": False,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+        "timezone": TIMEZONE,
+    }
+    safe_set(f"/homes/{home_id}/notifications/{notification_id}", notification)
+    send_push_notifications(home_id, notification_id, title, body)
+    return notification
+
+
+def send_push_notifications(home_id: str, notification_id: str, title: str, body: str) -> None:
+    tokens = [
+        as_dict(item)
+        for item in object_to_list(safe_get(f"/homes/{home_id}/notification_tokens", {}))
+    ]
+    active_tokens = [item.get("token") for item in tokens if item.get("active") is True and item.get("token")]
+    if not active_tokens:
+        return
+    delivered = False
+    for token in active_tokens:
+        try:
+            messaging.send(
+                messaging.Message(
+                    token=str(token),
+                    notification=messaging.Notification(title=title, body=body),
+                    data={
+                        "home_id": home_id,
+                        "notification_id": notification_id,
+                        "alert_type": "smoke_detected",
+                        "severity": "critical",
+                    },
+                )
+            )
+            delivered = True
+        except Exception:
+            continue
+    if delivered:
+        safe_update(
+            f"/homes/{home_id}/notifications/{notification_id}",
+            {"delivered": True, "delivered_at_ms": now_ms(), "delivered_at_iso": iso_from_ms(now_ms())},
+        )
+
+
 def default_settings_record(updated_by: str = "system_default") -> dict[str, Any]:
     timestamp_ms = now_ms()
     return {
@@ -562,6 +768,9 @@ def check_auto_safety(
 
     if command not in SAFE_AUTO_ACTIONS.get(device_id, set()):
         raise HTTPException(status_code=403, detail="This auto action is blocked by safety rules.")
+
+    if active_emergency_mode(home_id):
+        raise HTTPException(status_code=403, detail="Normal automation is paused during emergency mode.")
 
     current_state = as_dict(safe_get(f"/homes/{home_id}/backend/current_state", {}))
     esp32_sensors = as_dict(safe_get(f"/homes/{home_id}/devices/esp32_01/sensors", {}))
@@ -804,6 +1013,22 @@ def active_only(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def dedupe_action_suggestions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped = []
+    seen = set()
+    for item in items:
+        key = (
+            str(item.get("device_id", "")),
+            str(item.get("suggested_command", item.get("command", ""))),
+            str(item.get("reason", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def read_home_bundle(home_id: str) -> dict[str, Any]:
     home_path = f"/homes/{home_id}"
     home = as_dict(safe_get(home_path, {}))
@@ -836,6 +1061,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
         "backend_branches": as_dict(backend_energy.get("branches")),
         "backend_device_health": as_dict(backend.get("device_health")),
         "occupancy_room1": as_dict(as_dict(home.get("occupancy")).get("room1")),
+        "safety": as_dict(home.get("safety")),
     }
 
 
@@ -848,9 +1074,9 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
     occupancy = bundle["occupancy_room1"]
 
     source = {
-        **sensors,
-        **dashboard_env,
         **current_state,
+        **dashboard_env,
+        **sensors,
         **occupancy,
     }
 
@@ -1247,6 +1473,7 @@ def health() -> dict[str, Any]:
 
 @app.get("/api/home/{home_id}/dashboard")
 def get_dashboard(home_id: str) -> dict[str, Any]:
+    resolve_smoke_emergency_if_clear(home_id)
     bundle = read_home_bundle(home_id)
     devices = build_devices(bundle, home_id)
     timestamp_ms = now_ms()
@@ -1275,9 +1502,21 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         "energy": build_energy(bundle, devices, settings),
         "devices": devices,
         "alerts": alerts,
+        "critical_alerts": [
+            item
+            for item in alerts
+            if str(first_present(item.get("severity"), item.get("level"))).lower() == "critical"
+            or str(item.get("category")).lower() == "safety"
+        ],
+        "safety": {
+            "emergency_mode": as_dict(as_dict(bundle["safety"]).get("emergency_mode")),
+            "smoke_state": as_dict(as_dict(bundle["safety"]).get("smoke_state")),
+        },
         "recommendations": recommendations,
-        "action_suggestions": active_only(
-            object_to_list(safe_get(f"/homes/{home_id}/action_suggestions/active", {}))
+        "action_suggestions": dedupe_action_suggestions(
+            active_only(
+                object_to_list(safe_get(f"/homes/{home_id}/action_suggestions/active", {}))
+            )
         ),
         "automation_logs": object_to_list(
             safe_get(f"/homes/{home_id}/automation_logs", {})
@@ -1529,6 +1768,31 @@ def run_schedule(home_id: str, schedule_id: str, manual: bool = False) -> dict[s
     schedule = as_dict(safe_get(f"/homes/{home_id}/schedules/{schedule_id}", {}))
     if not schedule or schedule.get("deleted") is True:
         raise HTTPException(status_code=404, detail="Schedule does not exist.")
+    if not manual and active_emergency_mode(home_id):
+        timestamp_ms = now_ms()
+        next_ms, next_iso = calculate_next_run(
+            str(schedule.get("time")),
+            validate_days(schedule.get("days")),
+            str(schedule.get("timezone") or "Asia/Bahrain"),
+        )
+        safe_update(
+            f"/homes/{home_id}/schedules/{schedule_id}",
+            {
+                "last_run_at_ms": timestamp_ms,
+                "last_run_at_iso": iso_from_ms(timestamp_ms),
+                "next_run_at_ms": next_ms,
+                "next_run_at_iso": next_iso,
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+        log = log_schedule_run(
+            home_id,
+            schedule,
+            "skipped_emergency_mode",
+            "Normal schedule skipped while emergency mode is active.",
+        )
+        return {"success": False, "home_id": home_id, "log": log}
     if not manual and schedule.get("enabled") is not True:
         log = log_schedule_run(home_id, schedule, "failed", "Schedule is disabled.")
         return {"success": False, "home_id": home_id, "log": log}
@@ -1630,8 +1894,10 @@ def run_due_schedules(home_id: str) -> dict[str, Any]:
 
 @app.get("/api/home/{home_id}/action-suggestions/active")
 def get_active_action_suggestions(home_id: str) -> dict[str, Any]:
-    suggestions = active_only(
-        object_to_list(safe_get(f"/homes/{home_id}/action_suggestions/active", {}))
+    suggestions = dedupe_action_suggestions(
+        active_only(
+            object_to_list(safe_get(f"/homes/{home_id}/action_suggestions/active", {}))
+        )
     )
     suggestions.sort(key=lambda item: as_number(item.get("created_at_ms")), reverse=True)
     return {"home_id": home_id, "count": len(suggestions), "suggestions": suggestions}
@@ -1648,6 +1914,22 @@ def read_waiting_suggestion(home_id: str, suggestion_id: str) -> dict[str, Any]:
     return suggestion
 
 
+def remove_matching_emergency_suggestions(home_id: str, suggestion: dict[str, Any]) -> None:
+    if str(suggestion.get("type", "")).lower() != "emergency_action":
+        return
+    device_id = str(suggestion.get("device_id", ""))
+    source = str(suggestion.get("source", ""))
+    active = as_dict(safe_get(f"/homes/{home_id}/action_suggestions/active", {}))
+    for active_id, raw_item in active.items():
+        item = as_dict(raw_item)
+        if (
+            str(item.get("type", "")).lower() == "emergency_action"
+            and str(item.get("device_id", "")) == device_id
+            and str(item.get("source", "")) == source
+        ):
+            safe_set(f"/homes/{home_id}/action_suggestions/active/{active_id}", None)
+
+
 @app.post(
     "/api/home/{home_id}/action-suggestions/{suggestion_id}/approve",
     response_model=SuggestionDecisionResponse,
@@ -1661,9 +1943,14 @@ def approve_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
         device_id,
         DeviceCommandRequest(
             command=command,
-            requested_by="user_approved_ai_suggestion",
+            requested_by="user_emergency_action"
+            if suggestion.get("type") == "emergency_action"
+            else "user_approved_ai_suggestion",
             reason=str(suggestion.get("reason", "")),
             source_suggestion_id=suggestion_id,
+            source="smoke_emergency" if suggestion.get("type") == "emergency_action" else None,
+            emergency=suggestion.get("type") == "emergency_action",
+            alert_id=SMOKE_ALERT_ID if suggestion.get("type") == "emergency_action" else None,
         ),
     )
 
@@ -1679,6 +1966,7 @@ def approve_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
         "command_id": command_response.command_id,
     }
     safe_set(f"/homes/{home_id}/action_suggestions/history/{suggestion_id}", updated)
+    remove_matching_emergency_suggestions(home_id, suggestion)
     safe_set(f"/homes/{home_id}/action_suggestions/active/{suggestion_id}", None)
     return SuggestionDecisionResponse(
         success=True,
@@ -1695,7 +1983,17 @@ def approve_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
     response_model=SuggestionDecisionResponse,
 )
 def dismiss_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDecisionResponse:
-    suggestion = read_waiting_suggestion(home_id, suggestion_id)
+    suggestion = as_dict(
+        safe_get(f"/homes/{home_id}/action_suggestions/active/{suggestion_id}", {})
+    )
+    if not suggestion:
+        return SuggestionDecisionResponse(
+            success=True,
+            home_id=home_id,
+            suggestion_id=suggestion_id,
+            status="dismissed",
+            message="Action suggestion dismissed.",
+        )
     timestamp_ms = now_ms()
     updated = {
         **suggestion,
@@ -1707,6 +2005,7 @@ def dismiss_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
         "dismissed_at_iso": iso_from_ms(timestamp_ms),
     }
     safe_set(f"/homes/{home_id}/action_suggestions/history/{suggestion_id}", updated)
+    remove_matching_emergency_suggestions(home_id, suggestion)
     safe_set(f"/homes/{home_id}/action_suggestions/active/{suggestion_id}", None)
     return SuggestionDecisionResponse(
         success=True,
@@ -1715,6 +2014,170 @@ def dismiss_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
         status="dismissed",
         message="Action suggestion dismissed.",
     )
+
+
+@app.post("/api/home/{home_id}/safety/smoke/actions/turn-off-safe-devices")
+def turn_off_safe_devices(home_id: str) -> dict[str, Any]:
+    alert = as_dict(safe_get(f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}", {}))
+    if not alert or alert.get("status") != "active":
+        raise HTTPException(status_code=409, detail="No active smoke emergency alert exists.")
+
+    devices = as_dict(safe_get(f"/homes/{home_id}/devices", {}))
+    commands_created = []
+    skipped = []
+    for device_id, raw_device in devices.items():
+        device = as_dict(raw_device)
+        safety = ensure_device_safety(home_id, device_id)
+        if safety.get("emergency_shutdown_allowed") is not True:
+            skipped.append({"device_id": device_id, "reason": "emergency shutdown not allowed"})
+            continue
+        if not is_controllable_device(device_id, device):
+            skipped.append({"device_id": device_id, "reason": "device not controllable"})
+            continue
+        formatted = format_device(device_id, device)
+        if formatted.get("online") is not True:
+            skipped.append({"device_id": device_id, "reason": "device offline"})
+            continue
+        if str(formatted.get("state", "")).lower() == "off":
+            skipped.append({"device_id": device_id, "reason": "already off"})
+            continue
+        if normalize_bool(device.get("command_in_progress")) is True:
+            skipped.append({"device_id": device_id, "reason": "command already in progress"})
+            continue
+        response = create_device_command(
+            home_id,
+            device_id,
+            DeviceCommandRequest(
+                command="turn_off",
+                requested_by="user_emergency_action",
+                reason="Smoke or gas emergency: turn off safe device.",
+                source="smoke_emergency",
+                emergency=True,
+                alert_id=SMOKE_ALERT_ID,
+            ),
+        )
+        commands_created.append({"device_id": device_id, "command_id": response.command_id})
+
+    safety_event(
+        home_id,
+        "emergency_shutdown_command_created",
+        "User requested emergency shutdown for safe devices.",
+        actions_taken=[f"commands_created:{len(commands_created)}"],
+    )
+    return {
+        "success": True,
+        "home_id": home_id,
+        "commands_created": len(commands_created),
+        "commands": commands_created,
+        "skipped": skipped,
+        "message": "Emergency shutdown commands were created for safe devices.",
+    }
+
+
+@app.post("/api/home/{home_id}/safety/smoke/actions/mark-safe")
+def mark_smoke_safe(home_id: str) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    if latest_smoke_is_clear_for(home_id):
+        resolve_smoke_emergency_if_clear(home_id)
+        safety_event(home_id, "emergency_mode_disabled", "User marked smoke/gas event safe.")
+        return {"success": True, "resolved": True, "message": "Smoke/gas alert resolved and emergency mode disabled."}
+
+    smoke_state = as_dict(safe_get(f"/homes/{home_id}/safety/smoke_state", {}))
+    current_state = as_dict(safe_get(f"/homes/{home_id}/backend/current_state", {}))
+    esp32_sensors = as_dict(safe_get(f"/homes/{home_id}/devices/esp32_01/sensors", {}))
+    still_detected = (
+        normalize_bool(current_state.get("smoke")) is True
+        or normalize_bool(esp32_sensors.get("smoke")) is True
+        or smoke_state.get("status") == "confirmed"
+        and as_number(smoke_state.get("last_clear_at_ms")) <= 0
+    )
+    if still_detected:
+        safe_update(
+            f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}",
+            {
+                "acknowledged": True,
+                "acknowledged_at_ms": timestamp_ms,
+                "acknowledged_at_iso": iso_from_ms(timestamp_ms),
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+        safety_event(home_id, "smoke_acknowledged", "User checked the room while sensor still reports smoke/gas.")
+        return {
+            "success": True,
+            "resolved": False,
+            "message": "Acknowledged, but smoke/gas is still detected. Keep emergency mode active.",
+        }
+
+    alert = as_dict(safe_get(f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}", {}))
+    if alert:
+        safe_set(
+            f"/homes/{home_id}/alerts/history/alert_{timestamp_ms}_{SMOKE_ALERT_ID}",
+            {
+                **alert,
+                "status": "resolved",
+                "resolved_at_ms": timestamp_ms,
+                "resolved_at_iso": iso_from_ms(timestamp_ms),
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+        safe_set(f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}", None)
+    emergency = as_dict(safe_get(f"/homes/{home_id}/safety/emergency_mode", {}))
+    if emergency.get("active") is True:
+        safe_update(
+            f"/homes/{home_id}/safety/emergency_mode",
+            {
+                "active": False,
+                "ended_at_ms": timestamp_ms,
+                "ended_at_iso": iso_from_ms(timestamp_ms),
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+    safe_update(
+        f"/homes/{home_id}/safety/smoke_state",
+        {
+            "status": "clear",
+            "consecutive_detections": 0,
+            "last_clear_at_ms": timestamp_ms,
+            "last_clear_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    safety_event(home_id, "emergency_mode_disabled", "User marked smoke/gas event safe.")
+    return {"success": True, "resolved": True, "message": "Smoke/gas alert resolved and emergency mode disabled."}
+
+
+@app.post("/api/home/{home_id}/notifications/register-token")
+def register_notification_token(home_id: str, request: NotificationTokenRequest) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    token_id = re.sub(r"[^A-Za-z0-9_-]", "_", request.token[-32:]) or f"token_{timestamp_ms}"
+    record = {
+        "token": request.token,
+        "platform": request.platform,
+        "user_id": request.user_id,
+        "active": True,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+        "last_seen_at_ms": timestamp_ms,
+        "last_seen_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/notification_tokens/{token_id}", record)
+    return {"success": True, "home_id": home_id, "token_id": token_id}
+
+
+@app.post("/api/home/{home_id}/notifications/{notification_id}/read")
+def mark_notification_read(home_id: str, notification_id: str) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    safe_update(
+        f"/homes/{home_id}/notifications/{notification_id}",
+        {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
+    )
+    return {"success": True, "home_id": home_id, "notification_id": notification_id}
 
 
 @app.get("/api/home/{home_id}/devices")
@@ -1844,6 +2307,10 @@ def create_device_command(
             "target_state": target_state,
             "previous_state": current_state,
             "requested_by": request.requested_by,
+            "reason": request.reason,
+            "source": request.source,
+            "emergency": request.emergency,
+            "alert_id": request.alert_id,
             "status": "already_in_state",
             "requested_at_ms": timestamp_ms,
             "requested_at_iso": iso_from_ms(timestamp_ms),
@@ -1906,10 +2373,13 @@ def create_device_command(
         "command": command,
         "target_state": target_state,
         "previous_state": current_state,
-        "requested_by": request.requested_by,
-        "reason": request.reason,
-        "source_suggestion_id": request.source_suggestion_id,
-        "status": "pending",
+            "requested_by": request.requested_by,
+            "reason": request.reason,
+            "source": request.source,
+            "emergency": request.emergency,
+            "alert_id": request.alert_id,
+            "source_suggestion_id": request.source_suggestion_id,
+            "status": "pending",
         "requested_at_ms": timestamp_ms,
         "requested_at_iso": timestamp_iso,
         "sent_at_ms": None,

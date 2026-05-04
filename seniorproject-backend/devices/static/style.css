@@ -26,6 +26,47 @@ body {
   font-family: Inter, Arial, Helvetica, sans-serif;
 }
 
+.emergency-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(124, 0, 0, 0.88);
+}
+
+.emergency-overlay.hidden {
+  display: none;
+}
+
+.emergency-panel {
+  width: min(720px, 100%);
+  padding: 28px;
+  border: 4px solid #ffffff;
+  border-radius: 10px;
+  background: #fff3f3;
+  color: #7c0000;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.emergency-panel h1 {
+  font-size: 42px;
+  margin-bottom: 12px;
+}
+
+.emergency-panel p {
+  color: #7c0000;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.emergency-actions {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+}
+
 .shell {
   width: min(1180px, 100%);
   margin: 0 auto;

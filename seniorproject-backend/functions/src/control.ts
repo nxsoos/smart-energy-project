@@ -182,6 +182,13 @@ export async function tryCreateAutomaticCommand(
     return false;
   }
 
+  const emergencyMode = asRecord(
+    (await admin.database().ref(`/homes/${homeId}/safety/emergency_mode`).get()).val()
+  );
+  if (normalizeBool(emergencyMode.active) === true) {
+    return false;
+  }
+
   const status = asRecord(device.status);
   const online = normalizeBool(status.online);
   if (online === false) {

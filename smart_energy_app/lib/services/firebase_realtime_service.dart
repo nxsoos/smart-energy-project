@@ -25,6 +25,8 @@ class DashboardData {
   final List<AutomationLog> automationLogs;
   final Map<String, dynamic> settingsSummary;
   final Map<String, dynamic> occupancy;
+  final Map<String, dynamic> safety;
+  final List<Map<String, dynamic>> criticalAlerts;
   final ScheduleInfo? nextSchedule;
   final String? scenarioId;
   final String? scenarioName;
@@ -53,6 +55,8 @@ class DashboardData {
     this.automationLogs = const [],
     this.settingsSummary = const {},
     this.occupancy = const {},
+    this.safety = const {},
+    this.criticalAlerts = const [],
     this.nextSchedule,
     this.scenarioId,
     this.scenarioName,
@@ -526,6 +530,10 @@ class FirebaseRealtimeService {
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
       settingsSummary: _asMap(data['settings_summary']),
       occupancy: _asMap(data['occupancy']),
+      safety: _asMap(data['safety']),
+      criticalAlerts: _asList(data['critical_alerts'])
+          .map((item) => _asMap(item))
+          .toList(),
       nextSchedule: _parseOptionalSchedule(_asMap(data['next_schedule'])),
       scenarioId: null,
       scenarioName: null,
@@ -738,6 +746,20 @@ class FirebaseRealtimeService {
       automationLogs: _asList(automationLogs).map(_parseAutomationLog).toList()
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
       settingsSummary: _asMap(sourceHome['settings_summary']),
+      occupancy: _asMap(sourceHome['occupancy'])['room1'] is Map
+          ? _asMap(_asMap(sourceHome['occupancy'])['room1'])
+          : const {},
+      safety: _asMap(sourceHome['safety']),
+      criticalAlerts: _asList(_asMap(sourceHome['alerts'])['active'])
+          .map((item) => _asMap(item))
+          .where(
+            (item) =>
+                _asString(_pick(item, ['severity', 'level'])).toLowerCase() ==
+                    'critical' ||
+                _asString(_pick(item, ['category'])).toLowerCase() ==
+                    'safety',
+          )
+          .toList(),
       nextSchedule: null,
       scenarioId: _asNullableString(
         _pick(metadata, ['scenario_id', 'active_scenario', 'scenario_name']),
@@ -908,6 +930,40 @@ class FirebaseRealtimeService {
     );
   }
 
+  Future<Map<String, dynamic>> turnOffSafeDevices({
+    required String homeId,
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/safety/smoke/actions/turn-off-safe-devices',
+    );
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> markSmokeSafe({
+    required String homeId,
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/safety/smoke/actions/mark-safe',
+    );
+    return _asMap(response.data);
+  }
+
+  Future<void> registerNotificationToken({
+    required String homeId,
+    required String token,
+    String userId = 'user_001',
+    String platform = 'android',
+  }) async {
+    await _dio.post(
+      '/api/home/$homeId/notifications/register-token',
+      data: {
+        'user_id': userId,
+        'token': token,
+        'platform': platform,
+      },
+    );
+  }
+
   Future<String> updateControlMode({
     required String homeId,
     required String mode,
@@ -928,8 +984,9 @@ class FirebaseRealtimeService {
     required String homeId,
     required String suggestionId,
   }) async {
+    final encodedSuggestionId = Uri.encodeComponent(suggestionId);
     final response = await _dio.post(
-      '/api/home/$homeId/action-suggestions/$suggestionId/approve',
+      '/api/home/$homeId/action-suggestions/$encodedSuggestionId/approve',
     );
     final data = _asMap(response.data);
     return _asString(
@@ -942,20 +999,78 @@ class FirebaseRealtimeService {
     required String homeId,
     required String suggestionId,
   }) async {
-    final response = await _dio.post(
-      '/api/home/$homeId/action-suggestions/$suggestionId/dismiss',
+    final encodedSuggestionId = Uri.encodeComponent(suggestionId);
+    try {
+      final response = await _dio.post(
+        '/api/home/$homeId/action-suggestions/$encodedSuggestionId/dismiss',
+      );
+      final data = _asMap(response.data);
+      return _asString(
+        _pick(data, ['message']),
+        fallback: 'Action suggestion dismissed.',
+      );
+    } catch (_) {
+      await _dismissActionSuggestionInFirebase(
+        homeId: homeId,
+        suggestionId: suggestionId,
+      );
+      return 'Action suggestion dismissed.';
+    }
+  }
+
+  Future<void> _dismissActionSuggestionInFirebase({
+    required String homeId,
+    required String suggestionId,
+  }) async {
+    final timestampMs = DateTime.now().millisecondsSinceEpoch;
+    final activeRef = _firebaseRef('homes/$homeId/action_suggestions/active');
+    final suggestionRef = activeRef.child(suggestionId);
+    final suggestionSnap = await suggestionRef.get();
+    final suggestion = _asMap(suggestionSnap.value);
+    if (suggestion.isEmpty) {
+      return;
+    }
+
+    final dismissed = {
+      ...suggestion,
+      'status': 'dismissed',
+      'timestamp_ms': timestampMs,
+      'timestamp_iso': DateTime.fromMillisecondsSinceEpoch(
+        timestampMs,
+      ).toIso8601String(),
+      'dismissed_at_ms': timestampMs,
+      'dismissed_at_iso': DateTime.fromMillisecondsSinceEpoch(
+        timestampMs,
+      ).toIso8601String(),
+    };
+    await _firebaseRef(
+      'homes/$homeId/action_suggestions/history/$suggestionId',
+    ).set(dismissed);
+
+    final activeSnap = await activeRef.get();
+    final active = _asMap(activeSnap.value);
+    final deviceId = _asString(_pick(suggestion, ['device_id']));
+    final command = _asString(
+      _pick(suggestion, ['suggested_command', 'command']),
     );
-    final data = _asMap(response.data);
-    return _asString(
-      _pick(data, ['message']),
-      fallback: 'Action suggestion dismissed.',
-    );
+    final reason = _asString(_pick(suggestion, ['reason']));
+    for (final entry in active.entries) {
+      final item = _asMap(entry.value);
+      final sameDevice = _asString(_pick(item, ['device_id'])) == deviceId;
+      final sameCommand =
+          _asString(_pick(item, ['suggested_command', 'command'])) == command;
+      final sameReason = _asString(_pick(item, ['reason'])) == reason;
+      if (entry.key == suggestionId || (sameDevice && sameCommand && sameReason)) {
+        await activeRef.child(entry.key).remove();
+      }
+    }
   }
 
   Future<DeviceCommandResult> sendDeviceCommand(
     String deviceId,
     String action, {
     required String homeId,
+    bool emergency = false,
   }) async {
     if (homeId != NetworkConfig.firebaseHomeId) {
       throw ArgumentError.value(
@@ -976,7 +1091,16 @@ class FirebaseRealtimeService {
     try {
       final response = await _dio.post(
         '/api/home/$homeId/devices/$deviceId/command',
-        data: {'command': action, 'requested_by': 'flutter_app'},
+        data: {
+          'command': action,
+          'requested_by': emergency ? 'user_emergency_action' : 'flutter_app',
+          if (emergency) ...{
+            'source': 'smoke_emergency',
+            'emergency': true,
+            'alert_id': 'smoke_detected_room1',
+            'reason': 'User emergency action from smoke/gas popup.',
+          },
+        },
       );
       final data = _asMap(response.data);
       return DeviceCommandResult(
@@ -2042,9 +2166,9 @@ class FirebaseRealtimeService {
       ...data,
       'id': id,
       'severity': _pick(data, ['severity', 'level']) ?? 'medium',
-      'timestamp': _pick(data, ['timestamp', 'createdAt', 'created_at']),
+      'timestamp': _pick(data, ['timestamp_ms', 'timestamp', 'created_at_ms', 'createdAt', 'created_at']),
       'isActive': _pick(data, ['isActive', 'active']) ?? true,
-      'type': _pick(data, ['type']) ?? 'sensorfailure',
+      'type': _pick(data, ['category', 'type', 'alert_type']) ?? 'sensorfailure',
     };
 
     return Alert.fromJson(payload);

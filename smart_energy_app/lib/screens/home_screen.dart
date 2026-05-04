@@ -72,6 +72,11 @@ class _HomeScreenState extends State<HomeScreen> {
   List<AutomationLog> _automationLogs = const [];
   Map<String, dynamic> _settingsSummary = const {};
   Map<String, dynamic> _occupancy = const {};
+  Map<String, dynamic> _safety = const {};
+  List<Map<String, dynamic>> _criticalAlerts = const [];
+  String? _shownEmergencyAlertId;
+  bool _smokeEmergencyDialogOpen = false;
+  int? _smokeClearStartedAtMs;
   ScheduleInfo? _nextSchedule;
   bool _isUpdatingControlMode = false;
   final List<Alert> _alerts = [];
@@ -612,6 +617,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _currentReading = dashboardData.reading;
+        _updateSmokeClearTimer(dashboardData.sensors);
         if (_isDemoHome || _isSensorFeedStale()) {
           _sensorData = dashboardData.sensors;
         }
@@ -637,12 +643,18 @@ class _HomeScreenState extends State<HomeScreen> {
         _aiRecommendation = dashboardData.aiRecommendation;
         _aiAlert = dashboardData.aiAlert;
         _controlMode = dashboardData.control;
-        _actionSuggestions = dashboardData.actionSuggestions;
+        _actionSuggestions = _dedupeActionSuggestions(
+          dashboardData.actionSuggestions,
+        );
         _automationLogs = dashboardData.automationLogs;
         _settingsSummary = dashboardData.settingsSummary;
         _occupancy = dashboardData.occupancy;
+        _safety = dashboardData.safety;
+        _criticalAlerts = dashboardData.criticalAlerts;
         _nextSchedule = dashboardData.nextSchedule;
       });
+
+      _showEmergencyPopupIfNeeded();
 
       try {
         _syncDeviceListeners(mergedDevices);
@@ -1343,6 +1355,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _approveSuggestion(ActionSuggestion suggestion) async {
+    _removeMatchingSuggestions(suggestion);
     try {
       final message = await _firebaseRealtimeService.approveActionSuggestion(
         homeId: _selectedHomeId,
@@ -1364,6 +1377,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _dismissSuggestion(ActionSuggestion suggestion) async {
+    _removeMatchingSuggestions(suggestion);
     try {
       final message = await _firebaseRealtimeService.dismissActionSuggestion(
         homeId: _selectedHomeId,
@@ -3313,6 +3327,277 @@ class _HomeScreenState extends State<HomeScreen> {
       default:
         return Colors.teal;
     }
+  }
+
+  List<ActionSuggestion> _dedupeActionSuggestions(
+    List<ActionSuggestion> suggestions,
+  ) {
+    final seen = <String>{};
+    final deduped = <ActionSuggestion>[];
+    for (final suggestion in suggestions) {
+      final key =
+          '${suggestion.deviceId}|${suggestion.suggestedCommand}|${suggestion.reason}';
+      if (seen.add(key)) {
+        deduped.add(suggestion);
+      }
+    }
+    return deduped;
+  }
+
+  void _removeMatchingSuggestions(ActionSuggestion suggestion) {
+    setState(() {
+      _actionSuggestions = _actionSuggestions.where((item) {
+        final sameDevice = item.deviceId == suggestion.deviceId;
+        final sameCommand = item.suggestedCommand == suggestion.suggestedCommand;
+        final sameReason = item.reason == suggestion.reason;
+        return item.id != suggestion.id &&
+            !(sameDevice && sameCommand && sameReason);
+      }).toList();
+    });
+  }
+
+  Future<void> _sendEmergencyDeviceCommand(String deviceId) async {
+    try {
+      final result = await _firebaseRealtimeService.sendDeviceCommand(
+        deviceId,
+        'turn_off',
+        homeId: _selectedHomeId,
+        emergency: true,
+      );
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(result.message)));
+      await _refreshData(showErrorSnackBar: false);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Emergency command failed: $error')),
+      );
+    }
+  }
+
+  Map<String, dynamic>? _activeSmokeCriticalAlert() {
+    if (_smokeClearedForPopup()) {
+      return null;
+    }
+    for (final alert in _criticalAlerts) {
+      final alertType =
+          (alert['alert_type'] ?? alert['subtype'] ?? alert['type'] ?? '')
+              .toString()
+              .toLowerCase();
+      final status = (alert['status'] ?? 'active').toString().toLowerCase();
+      if (status == 'active' && alertType.contains('smoke')) {
+        return alert;
+      }
+    }
+    final emergency = (_safety['emergency_mode'] is Map)
+        ? Map<String, dynamic>.from(_safety['emergency_mode'] as Map)
+        : const <String, dynamic>{};
+    if (emergency['active'] == true && emergency['reason'] == 'smoke_detected') {
+      return {
+        'alert_id': 'smoke_detected_room1',
+        'title': 'Smoke/Gas Detected',
+        'message':
+            emergency['message'] ??
+            'Smoke or gas was detected in Room 1. Check immediately.',
+      };
+    }
+    return null;
+  }
+
+  bool _smokeClearedForPopup() {
+    final clearStartedAt = _smokeClearStartedAtMs;
+    if (clearStartedAt != null &&
+        DateTime.now().millisecondsSinceEpoch - clearStartedAt >= 15000) {
+      return true;
+    }
+    final currentSmokeStatus = _sensorData.smokeStatus.toLowerCase();
+    final currentSmokeClear = currentSmokeStatus.contains('clear');
+    if (currentSmokeClear &&
+        DateTime.now().millisecondsSinceEpoch -
+                _sensorData.timestamp.millisecondsSinceEpoch >=
+            15000) {
+      return true;
+    }
+    final smokeState = (_safety['smoke_state'] is Map)
+        ? Map<String, dynamic>.from(_safety['smoke_state'] as Map)
+        : const <String, dynamic>{};
+    final status = (smokeState['status'] ?? '').toString().toLowerCase();
+    if (status != 'clear') {
+      return false;
+    }
+    final clearAt = _asIntValue(smokeState['last_clear_at_ms']);
+    if (clearAt == null) {
+      return false;
+    }
+    return DateTime.now().millisecondsSinceEpoch - clearAt >= 15000;
+  }
+
+  void _updateSmokeClearTimer(SensorData sensors) {
+    final status = sensors.smokeStatus.toLowerCase();
+    final smokeDetected =
+        status.contains('detect') ||
+        status.contains('smoke') ||
+        status.contains('gas');
+    if (smokeDetected) {
+      _smokeClearStartedAtMs = null;
+      return;
+    }
+    if (status.contains('clear') && _smokeClearStartedAtMs == null) {
+      final sensorAgeMs =
+          DateTime.now().millisecondsSinceEpoch -
+          sensors.timestamp.millisecondsSinceEpoch;
+      _smokeClearStartedAtMs = sensorAgeMs >= 15000
+          ? sensors.timestamp.millisecondsSinceEpoch
+          : DateTime.now().millisecondsSinceEpoch;
+    }
+  }
+
+  int? _asIntValue(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is double) {
+      return value.round();
+    }
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  void _showEmergencyPopupIfNeeded() {
+    final alert = _activeSmokeCriticalAlert();
+    if (alert == null || !mounted) {
+      _shownEmergencyAlertId = null;
+      if (_smokeEmergencyDialogOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        _smokeEmergencyDialogOpen = false;
+      }
+      return;
+    }
+    final alertId = (alert['alert_id'] ?? alert['id'] ?? 'smoke_detected_room1')
+        .toString();
+    if (_shownEmergencyAlertId == alertId) {
+      return;
+    }
+    _shownEmergencyAlertId = alertId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _showSmokeEmergencyDialog(alert);
+    });
+  }
+
+  Future<void> _showSmokeEmergencyDialog(Map<String, dynamic> alert) async {
+    if (_smokeEmergencyDialogOpen) {
+      return;
+    }
+    _smokeEmergencyDialogOpen = true;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        final title = (alert['title'] ?? 'Smoke/Gas Detected').toString();
+        final message =
+            (alert['message'] ??
+                    'Smoke or gas was detected in Room 1. Check immediately.')
+                .toString();
+        return AlertDialog(
+          backgroundColor: Colors.red.shade50,
+          title: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.red.shade700),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: Colors.red.shade700,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(message),
+              const SizedBox(height: 12),
+              const Text(
+                'Normal automation and schedules are paused. Use emergency actions only if it is safe.',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await _sendEmergencyDeviceCommand('breaker_01');
+              },
+              child: const Text('Turn Off Switch Breaker'),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await _sendEmergencyDeviceCommand('breaker_02');
+              },
+              child: const Text('Turn Off AC Breaker'),
+            ),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red.shade700,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                final result = await _firebaseRealtimeService.turnOffSafeDevices(
+                  homeId: _selectedHomeId,
+                );
+                if (!mounted) {
+                  return;
+                }
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      (result['message'] ??
+                              'Emergency shutdown commands requested.')
+                          .toString(),
+                    ),
+                  ),
+                );
+                await _refreshData(showErrorSnackBar: false);
+              },
+              icon: const Icon(Icons.power_settings_new),
+              label: const Text('Turn Off All Safe Devices'),
+            ),
+            OutlinedButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                final result = await _firebaseRealtimeService.markSmokeSafe(
+                  homeId: _selectedHomeId,
+                );
+                if (!mounted) {
+                  return;
+                }
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(result['message'].toString())),
+                );
+                await _refreshData(showErrorSnackBar: false);
+              },
+              child: const Text('I Checked - Mark Safe'),
+            ),
+          ],
+        );
+      },
+    );
+    _smokeEmergencyDialogOpen = false;
   }
 
   Color _aiStatusColor(String tone, String code) {

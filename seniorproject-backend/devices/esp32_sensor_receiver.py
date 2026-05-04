@@ -1,4 +1,5 @@
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +18,15 @@ HOME_ID = "home_001"
 SOURCE = "raspberry_pi_hub"
 ESP32_SOURCE_ID = "room1_esp32"
 APP_DEVICE_ID = "esp32_01"
+SMOKE_ALERT_ID = "smoke_detected_room1"
+SMOKE_CONFIRMATION_COUNT = 2
+SMOKE_CONFIRMATION_MS = 7000
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from occupancy_utils import calculate_occupancy, merged_occupancy_settings, should_write_occupancy_history
-from timestamp_utils import TIMEZONE, now_timestamp
+from timestamp_utils import TIMEZONE, ms_to_iso, now_timestamp
 
 app = Flask(__name__)
 
@@ -46,6 +50,190 @@ def home_ref(path: str):
 
 def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def normalize_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on", "detected", "smoke", "gas"}
+    return False
+
+
+def smoke_detected_from_payload(history_payload: dict[str, Any]) -> bool:
+    return (
+        normalize_bool(history_payload.get("smoke"))
+        or normalize_bool(history_payload.get("smoke_text"))
+        or normalize_bool(history_payload.get("smoke_status"))
+    )
+
+
+def latest_occupancy_history_record() -> dict[str, Any]:
+    return as_dict(home_ref("occupancy/room1_latest_history").get())
+
+
+def write_safety_event(event_type: str, message: str, timestamp_ms: int, actions_taken: list[str] | None = None) -> None:
+    event_id = f"safety_{timestamp_ms}_{event_type}"
+    home_ref(f"safety/events/{event_id}").set(
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": ms_to_iso(timestamp_ms),
+            "timezone": TIMEZONE,
+            "event_id": event_id,
+            "type": event_type,
+            "severity": "critical" if "confirmed" in event_type or "emergency" in event_type else "medium",
+            "message": message,
+            "source": "mq2",
+            "actions_taken": actions_taken or [],
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": ms_to_iso(timestamp_ms),
+        }
+    )
+
+
+def create_emergency_suggestion(device_id: str, device_name: str, reason: str, timestamp_ms: int) -> None:
+    suggestion_id = f"smoke_emergency_{device_id}"
+    if as_dict(home_ref(f"action_suggestions/active/{suggestion_id}").get()):
+        return
+    home_ref(f"action_suggestions/active/{suggestion_id}").set(
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": ms_to_iso(timestamp_ms),
+            "timezone": TIMEZONE,
+            "suggestion_id": suggestion_id,
+            "type": "emergency_action",
+            "severity": "critical",
+            "home_id": HOME_ID,
+            "device_id": device_id,
+            "device_name": device_name,
+            "suggested_command": "turn_off",
+            "target_state": "off",
+            "reason": reason,
+            "source": "safety_rule",
+            "status": "waiting_for_user",
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": ms_to_iso(timestamp_ms),
+            "actions": ["approve", "dismiss"],
+        }
+    )
+
+
+def create_smoke_emergency(timestamp_ms: int, source_log: str) -> None:
+    existing_alert = as_dict(home_ref(f"alerts/active/{SMOKE_ALERT_ID}").get())
+    alert = {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": ms_to_iso(timestamp_ms),
+        "timezone": TIMEZONE,
+        "alert_id": SMOKE_ALERT_ID,
+        "alert_type": "smoke_detected",
+        "category": "safety",
+        "severity": "critical",
+        "status": "active",
+        "title": "Smoke/Gas Detected",
+        "message": "Smoke or gas was detected in Room 1. Check the area immediately.",
+        "room_id": "room1",
+        "source": "mq2",
+        "source_log": source_log,
+        "requires_user_attention": True,
+        "created_at_ms": existing_alert.get("created_at_ms") or timestamp_ms,
+        "created_at_iso": existing_alert.get("created_at_iso") or ms_to_iso(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": ms_to_iso(timestamp_ms),
+    }
+    home_ref(f"alerts/active/{SMOKE_ALERT_ID}").set(alert)
+    if not existing_alert:
+        home_ref(f"alerts/history/alert_{timestamp_ms}_{SMOKE_ALERT_ID}").set({**alert, "event": "created"})
+    home_ref("safety/emergency_mode").set(
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": ms_to_iso(timestamp_ms),
+            "timezone": TIMEZONE,
+            "active": True,
+            "reason": "smoke_detected",
+            "severity": "critical",
+            "started_at_ms": timestamp_ms,
+            "started_at_iso": ms_to_iso(timestamp_ms),
+            "ended_at_ms": None,
+            "ended_at_iso": None,
+            "message": "Smoke or gas was detected. Normal automation is paused.",
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": ms_to_iso(timestamp_ms),
+        }
+    )
+    notification_id = f"notif_{timestamp_ms}"
+    home_ref(f"notifications/{notification_id}").set(
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": ms_to_iso(timestamp_ms),
+            "timezone": TIMEZONE,
+            "notification_id": notification_id,
+            "type": "critical_alert",
+            "alert_type": "smoke_detected",
+            "severity": "critical",
+            "title": "Smoke/Gas Detected",
+            "body": "Smoke or gas was detected in Room 1. Check immediately.",
+            "home_id": HOME_ID,
+            "room_id": "room1",
+            "read": False,
+            "delivered": False,
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": ms_to_iso(timestamp_ms),
+        }
+    )
+    if not existing_alert:
+        create_emergency_suggestion("breaker_01", "Switch Breaker", "Smoke or gas was detected. Turning off this breaker may reduce electrical risk.", timestamp_ms)
+        create_emergency_suggestion("breaker_02", "AC Breaker", "Smoke or gas was detected. Turning off AC/fan simulation may help prevent spreading smoke or gas.", timestamp_ms)
+    write_safety_event("smoke_confirmed", "Smoke or gas was confirmed in Room 1.", timestamp_ms, ["critical_alert_created", "emergency_mode_enabled", "notification_created", "popup_required"])
+
+
+def update_smoke_safety(history_payload: dict[str, Any], timestamp_ms: int) -> None:
+    detected = smoke_detected_from_payload(history_payload)
+    current = as_dict(home_ref("safety/smoke_state").get())
+    if detected:
+        first_detected_at = timestamp_ms if current.get("status") not in {"pending", "confirmed"} else int(current.get("first_detected_at_ms") or timestamp_ms)
+        consecutive = int(current.get("consecutive_detections") or 0) + 1
+        confirmed = consecutive >= SMOKE_CONFIRMATION_COUNT or timestamp_ms - first_detected_at >= SMOKE_CONFIRMATION_MS or current.get("status") == "confirmed"
+        home_ref("safety/smoke_state").set(
+            {
+                "timestamp_ms": timestamp_ms,
+                "timestamp_iso": ms_to_iso(timestamp_ms),
+                "timezone": TIMEZONE,
+                "status": "confirmed" if confirmed else "pending",
+                "consecutive_detections": consecutive,
+                "first_detected_at_ms": first_detected_at,
+                "first_detected_at_iso": ms_to_iso(first_detected_at),
+                "last_detected_at_ms": timestamp_ms,
+                "last_detected_at_iso": ms_to_iso(timestamp_ms),
+                "last_clear_at_ms": None,
+                "last_clear_at_iso": None,
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": ms_to_iso(timestamp_ms),
+            }
+        )
+        write_safety_event("smoke_confirmed" if confirmed else "smoke_pending", "Smoke or gas was confirmed in Room 1." if confirmed else "Smoke or gas detection is pending confirmation.", timestamp_ms, ["confirmation_threshold_met"] if confirmed else [])
+        if confirmed:
+            create_smoke_emergency(timestamp_ms, str(history_payload.get("timestamp_key") or f"sensor_{timestamp_ms}"))
+        return
+    first_clear_at = int(current.get("last_clear_at_ms") or timestamp_ms)
+    home_ref("safety/smoke_state").set(
+        {
+            "timestamp_ms": timestamp_ms,
+            "timestamp_iso": ms_to_iso(timestamp_ms),
+            "timezone": TIMEZONE,
+            "status": "clear",
+            "consecutive_detections": 0,
+            "first_detected_at_ms": None,
+            "first_detected_at_iso": None,
+            "last_detected_at_ms": current.get("last_detected_at_ms"),
+            "last_detected_at_iso": current.get("last_detected_at_iso"),
+            "last_clear_at_ms": first_clear_at,
+            "last_clear_at_iso": ms_to_iso(first_clear_at),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": ms_to_iso(timestamp_ms),
+        }
+    )
 
 
 def build_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -120,6 +308,7 @@ def build_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "smoke_raw": sensors.get("smoke_raw"),
         "smoke": sensors.get("smoke"),
         "smoke_text": sensors.get("smoke_text"),
+        "smoke_status": sensors.get("smoke_status"),
         "sound_raw": sensors.get("sound_raw"),
         "noise": sensors.get("noise"),
         "noise_text": sensors.get("noise_text"),
@@ -141,6 +330,7 @@ def save_to_firebase(payload: dict[str, Any]) -> None:
     # devices/esp32_01. History is flattened so backend Firebase Functions can
     # read top-level fields like motion, noise, sound_raw, and light_status.
     home_ref(f"devices/{APP_DEVICE_ID}").set(payload)
+    update_smoke_safety(history_payload, timestamp_ms)
     settings = merged_occupancy_settings(as_dict(home_ref("settings").get()))
     previous_occupancy = as_dict(home_ref("occupancy/room1").get())
     breaker_data = as_dict(home_ref("backend/energy/current_total").get())
@@ -152,8 +342,7 @@ def save_to_firebase(payload: dict[str, Any]) -> None:
         timestamp_ms,
     )
     home_ref("occupancy/room1").set(occupancy)
-    latest_history = as_dict(home_ref("history/occupancy_logs").order_by_child("updated_at_ms").limit_to_last(1).get())
-    latest_history_record = next(iter(latest_history.values()), {}) if latest_history else {}
+    latest_history_record = latest_occupancy_history_record()
     if should_write_occupancy_history(
         previous_occupancy,
         as_dict(latest_history_record),
@@ -162,7 +351,19 @@ def save_to_firebase(payload: dict[str, Any]) -> None:
         timestamp_ms,
     ):
         home_ref(f"history/occupancy_logs/occ_{timestamp_ms}").set(occupancy)
+        home_ref("occupancy/room1_latest_history").set(occupancy)
     home_ref(f"history/sensor_logs/{history_key}").set(history_payload)
+
+
+def save_to_firebase_background(payload: dict[str, Any]) -> None:
+    try:
+        save_to_firebase(payload)
+        print(
+            f"[ESP32 RECEIVER] Saved to Firebase: {payload.get('timestamp_key')}",
+            flush=True,
+        )
+    except Exception as error:
+        print(f"[ESP32 RECEIVER BACKGROUND ERROR] {error}", flush=True)
 
 
 @app.post("/api/sensors/room1")
@@ -197,13 +398,17 @@ def receive_room1_sensors():
         )
 
         payload = build_payload(data)
-        save_to_firebase(payload)
+        threading.Thread(
+            target=save_to_firebase_background,
+            args=(payload,),
+            daemon=True,
+        ).start()
 
-        print("[ESP32 RECEIVER] Saved to Firebase", flush=True)
         return jsonify(
             {
                 "success": True,
-                "message": "Sensor data received and saved to Firebase",
+                "message": "Sensor data received by Raspberry Pi hub",
+                "timestamp_key": payload.get("timestamp_key"),
             }
         )
 
