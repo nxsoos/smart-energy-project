@@ -549,6 +549,7 @@ class _HomeScreenState extends State<HomeScreen> {
             _deviceCommandErrors.remove(updatedDevice.id);
           }
           _devices[index] = _devices[index].copyWith(
+            type: _stableDeviceType(updatedDevice.id, _devices[index].type),
             isOn: updatedDevice.online && updatedDevice.isOn,
             online: updatedDevice.online,
             controllable: updatedDevice.controllable,
@@ -566,7 +567,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     setState(() {
-      _devices[index] = updatedDevice;
+      _devices[index] = updatedDevice.copyWith(
+        type: _stableDeviceType(updatedDevice.id, _devices[index].type),
+      );
     });
   }
 
@@ -709,6 +712,7 @@ class _HomeScreenState extends State<HomeScreen> {
         return device;
       }
       return device.copyWith(
+        type: _stableDeviceType(device.id, device.type),
         isOn: current.isOn,
         currentPower: current.currentPower,
         online: current.online,
@@ -718,6 +722,16 @@ class _HomeScreenState extends State<HomeScreen> {
         lastCommandMessage: current.lastCommandMessage,
       );
     }).toList();
+  }
+
+  DeviceType _stableDeviceType(String deviceId, DeviceType fallback) {
+    if (deviceId == 'breaker_01') {
+      return DeviceType.light;
+    }
+    if (deviceId == 'breaker_02') {
+      return DeviceType.airConditioner;
+    }
+    return fallback;
   }
 
   bool _isRequestCancellation(Object error) {

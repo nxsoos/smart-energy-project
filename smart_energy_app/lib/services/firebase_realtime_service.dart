@@ -576,6 +576,12 @@ class FirebaseRealtimeService {
   }
 
   DeviceType _parseApiDeviceType(String deviceId, String name, String rawType) {
+    if (deviceId == 'breaker_01') {
+      return DeviceType.light;
+    }
+    if (deviceId == 'breaker_02') {
+      return DeviceType.airConditioner;
+    }
     final text = '$deviceId $name $rawType'.toLowerCase();
     if (text.contains('ac') || text.contains('air')) {
       return DeviceType.airConditioner;
@@ -1233,7 +1239,7 @@ class FirebaseRealtimeService {
       name: name,
       type: _parseApiDeviceType(deviceId, name, rawType ?? ''),
       isOn: visualIsOn,
-      currentPower: visualIsOn ? rawPower : 0.0,
+      currentPower: online ? rawPower : 0.0,
       branch:
           _pick(data, ['branch', 'zone'])?.toString() ??
           _branchFromDeviceId(deviceId),
@@ -1868,9 +1874,14 @@ class FirebaseRealtimeService {
           name:
               _pick(data, ['name', 'label', 'deviceName'])?.toString() ??
               entry.key,
-          type: _parseDeviceType(rawType),
+          type: _parseApiDeviceType(
+            entry.key,
+            _pick(data, ['name', 'label', 'deviceName'])?.toString() ??
+                entry.key,
+            rawType ?? '',
+          ),
           isOn: visualIsOn,
-          currentPower: visualIsOn ? currentPower : 0.0,
+          currentPower: online ? currentPower : 0.0,
           branch:
               _pick(data, ['branch', 'zone'])?.toString() ??
               _branchFromDeviceId(entry.key),
