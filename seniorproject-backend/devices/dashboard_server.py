@@ -136,9 +136,10 @@ def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]
         int(time.time() * 1000) - int(last_seen_ms) > DEVICE_STALE_AFTER_MS
     )
     online = normalize_bool(status.get("online"))
+    is_breaker = str(device.get("type", "")).lower() in {"smart_breaker", "breaker"} or device_id.startswith("breaker_")
     if online is None:
         online = not is_stale
-    elif is_stale:
+    elif is_stale and not is_breaker:
         online = False
     if not online:
         display_state = "off"
@@ -222,6 +223,9 @@ def latest():
                 "energy": data.get("energy", {}),
                 "alerts": data.get("alerts", []),
                 "recommendations": data.get("recommendations", []),
+                "control": data.get("control", {}),
+                "action_suggestions": data.get("action_suggestions", []),
+                "automation_logs": data.get("automation_logs", []),
                 "ai": data.get("ai", {}),
             }
         )
@@ -300,6 +304,55 @@ def send_command():
         )
     except Exception as error:
         print(f"[DASHBOARD ERROR] {error}", flush=True)
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.put("/api/control/mode")
+def update_control_mode():
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "JSON body is required"}), 400
+
+        mode = str(data.get("mode", "")).strip().lower()
+        response = requests.put(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/control/mode",
+            json={"mode": mode, "updated_by": "pi_dashboard"},
+            timeout=10,
+        )
+        result = response.json()
+        if not response.ok:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": result.get("detail", "Control mode update failed"),
+                    }
+                ),
+                response.status_code,
+            )
+        return jsonify(result)
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 500
+
+
+@app.post("/api/action-suggestions/<suggestion_id>/<decision>")
+def decide_action_suggestion(suggestion_id: str, decision: str):
+    if decision not in {"approve", "dismiss"}:
+        return jsonify({"success": False, "message": "Unsupported decision"}), 400
+    try:
+        response = requests.post(
+            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/action-suggestions/{suggestion_id}/{decision}",
+            timeout=10,
+        )
+        result = response.json()
+        if not response.ok:
+            detail = result.get("detail", "Action suggestion update failed")
+            if isinstance(detail, dict):
+                detail = detail.get("message", "Action suggestion update failed")
+            return jsonify({"success": False, "message": detail}), response.status_code
+        return jsonify(result)
+    except Exception as error:
         return jsonify({"success": False, "message": str(error)}), 500
 
 

@@ -20,6 +20,9 @@ class DashboardData {
   final AiDailySummary? aiDailySummary;
   final AiRecommendation? aiRecommendation;
   final AiAlertInsight? aiAlert;
+  final ControlModeInfo control;
+  final List<ActionSuggestion> actionSuggestions;
+  final List<AutomationLog> automationLogs;
   final String? scenarioId;
   final String? scenarioName;
   final String? scenarioDescription;
@@ -37,11 +40,73 @@ class DashboardData {
     this.aiDailySummary,
     this.aiRecommendation,
     this.aiAlert,
+    this.control = const ControlModeInfo(
+      mode: 'assist',
+      label: 'Assist',
+      description:
+          'The system suggests actions and asks before controlling devices.',
+    ),
+    this.actionSuggestions = const [],
+    this.automationLogs = const [],
     this.scenarioId,
     this.scenarioName,
     this.scenarioDescription,
     this.deviceControlEnabled = true,
   });
+}
+
+class ControlModeInfo {
+  const ControlModeInfo({
+    required this.mode,
+    required this.label,
+    required this.description,
+  });
+
+  final String mode;
+  final String label;
+  final String description;
+}
+
+class ControlModeOption extends ControlModeInfo {
+  const ControlModeOption({
+    required super.mode,
+    required super.label,
+    required super.description,
+  });
+}
+
+class ActionSuggestion {
+  const ActionSuggestion({
+    required this.id,
+    required this.deviceName,
+    required this.deviceId,
+    required this.suggestedCommand,
+    required this.reason,
+    required this.status,
+  });
+
+  final String id;
+  final String deviceName;
+  final String deviceId;
+  final String suggestedCommand;
+  final String reason;
+  final String status;
+}
+
+class AutomationLog {
+  const AutomationLog({
+    required this.id,
+    required this.deviceName,
+    required this.command,
+    required this.reason,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String deviceName;
+  final String command;
+  final String reason;
+  final DateTime createdAt;
 }
 
 class DemoScenario {
@@ -254,6 +319,8 @@ class FirebaseRealtimeService {
     final devicesMap = _asMap(data['devices']);
     final alerts = _asList(data['alerts']);
     final recommendations = _asList(data['recommendations']);
+    final actionSuggestions = _asList(data['action_suggestions']);
+    final automationLogs = _asList(data['automation_logs']);
     final ai = _asMap(data['ai']);
     final aiDailySummary = _asMap(data['ai_daily_summary']);
 
@@ -348,6 +415,10 @@ class FirebaseRealtimeService {
           ? null
           : _parseAiRecommendation(recommendations.first),
       aiAlert: null,
+      control: _parseControl(_asMap(data['control'])),
+      actionSuggestions: actionSuggestions.map(_parseActionSuggestion).toList(),
+      automationLogs: automationLogs.map(_parseAutomationLog).toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
       scenarioId: null,
       scenarioName: null,
       scenarioDescription: null,
@@ -494,6 +565,9 @@ class FirebaseRealtimeService {
     final backendCurrentTotal = _asMap(backendEnergy['current_total']);
     final recommendations = _asMap(backend['recommendations']);
     final activeAlerts = _asMap(backend['active_alerts']);
+    final actionSuggestions = _asMap(sourceHome['action_suggestions']);
+    final activeSuggestions = _asMap(actionSuggestions['active']);
+    final automationLogs = _asMap(sourceHome['automation_logs']);
 
     final commandStates = _parseDeviceCommandStates(commands);
     final parsedDevices = _parseDevices(devices, commandStates);
@@ -535,6 +609,12 @@ class FirebaseRealtimeService {
         _asMap(recommendations['ai_energy_insight']),
       ),
       aiAlert: _parseAiAlert(_asMap(activeAlerts['ai_abnormal_usage'])),
+      control: _parseControl(_asMap(sourceHome['control'])),
+      actionSuggestions: _asList(
+        activeSuggestions,
+      ).map(_parseActionSuggestion).toList(),
+      automationLogs: _asList(automationLogs).map(_parseAutomationLog).toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
       scenarioId: _asNullableString(
         _pick(metadata, ['scenario_id', 'active_scenario', 'scenario_name']),
       ),
@@ -598,6 +678,74 @@ class FirebaseRealtimeService {
             'Current Home Test scenario.',
       ),
     ];
+  }
+
+  Future<List<ControlModeOption>> fetchControlModes({
+    required String homeId,
+    CancelToken? cancelToken,
+  }) async {
+    final response = await _dio.get(
+      '/api/home/$homeId/control',
+      cancelToken: cancelToken,
+    );
+    final data = _asMap(response.data);
+    return _asList(data['available_modes'])
+        .map(
+          (item) => ControlModeOption(
+            mode: _asString(_pick(item, ['value', 'mode']), fallback: 'assist'),
+            label: _asString(_pick(item, ['label']), fallback: 'Assist'),
+            description: _asString(
+              _pick(item, ['description']),
+              fallback:
+                  'The system suggests actions and asks before controlling devices.',
+            ),
+          ),
+        )
+        .toList();
+  }
+
+  Future<String> updateControlMode({
+    required String homeId,
+    required String mode,
+    required String updatedBy,
+  }) async {
+    final response = await _dio.put(
+      '/api/home/$homeId/control/mode',
+      data: {'mode': mode, 'updated_by': updatedBy},
+    );
+    final data = _asMap(response.data);
+    return _asString(
+      _pick(data, ['message']),
+      fallback: 'Control mode changed to ${_prettyMode(mode)} Mode.',
+    );
+  }
+
+  Future<String> approveActionSuggestion({
+    required String homeId,
+    required String suggestionId,
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/action-suggestions/$suggestionId/approve',
+    );
+    final data = _asMap(response.data);
+    return _asString(
+      _pick(data, ['message']),
+      fallback: 'Action suggestion approved.',
+    );
+  }
+
+  Future<String> dismissActionSuggestion({
+    required String homeId,
+    required String suggestionId,
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/action-suggestions/$suggestionId/dismiss',
+    );
+    final data = _asMap(response.data);
+    return _asString(
+      _pick(data, ['message']),
+      fallback: 'Action suggestion dismissed.',
+    );
   }
 
   Future<DeviceCommandResult> sendDeviceCommand(
@@ -778,6 +926,72 @@ class FirebaseRealtimeService {
         .where((part) => part.isNotEmpty)
         .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
         .join(' ');
+  }
+
+  String _prettyMode(String value) {
+    switch (value.toLowerCase()) {
+      case 'manual':
+        return 'Manual';
+      case 'auto':
+        return 'Auto';
+      case 'assist':
+      default:
+        return 'Assist';
+    }
+  }
+
+  ControlModeInfo _parseControl(Map<String, dynamic> data) {
+    final mode = _asString(
+      _pick(data, ['mode']),
+      fallback: 'assist',
+    ).toLowerCase();
+    final label = _asString(
+      _pick(data, ['label']),
+      fallback: _prettyMode(mode),
+    );
+    return ControlModeInfo(
+      mode: mode,
+      label: label,
+      description: _asString(
+        _pick(data, ['description']),
+        fallback: mode == 'manual'
+            ? 'You control all devices. The system only monitors and recommends.'
+            : mode == 'auto'
+            ? 'The system can automatically control allowed devices to save energy.'
+            : 'The system suggests actions and asks before controlling devices.',
+      ),
+    );
+  }
+
+  ActionSuggestion _parseActionSuggestion(Map<String, dynamic> data) {
+    return ActionSuggestion(
+      id: _asString(
+        _pick(data, ['suggestion_id', 'id']),
+        fallback: DateTime.now().millisecondsSinceEpoch.toString(),
+      ),
+      deviceName: _asString(_pick(data, ['device_name']), fallback: 'Device'),
+      deviceId: _asString(_pick(data, ['device_id'])),
+      suggestedCommand: _asString(
+        _pick(data, ['suggested_command', 'command']),
+      ),
+      reason: _asString(
+        _pick(data, ['reason']),
+        fallback: 'Energy-saving action suggested.',
+      ),
+      status: _asString(_pick(data, ['status']), fallback: 'waiting_for_user'),
+    );
+  }
+
+  AutomationLog _parseAutomationLog(Map<String, dynamic> data) {
+    return AutomationLog(
+      id: _asString(_pick(data, ['log_id', 'id'])),
+      deviceName: _asString(_pick(data, ['device_name']), fallback: 'Device'),
+      command: _asString(_pick(data, ['command'])),
+      reason: _asString(_pick(data, ['reason']), fallback: 'Automatic action.'),
+      createdAt: _asDateTime(
+        _pick(data, ['created_at_ms', 'created_at_iso', 'created_at']),
+      ),
+    );
   }
 
   AiDashboardSummary? _parseAiDashboard(Map<String, dynamic> data) {

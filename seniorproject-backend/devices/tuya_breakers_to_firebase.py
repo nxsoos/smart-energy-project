@@ -194,6 +194,18 @@ def write_device_offline(firebase_key, breaker_name, device_id, error):
     r = requests.patch(url, json=payload, timeout=15)
     r.raise_for_status()
 
+def write_poll_error(firebase_key, error):
+    timestamp = int(time.time() * 1000)
+    payload = {
+        "status": {
+            "last_poll_error": str(error),
+            "last_poll_error_at": timestamp,
+        }
+    }
+    url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/devices/{firebase_key}.json"
+    r = requests.patch(url, json=payload, timeout=15)
+    r.raise_for_status()
+
 def remember_success(firebase_key):
     state = breaker_health[firebase_key]
     state["offline_count"] = 0
@@ -262,8 +274,8 @@ if __name__ == "__main__":
                 failures = remember_failure(firebase_key)
                 if failures >= OFFLINE_AFTER_FAILURES:
                     try:
-                        write_device_offline(firebase_key, breaker_name, device_id, e)
+                        write_poll_error(firebase_key, e)
                     except Exception as write_error:
-                        print(f"ERROR writing offline state for {firebase_key}:", write_error)
+                        print(f"ERROR writing poll error for {firebase_key}:", write_error)
 
         time.sleep(POLL_INTERVAL_SECONDS)

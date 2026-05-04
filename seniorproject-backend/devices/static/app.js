@@ -19,6 +19,11 @@ const ids = {
   motion: document.getElementById("motion"),
   smoke: document.getElementById("smoke"),
   sound: document.getElementById("sound"),
+  controlModeLabel: document.getElementById("controlModeLabel"),
+  controlModeDescription: document.getElementById("controlModeDescription"),
+  actionSuggestions: document.getElementById("actionSuggestions"),
+  automationMessage: document.getElementById("automationMessage"),
+  settingsModal: document.getElementById("settingsModal"),
 };
 
 function nested(source, keys, fallback = null) {
@@ -230,6 +235,66 @@ function updateSuggestions(dashboard) {
   }
 }
 
+function prettyCommand(command) {
+  return command === "turn_off" ? "Turn Off" : "Turn On";
+}
+
+function updateControlMode(dashboard) {
+  const control = dashboard.control || {};
+  const label = control.label || "Assist";
+  ids.controlModeLabel.textContent = `Mode: ${label}`;
+  ids.controlModeDescription.textContent =
+    control.description ||
+    "The system suggests actions and asks before controlling devices.";
+  document.querySelectorAll(".mode-option").forEach((button) => {
+    button.classList.toggle("mode-selected", button.dataset.mode === control.mode);
+  });
+}
+
+function updateActionSuggestionCards(dashboard) {
+  const control = dashboard.control || {};
+  const suggestions = Array.isArray(dashboard.action_suggestions)
+    ? dashboard.action_suggestions
+    : [];
+
+  ids.actionSuggestions.innerHTML = "";
+  if (control.mode !== "assist" || suggestions.length === 0) {
+    return;
+  }
+
+  for (const suggestion of suggestions) {
+    const card = document.createElement("article");
+    card.className = "card action-suggestion";
+    card.innerHTML = `
+      <h2>${suggestion.device_name || "Device"} may be wasting energy.</h2>
+      <p>${suggestion.reason || "Energy-saving action suggested."}</p>
+      <div class="button-row">
+        <button class="btn btn-on" data-suggestion-id="${suggestion.suggestion_id}" data-decision="approve">${prettyCommand(suggestion.suggested_command)}</button>
+        <button class="btn btn-muted" data-suggestion-id="${suggestion.suggestion_id}" data-decision="dismiss">Dismiss</button>
+      </div>
+    `;
+    ids.actionSuggestions.appendChild(card);
+  }
+}
+
+function updateAutomationMessage(dashboard) {
+  const control = dashboard.control || {};
+  const logs = Array.isArray(dashboard.automation_logs)
+    ? dashboard.automation_logs
+    : [];
+  ids.automationMessage.classList.add("hidden");
+  ids.automationMessage.textContent = "";
+  if (control.mode !== "auto" || logs.length === 0) {
+    return;
+  }
+  const latest = [...logs].sort(
+    (a, b) => Number(b.created_at_ms || 0) - Number(a.created_at_ms || 0)
+  )[0];
+  const action = latest.command === "turn_off" ? "turned off" : "turned on";
+  ids.automationMessage.textContent = `Auto Mode ${action} ${latest.device_name || "Device"} because ${latest.reason || "an energy-saving rule matched."}`;
+  ids.automationMessage.classList.remove("hidden");
+}
+
 async function fetchLatest() {
   try {
     const response = await fetch("/api/latest", { cache: "no-store" });
@@ -244,9 +309,51 @@ async function fetchLatest() {
     updateSensors(dashboard);
     updateBreakers(dashboard.devices || {});
     updateSuggestions(dashboard);
+    updateControlMode(dashboard);
+    updateActionSuggestionCards(dashboard);
+    updateAutomationMessage(dashboard);
   } catch (error) {
     setStatus("error", "Error");
     ids.commandMessage.textContent = error.message;
+  }
+}
+
+async function changeMode(mode) {
+  ids.commandMessage.textContent = "Updating control mode...";
+  try {
+    const response = await fetch("/api/control/mode", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.message || "Control mode update failed");
+    }
+    ids.commandMessage.textContent = data.message || `Control mode changed to ${mode}.`;
+    ids.settingsModal.classList.add("hidden");
+    await fetchLatest();
+  } catch (error) {
+    ids.commandMessage.textContent = `Mode update failed: ${error.message}`;
+  }
+}
+
+async function decideSuggestion(suggestionId, decision) {
+  ids.commandMessage.textContent = "Updating suggestion...";
+  try {
+    const response = await fetch(`/api/action-suggestions/${suggestionId}/${decision}`, {
+      method: "POST",
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.message || "Suggestion update failed");
+    }
+    ids.commandMessage.textContent = data.message || "Suggestion updated.";
+    await fetchLatest();
+  } catch (error) {
+    ids.commandMessage.textContent = `Suggestion failed: ${error.message}`;
   }
 }
 
@@ -275,7 +382,7 @@ async function sendCommand(deviceId, action) {
     if (!response.ok || !data.success) {
       throw new Error(data.message || "Command failed");
     }
-    ids.commandMessage.textContent = data.no_action ? data.message || `Already ${targetState}` : "Command accepted";
+    ids.commandMessage.textContent = data.message || (data.no_action ? `Already ${targetState}` : "Command sent. Waiting for breaker confirmation.");
     await fetchLatest();
   } catch (error) {
     ids.commandMessage.textContent = `Command failed: ${error.message}`;
@@ -286,6 +393,28 @@ document.querySelectorAll("[data-device-id][data-action]").forEach((button) => {
   button.addEventListener("click", () => {
     sendCommand(button.dataset.deviceId, button.dataset.action);
   });
+});
+
+document.getElementById("settingsButton").addEventListener("click", () => {
+  ids.settingsModal.classList.remove("hidden");
+});
+
+document.getElementById("closeSettingsButton").addEventListener("click", () => {
+  ids.settingsModal.classList.add("hidden");
+});
+
+document.querySelectorAll(".mode-option").forEach((button) => {
+  button.addEventListener("click", () => {
+    changeMode(button.dataset.mode);
+  });
+});
+
+ids.actionSuggestions.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-suggestion-id][data-decision]");
+  if (!button) {
+    return;
+  }
+  decideSuggestion(button.dataset.suggestionId, button.dataset.decision);
 });
 
 fetchLatest();

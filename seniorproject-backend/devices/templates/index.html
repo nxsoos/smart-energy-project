@@ -13,8 +13,18 @@
           <h1>Smart Energy Hub</h1>
           <p>Raspberry Pi Local Control Panel</p>
         </div>
-        <div id="systemStatus" class="status-pill status-offline">Offline</div>
+        <div class="top-actions">
+          <button id="settingsButton" class="icon-btn" type="button" aria-label="Settings">Settings</button>
+          <div id="systemStatus" class="status-pill status-offline">Offline</div>
+        </div>
       </header>
+
+      <section class="card mode-card">
+        <div>
+          <h2 id="controlModeLabel">Mode: Assist</h2>
+          <p id="controlModeDescription">The system suggests actions and asks before controlling devices.</p>
+        </div>
+      </section>
 
       <section class="section-header">
         <h2>Live Sensors</h2>
@@ -72,7 +82,34 @@
         <h2>System Suggestions</h2>
         <p id="suggestionText">Waiting for live sensor data.</p>
       </section>
+
+      <section id="actionSuggestions" class="suggestion-list"></section>
+      <section id="automationMessage" class="card auto-message hidden"></section>
     </main>
+
+    <div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-panel">
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button id="closeSettingsButton" class="icon-btn dark" type="button" aria-label="Close">Close</button>
+        </div>
+        <h3>Control Mode</h3>
+        <div class="mode-options">
+          <button class="mode-option" data-mode="manual" type="button">
+            <strong>Manual</strong>
+            <span>You control all devices. The system only monitors and recommends.</span>
+          </button>
+          <button class="mode-option" data-mode="assist" type="button">
+            <strong>Assist</strong>
+            <span>The system suggests actions and asks before controlling devices.</span>
+          </button>
+          <button class="mode-option" data-mode="auto" type="button">
+            <strong>Auto</strong>
+            <span>The system can automatically control allowed devices to save energy.</span>
+          </button>
+        </div>
+      </div>
+    </div>
 
     <script src="/static/app.js"></script>
   </body>

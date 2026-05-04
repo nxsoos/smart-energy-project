@@ -62,6 +62,15 @@ class _HomeScreenState extends State<HomeScreen> {
   AiDailySummary? _aiDailySummary;
   AiRecommendation? _aiRecommendation;
   AiAlertInsight? _aiAlert;
+  ControlModeInfo _controlMode = const ControlModeInfo(
+    mode: 'assist',
+    label: 'Assist',
+    description:
+        'The system suggests actions and asks before controlling devices.',
+  );
+  List<ActionSuggestion> _actionSuggestions = const [];
+  List<AutomationLog> _automationLogs = const [];
+  bool _isUpdatingControlMode = false;
   final List<Alert> _alerts = [];
   final Set<String> _seenAlertIds = <String>{};
   final Map<String, int> _lastShownAlertBySignature = <String, int>{};
@@ -394,7 +403,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Command accepted.')));
+      ).showSnackBar(SnackBar(content: Text(result.message)));
     } catch (_) {
       if (!mounted) {
         return;
@@ -624,6 +633,9 @@ class _HomeScreenState extends State<HomeScreen> {
         _aiDailySummary = dashboardData.aiDailySummary;
         _aiRecommendation = dashboardData.aiRecommendation;
         _aiAlert = dashboardData.aiAlert;
+        _controlMode = dashboardData.control;
+        _actionSuggestions = dashboardData.actionSuggestions;
+        _automationLogs = dashboardData.automationLogs;
       });
 
       try {
@@ -765,6 +777,145 @@ class _HomeScreenState extends State<HomeScreen> {
     _refreshData(showErrorSnackBar: false);
   }
 
+  Future<void> _showSettingsSheet() async {
+    final options = await _firebaseRealtimeService.fetchControlModes(
+      homeId: _selectedHomeId,
+    );
+    if (!mounted) {
+      return;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.settings, color: AppColors.primary),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Settings',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Control Mode',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 10),
+                  ...options.map(
+                    (option) => _buildModeOptionTile(
+                      option: option,
+                      isSelected: option.mode == _controlMode.mode,
+                      isBusy: _isUpdatingControlMode,
+                      onSelected: () async {
+                        setSheetState(() {
+                          _isUpdatingControlMode = true;
+                        });
+                        await _changeControlMode(option.mode);
+                        if (!mounted) {
+                          return;
+                        }
+                        setSheetState(() {
+                          _isUpdatingControlMode = false;
+                        });
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _changeControlMode(String mode) async {
+    try {
+      final message = await _firebaseRealtimeService.updateControlMode(
+        homeId: _selectedHomeId,
+        mode: mode,
+        updatedBy: 'flutter_app',
+      );
+      await _refreshData(showErrorSnackBar: false, updateLoading: false);
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not update control mode.')),
+      );
+    }
+  }
+
+  Future<void> _approveSuggestion(ActionSuggestion suggestion) async {
+    try {
+      final message = await _firebaseRealtimeService.approveActionSuggestion(
+        homeId: _selectedHomeId,
+        suggestionId: suggestion.id,
+      );
+      await _refreshData(showErrorSnackBar: false, updateLoading: false);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(message)));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not approve suggestion.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _dismissSuggestion(ActionSuggestion suggestion) async {
+    try {
+      final message = await _firebaseRealtimeService.dismissActionSuggestion(
+        homeId: _selectedHomeId,
+        suggestionId: suggestion.id,
+      );
+      await _refreshData(showErrorSnackBar: false, updateLoading: false);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(message)));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not dismiss suggestion.')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final totalCost = _currentReading.calculateCost(_currentTariff);
@@ -785,9 +936,7 @@ class _HomeScreenState extends State<HomeScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings, color: Colors.white),
-            onPressed: () {
-              // TODO: Navigate to settings
-            },
+            onPressed: _showSettingsSheet,
           ),
         ],
       ),
@@ -833,6 +982,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
               _buildHomeSelectorCard(),
               const SizedBox(height: 16),
+
+              _buildControlModeCard(),
+              const SizedBox(height: 16),
+
+              if (_controlMode.mode == 'assist' &&
+                  _actionSuggestions.isNotEmpty) ...[
+                _buildSectionTitle('Action Suggestions'),
+                const SizedBox(height: 8),
+                ..._actionSuggestions.map(_buildActionSuggestionCard),
+                const SizedBox(height: 16),
+              ],
+
+              if (_controlMode.mode == 'auto' &&
+                  _automationLogs.isNotEmpty) ...[
+                _buildAutomationLogCard(_automationLogs.first),
+                const SizedBox(height: 16),
+              ],
 
               if (!_hasLiveData && !_isLoading) ...[
                 _buildNoLiveDataCard(),
@@ -1390,6 +1556,170 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: TextStyle(color: AppColors.textSecondary),
                   ),
                 ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildControlModeCard() {
+    final color = _controlMode.mode == 'auto'
+        ? Colors.teal
+        : _controlMode.mode == 'manual'
+        ? Colors.blueGrey
+        : AppColors.primary;
+
+    return Card(
+      elevation: 1,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            Icon(Icons.tune, color: color),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Mode: ${_controlMode.label}',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: color,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _controlMode.description,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.settings),
+              onPressed: _showSettingsSheet,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeOptionTile({
+    required ControlModeOption option,
+    required bool isSelected,
+    required bool isBusy,
+    required VoidCallback onSelected,
+  }) {
+    return Card(
+      elevation: isSelected ? 2 : 0,
+      color: isSelected
+          ? AppColors.primary.withValues(alpha: 0.08)
+          : Colors.white,
+      child: ListTile(
+        enabled: !isBusy,
+        onTap: isBusy ? null : onSelected,
+        leading: Icon(
+          isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+          color: isSelected ? AppColors.primary : AppColors.textSecondary,
+        ),
+        title: Row(
+          children: [
+            Text(
+              option.label,
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            if (option.mode == 'assist') ...[
+              const SizedBox(width: 8),
+              _buildInsightPill(
+                icon: Icons.recommend_outlined,
+                label: 'Recommended',
+                color: AppColors.primary,
+              ),
+            ],
+          ],
+        ),
+        subtitle: Text(option.description),
+      ),
+    );
+  }
+
+  Widget _buildActionSuggestionCard(ActionSuggestion suggestion) {
+    final actionText = suggestion.suggestedCommand == 'turn_off'
+        ? 'Turn Off'
+        : 'Turn On';
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.auto_awesome_outlined,
+                  color: AppColors.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '${suggestion.deviceName} may be wasting energy.',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(suggestion.reason),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                ElevatedButton(
+                  onPressed: () => _approveSuggestion(suggestion),
+                  child: Text(actionText),
+                ),
+                const SizedBox(width: 10),
+                OutlinedButton(
+                  onPressed: () => _dismissSuggestion(suggestion),
+                  child: const Text('Dismiss'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAutomationLogCard(AutomationLog log) {
+    final actionText = log.command == 'turn_off' ? 'turned off' : 'turned on';
+    return Card(
+      color: Colors.teal.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.bolt_outlined, color: Colors.teal),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Auto Mode $actionText ${log.deviceName} because ${log.reason.toLowerCase()}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
               ),
             ),
           ],
@@ -2246,7 +2576,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          if (_isLightWasteAlert(alert)) ...[
+          if (_controlMode.mode == 'assist' && _isLightWasteAlert(alert)) ...[
             const SizedBox(height: 10),
             const Text(
               'No one is in the room. Do you want to turn off the lights?',

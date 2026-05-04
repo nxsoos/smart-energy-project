@@ -33,6 +33,10 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def now_iso(timestamp_ms: int | None = None) -> str:
+    return datetime.fromtimestamp((timestamp_ms or now_ms()) / 1000, tz=BAHRAIN_TZ).isoformat()
+
+
 def initialize_firebase() -> None:
     if firebase_admin._apps:
         return
@@ -251,6 +255,237 @@ def make_control_suggestion(result: dict[str, Any], payload: dict[str, Any]) -> 
     return None
 
 
+def command_to_target_state(command: str) -> str:
+    return "on" if command == "turn_on" else "off"
+
+
+def read_control_mode(home_id: str) -> str:
+    control_ref = db.reference(f"/homes/{home_id}/control")
+    control = control_ref.get()
+    if not isinstance(control, dict) or control.get("mode") not in {"manual", "assist", "auto"}:
+        timestamp_ms = now_ms()
+        control = {
+            "mode": "assist",
+            "updated_by": "system_default",
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": now_iso(timestamp_ms),
+        }
+        control_ref.set(control)
+    return str(control.get("mode", "assist"))
+
+
+def default_automation(device_id: str) -> dict[str, Any]:
+    if device_id == "breaker_01":
+        return {
+            "manual_allowed": True,
+            "assist_allowed": True,
+            "auto_allowed": True,
+            "auto_actions": ["turn_off"],
+            "requires_confirmation": False,
+            "cooldown_ms": 5 * 60 * 1000,
+        }
+    if device_id == "breaker_02":
+        return {
+            "manual_allowed": True,
+            "assist_allowed": True,
+            "auto_allowed": True,
+            "auto_actions": ["turn_on", "turn_off"],
+            "requires_confirmation": False,
+            "comfort_min_temp": 22,
+            "comfort_max_temp": 25,
+            "cooldown_ms": 10 * 60 * 1000,
+        }
+    return {
+        "manual_allowed": True,
+        "assist_allowed": False,
+        "auto_allowed": False,
+        "auto_actions": [],
+        "requires_confirmation": True,
+    }
+
+
+def ensure_automation(home_id: str, device_id: str) -> dict[str, Any]:
+    ref = db.reference(f"/homes/{home_id}/devices/{device_id}/automation")
+    value = ref.get()
+    if isinstance(value, dict):
+        return value
+    value = default_automation(device_id)
+    ref.set(value)
+    return value
+
+
+def create_action_suggestion(home_id: str, suggestion: dict[str, Any]) -> None:
+    active_ref = db.reference(f"/homes/{home_id}/action_suggestions/active")
+    active = active_ref.get()
+    if isinstance(active, dict):
+        for item in active.values():
+            if (
+                isinstance(item, dict)
+                and item.get("device_id") == suggestion["device_id"]
+                and item.get("suggested_command") == suggestion["action"]
+                and item.get("status") == "waiting_for_user"
+            ):
+                return
+
+    timestamp_ms = now_ms()
+    suggestion_id = f"sug_{timestamp_ms}"
+    active_ref.child(suggestion_id).set(
+        {
+            "suggestion_id": suggestion_id,
+            "home_id": home_id,
+            "device_id": suggestion["device_id"],
+            "device_name": "AC Breaker"
+            if suggestion["device_id"] == "breaker_02"
+            else "Switch Breaker",
+            "suggested_command": suggestion["action"],
+            "target_state": command_to_target_state(suggestion["action"]),
+            "reason": suggestion["reason"],
+            "source": "ai",
+            "status": "waiting_for_user",
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": now_iso(timestamp_ms),
+            "actions": ["approve", "dismiss"],
+        }
+    )
+
+
+def maybe_create_auto_command(home_id: str, suggestion: dict[str, Any]) -> bool:
+    device_id = suggestion["device_id"]
+    action = suggestion["action"]
+    automation = ensure_automation(home_id, device_id)
+    if automation.get("auto_allowed") is not True:
+        return False
+    if action not in automation.get("auto_actions", []):
+        return False
+    if automation.get("requires_confirmation") is True:
+        return False
+    if device_id == "breaker_01" and action != "turn_off":
+        return False
+
+    device = db.reference(f"/homes/{home_id}/devices/{device_id}").get()
+    if not isinstance(device, dict):
+        return False
+    status = device.get("status") if isinstance(device.get("status"), dict) else {}
+    if status.get("online") is False or device.get("command_in_progress") is True:
+        return False
+
+    current_state = db.reference(f"/homes/{home_id}/backend/current_state").get()
+    esp32_sensors = db.reference(f"/homes/{home_id}/devices/esp32_01/sensors").get()
+    if (
+        isinstance(current_state, dict)
+        and current_state.get("smoke") in {1, True, "1", "true"}
+    ) or (
+        isinstance(esp32_sensors, dict)
+        and esp32_sensors.get("smoke") in {1, True, "1", "true"}
+    ):
+        return False
+
+    automation_state = db.reference(f"/homes/{home_id}/automation_state/{device_id}").get()
+    if isinstance(automation_state, dict):
+        cooldown_until_ms = automation_state.get("cooldown_until_ms")
+        if isinstance(cooldown_until_ms, (int, float)) and now_ms() < cooldown_until_ms:
+            return False
+
+    timestamp_ms = now_ms()
+    command_id = f"cmd_{timestamp_ms}"
+    device_name = "AC Breaker" if device_id == "breaker_02" else "Switch Breaker"
+    command_record = {
+        "command_id": command_id,
+        "home_id": home_id,
+        "device_id": device_id,
+        "device_name": device_name,
+        "command": action,
+        "action": action,
+        "target_state": command_to_target_state(action),
+        "previous_state": "on" if status.get("switch") is True else "off",
+        "requested_by": "ai",
+        "reason": suggestion["reason"],
+        "status": "pending",
+        "requested_at_ms": timestamp_ms,
+        "requested_at_iso": now_iso(timestamp_ms),
+        "sent_at_ms": None,
+        "sent_at_iso": None,
+        "confirmed_at_ms": None,
+        "confirmed_at_iso": None,
+        "failed_at_ms": None,
+        "failed_at_iso": None,
+        "timeout_at_ms": None,
+        "timeout_at_iso": None,
+        "result": {
+            "success": None,
+            "actual_state": None,
+            "error_code": None,
+            "user_message": None,
+            "raw_error": None,
+        },
+        "retry_count": 0,
+        "max_retries": 1,
+    }
+    root_ref = db.reference(f"/homes/{home_id}")
+    root_ref.update(
+        {
+            f"commands/pending/{command_id}": command_record,
+            f"commands/history/{command_id}": command_record,
+            f"commands/latest_by_device/{device_id}": command_record,
+            f"commands/{device_id}/latest": {
+                **command_record,
+                "created_at": timestamp_ms,
+                "source": "ai",
+            },
+            f"devices/{device_id}/command_in_progress": True,
+            f"devices/{device_id}/pending_command_id": command_id,
+            f"devices/{device_id}/pending_target_state": command_to_target_state(action),
+            f"devices/{device_id}/last_requested_state": command_to_target_state(action),
+            f"devices/{device_id}/last_command_status": "pending",
+            f"devices/{device_id}/last_command_message": "Automatic command accepted.",
+        }
+    )
+    cooldown_ms = int(automation.get("cooldown_ms") or (10 * 60 * 1000 if device_id == "breaker_02" else 5 * 60 * 1000))
+    log_id = f"auto_{timestamp_ms}"
+    root_ref.update(
+        {
+            f"automation_state/{device_id}": {
+                "last_auto_action": action,
+                "last_auto_action_at_ms": timestamp_ms,
+                "cooldown_until_ms": timestamp_ms + cooldown_ms,
+            },
+            f"automation_logs/{log_id}": {
+                "log_id": log_id,
+                "home_id": home_id,
+                "device_id": device_id,
+                "device_name": device_name,
+                "command": action,
+                "target_state": command_to_target_state(action),
+                "reason": suggestion["reason"],
+                "source": "ai",
+                "command_id": command_id,
+                "created_at_ms": timestamp_ms,
+                "created_at_iso": now_iso(timestamp_ms),
+            },
+        }
+    )
+    return True
+
+
+def apply_control_mode_behavior(home_id: str, result: dict[str, Any]) -> None:
+    suggestion = result.get("control_suggestion")
+    if not isinstance(suggestion, dict):
+        return
+
+    mode = read_control_mode(home_id)
+    if mode == "manual":
+        result["control_action_status"] = "recommendation_only"
+        return
+    if mode == "assist":
+        create_action_suggestion(home_id, suggestion)
+        result["control_action_status"] = "waiting_for_user"
+        return
+    if maybe_create_auto_command(home_id, suggestion):
+        result["control_action_status"] = "automatic_command_created"
+    else:
+        result["control_action_status"] = "auto_not_allowed_recommendation_only"
+
+
 def build_firebase_result(
     home_id: str,
     payload: dict[str, Any],
@@ -283,6 +518,8 @@ def build_firebase_result(
 def write_ai_result(home_id: str, result: dict[str, Any]) -> None:
     ai_ref = db.reference(f"/homes/{home_id}/backend/ai")
     prediction_id = f"prediction_{result['created_at']}"
+
+    apply_control_mode_behavior(home_id, result)
 
     updates = {
         "latest_prediction": result,

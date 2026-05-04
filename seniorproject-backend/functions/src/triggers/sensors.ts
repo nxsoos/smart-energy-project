@@ -17,6 +17,7 @@ import {
   setAlertActiveOrResolve,
 } from "../alerts";
 import { resolveRecommendation, upsertRecommendation } from "../recommendations";
+import { handleSuggestedAction } from "../control";
 
 export const analyzeSensorLog = onValueCreated(
   {
@@ -329,6 +330,14 @@ export const checkPendingConditions = onSchedule(
               now
             );
 
+            await handleSuggestedAction(homeId, {
+              deviceId: "breaker_01",
+              deviceName: "Switch Breaker",
+              command: "turn_off",
+              reason: "Light is on while the room appears empty.",
+              source: "backend_analysis",
+            });
+
             logger.info("Created scheduled light/no-motion alert", {
               homeId,
               duration_ms: duration,
@@ -390,6 +399,14 @@ export const checkPendingConditions = onSchedule(
               },
               now
             );
+
+            await handleSuggestedAction(homeId, {
+              deviceId: "breaker_02",
+              deviceName: "AC Breaker",
+              command: "turn_on",
+              reason: "Room temperature is high and cooling may improve comfort.",
+              source: "backend_analysis",
+            });
 
             logger.info("Created scheduled high-temperature alert", {
               homeId,

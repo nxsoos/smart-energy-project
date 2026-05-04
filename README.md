@@ -26,6 +26,8 @@ Runtime values used by the Flutter app live in:
 ```text
 smart_energy_app/lib/config/app_config.dart
 ```
+## deploy FastAPI
+gcloud run deploy smart-energy-api --image asia-southeast1-docker.pkg.dev/seniorproject-energy/smart-energy/smart-energy-api:latest --region asia-southeast1 --set-env-vars FIREBASE_DATABASE_URL=https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app,AI_SERVICE_URL=https://smart-energy-ai-237804589333.asia-southeast1.run.app --allow-unauthenticated
 
 ## Run The AI Backend Locally
 

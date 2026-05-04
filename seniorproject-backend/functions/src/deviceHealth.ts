@@ -33,13 +33,43 @@ export async function checkAndUpdateDeviceHealth(
       : null;
 
   const alertKey = `device_offline_${deviceId}`;
+  const isBreaker = deviceId.startsWith("breaker_");
+  const tuyaOnline =
+    typeof status.online === "boolean" ? (status.online as boolean) : null;
 
   let online = false;
   let healthStatus: DeviceHealthStatus = "unknown";
   let offlineSince =
     typeof status.offline_since === "number" ? status.offline_since : null;
 
-  if (typeof lastSeenMsRaw !== "number") {
+  if (isBreaker && tuyaOnline !== null) {
+    online = tuyaOnline;
+    healthStatus = tuyaOnline ? "online" : "offline";
+    offlineSince = tuyaOnline ? null : offlineSince ?? timestampMs;
+
+    if (tuyaOnline) {
+      await markAlertResolving(backendRef, alertKey, timestampMs);
+      await resolveAlertToHistory(backendRef, alertKey, timestampMs);
+    } else {
+      await createOrUpdateActiveAlert(
+        backendRef,
+        alertKey,
+        {
+          type: "device_health",
+          subtype: "device_offline",
+          level: "high",
+          message: `${deviceId} is offline according to Tuya Cloud.`,
+          source: "device_health_monitor",
+          additionalFields: {
+            device_id: deviceId,
+            lastSeenMs: lastSeenMsRaw,
+            offline_since: offlineSince,
+          },
+        },
+        timestampMs
+      );
+    }
+  } else if (typeof lastSeenMsRaw !== "number") {
     healthStatus = "unknown";
     online = false;
     offlineSince = offlineSince ?? timestampMs;
@@ -91,13 +121,17 @@ export async function checkAndUpdateDeviceHealth(
     await resolveAlertToHistory(backendRef, alertKey, timestampMs);
   }
 
-  await deviceStatusRef.update({
-    online,
+  const statusUpdates: Record<string, unknown> = {
     health_status: healthStatus,
     lastSeenMs: lastSeenMsRaw,
     last_health_check_at: timestampMs,
     offline_since: offlineSince,
-  });
+  };
+  if (!isBreaker || tuyaOnline === null) {
+    statusUpdates.online = online;
+  }
+
+  await deviceStatusRef.update(statusUpdates);
 
   return {
     online,
