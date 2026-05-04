@@ -21,6 +21,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from occupancy_utils import calculate_occupancy, merged_occupancy_settings, should_write_occupancy_history
 from timestamp_utils import TIMEZONE, now_timestamp
 
 app = Flask(__name__)
@@ -41,6 +42,10 @@ def initialize_firebase() -> None:
 
 def home_ref(path: str):
     return db.reference(f"/homes/{HOME_ID}/{path}")
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def build_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -130,11 +135,33 @@ def build_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def save_to_firebase(payload: dict[str, Any]) -> None:
     history_key = payload["timestamp_key"]
     history_payload = build_history_payload(payload)
+    timestamp_ms = int(payload["timestamp_ms"])
 
     # Keep the original Firebase structure: latest ESP32 data lives inside
     # devices/esp32_01. History is flattened so backend Firebase Functions can
     # read top-level fields like motion, noise, sound_raw, and light_status.
     home_ref(f"devices/{APP_DEVICE_ID}").set(payload)
+    settings = merged_occupancy_settings(as_dict(home_ref("settings").get()))
+    previous_occupancy = as_dict(home_ref("occupancy/room1").get())
+    breaker_data = as_dict(home_ref("backend/energy/current_total").get())
+    occupancy = calculate_occupancy(
+        history_payload,
+        previous_occupancy,
+        settings,
+        breaker_data,
+        timestamp_ms,
+    )
+    home_ref("occupancy/room1").set(occupancy)
+    latest_history = as_dict(home_ref("history/occupancy_logs").order_by_child("updated_at_ms").limit_to_last(1).get())
+    latest_history_record = next(iter(latest_history.values()), {}) if latest_history else {}
+    if should_write_occupancy_history(
+        previous_occupancy,
+        as_dict(latest_history_record),
+        occupancy,
+        settings,
+        timestamp_ms,
+    ):
+        home_ref(f"history/occupancy_logs/occ_{timestamp_ms}").set(occupancy)
     home_ref(f"history/sensor_logs/{history_key}").set(history_payload)
 
 

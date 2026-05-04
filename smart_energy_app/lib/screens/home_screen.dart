@@ -71,6 +71,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<ActionSuggestion> _actionSuggestions = const [];
   List<AutomationLog> _automationLogs = const [];
   Map<String, dynamic> _settingsSummary = const {};
+  Map<String, dynamic> _occupancy = const {};
   ScheduleInfo? _nextSchedule;
   bool _isUpdatingControlMode = false;
   final List<Alert> _alerts = [];
@@ -639,6 +640,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _actionSuggestions = dashboardData.actionSuggestions;
         _automationLogs = dashboardData.automationLogs;
         _settingsSummary = dashboardData.settingsSummary;
+        _occupancy = dashboardData.occupancy;
         _nextSchedule = dashboardData.nextSchedule;
       });
 
@@ -809,8 +811,20 @@ class _HomeScreenState extends State<HomeScreen> {
     final lightWasteController = TextEditingController(
       text: settings.lightWasteMinutes.toString(),
     );
+    final motionRecentController = TextEditingController(
+      text: settings.motionRecentSeconds.toString(),
+    );
+    final soundRecentController = TextEditingController(
+      text: settings.soundRecentSeconds.toString(),
+    );
     final occupancyController = TextEditingController(
       text: settings.occupancyEmptyMinutes.toString(),
+    );
+    final soundThresholdController = TextEditingController(
+      text: settings.soundActivityThreshold.toStringAsFixed(0),
+    );
+    final occupancyConfidenceController = TextEditingController(
+      text: settings.occupancyConfidenceThreshold.toStringAsFixed(2),
     );
     final offlineController = TextEditingController(
       text: settings.deviceOfflineMinutes.toString(),
@@ -912,8 +926,24 @@ class _HomeScreenState extends State<HomeScreen> {
                     'Light waste delay minutes',
                   ),
                   _buildNumberField(
+                    motionRecentController,
+                    'Motion recent seconds',
+                  ),
+                  _buildNumberField(
+                    soundRecentController,
+                    'Sound recent seconds',
+                  ),
+                  _buildNumberField(
                     occupancyController,
                     'Occupancy empty delay minutes',
+                  ),
+                  _buildNumberField(
+                    soundThresholdController,
+                    'Sound activity threshold',
+                  ),
+                  _buildNumberField(
+                    occupancyConfidenceController,
+                    'Occupancy confidence threshold',
                   ),
                   _buildNumberField(
                     offlineController,
@@ -962,7 +992,12 @@ class _HomeScreenState extends State<HomeScreen> {
                           comfortMaxController: comfortMaxController,
                           highTempController: highTempController,
                           lightWasteController: lightWasteController,
+                          motionRecentController: motionRecentController,
+                          soundRecentController: soundRecentController,
                           occupancyController: occupancyController,
+                          soundThresholdController: soundThresholdController,
+                          occupancyConfidenceController:
+                              occupancyConfidenceController,
                           offlineController: offlineController,
                           quietEnabled: quietEnabled,
                           aiEnabled: aiEnabled,
@@ -1092,7 +1127,11 @@ class _HomeScreenState extends State<HomeScreen> {
     required TextEditingController comfortMaxController,
     required TextEditingController highTempController,
     required TextEditingController lightWasteController,
+    required TextEditingController motionRecentController,
+    required TextEditingController soundRecentController,
     required TextEditingController occupancyController,
+    required TextEditingController soundThresholdController,
+    required TextEditingController occupancyConfidenceController,
     required TextEditingController offlineController,
     required bool quietEnabled,
     required bool aiEnabled,
@@ -1123,8 +1162,15 @@ class _HomeScreenState extends State<HomeScreen> {
           'comfort_temperature_max': comfortMax,
           'high_temperature_threshold': highTemp,
           'light_waste_minutes': int.tryParse(lightWasteController.text) ?? 5,
+          'motion_recent_seconds':
+              int.tryParse(motionRecentController.text) ?? 90,
+          'sound_recent_seconds': int.tryParse(soundRecentController.text) ?? 120,
           'occupancy_empty_minutes':
               int.tryParse(occupancyController.text) ?? 10,
+          'sound_activity_threshold':
+              double.tryParse(soundThresholdController.text) ?? 45,
+          'occupancy_confidence_threshold':
+              double.tryParse(occupancyConfidenceController.text) ?? 0.65,
           'device_offline_minutes': int.tryParse(offlineController.text) ?? 2,
           'quiet_hours_enabled': quietEnabled,
           'ai_recommendations_enabled': aiEnabled,
@@ -1677,6 +1723,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       const SizedBox(height: 12),
+                      _buildOccupancySummary(),
+                      const SizedBox(height: 12),
                       if (!isSensorFeedWorking) ...[
                         Container(
                           width: double.infinity,
@@ -2073,6 +2121,57 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildOccupancySummary() {
+    final state = (_occupancy['state'] ?? 'unknown').toString();
+    final label = state
+        .split('_')
+        .map((part) => part.isEmpty
+            ? part
+            : '${part[0].toUpperCase()}${part.substring(1)}')
+        .join(' ');
+    final confidence = _occupancy['confidence'] is num
+        ? ((_occupancy['confidence'] as num).toDouble() * 100).round()
+        : null;
+    final reason = (_occupancy['reason'] ?? 'Waiting for occupancy analysis.')
+        .toString();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.primary.withValues(alpha: 0.18)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.meeting_room_outlined, color: AppColors.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  confidence == null
+                      ? 'Room Status: $label'
+                      : 'Room Status: $label ($confidence%)',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  reason,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

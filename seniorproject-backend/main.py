@@ -173,6 +173,7 @@ def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str,
             "dashboard_energy": backend_ref.child("dashboard/energy").get(),
             "dashboard_environment": backend_ref.child("dashboard/environment").get(),
             "current_state": backend_ref.child("current_state").get(),
+            "occupancy": home_ref.child("occupancy/room1").get(),
         }
     except HTTPException:
         raise
@@ -429,6 +430,7 @@ def build_ai_payload(
     latest_summary = ensure_dict(source["latest_hourly_summary"])
     dashboard_energy = ensure_dict(source["dashboard_energy"])
     dashboard_environment = ensure_dict(source["dashboard_environment"])
+    occupancy = ensure_dict(source.get("occupancy"))
 
     if not latest_summary and not dashboard_energy and not dashboard_environment:
         raise HTTPException(
@@ -476,6 +478,14 @@ def build_ai_payload(
         dashboard_environment.get("sound_level"),
     )
     light_is_bright = dashboard_environment.get("light_status") == "Bright"
+    occupancy_state = str(occupancy.get("state", "unknown"))
+    occupied = bool(occupancy.get("occupied"))
+    occupancy_confidence = as_number(occupancy.get("confidence"))
+    minutes_since_last_activity = as_number(occupancy.get("minutes_since_last_activity"))
+    motion_recent = bool(occupancy.get("motion_recent"))
+    sound_recent = bool(occupancy.get("sound_recent"))
+    sound_active = bool(occupancy.get("sound_active"))
+    derived_light_on = bool(occupancy.get("light_on")) or light_is_bright
 
     noise_count = (
         as_number(latest_summary.get("noise_count"))
@@ -510,6 +520,21 @@ def build_ai_payload(
             motion_count,
             noise_count,
             sample_count,
+        ),
+        "occupancy_state": occupancy_state,
+        "occupancy_confidence": occupancy_confidence,
+        "occupied": occupied,
+        "minutes_since_last_activity": minutes_since_last_activity,
+        "motion_recent": motion_recent,
+        "sound_recent": sound_recent,
+        "sound_active": sound_active,
+        "light_on_while_empty": occupancy_state in {"empty", "probably_empty"} and derived_light_on,
+        "device_on_while_empty": occupancy_state in {"empty", "probably_empty"}
+        and as_number(first_present(energy.get("total_avg_power_W"), energy.get("total_power_W"))) > 10,
+        "empty_room_power_w": (
+            as_number(first_present(energy.get("total_avg_power_W"), energy.get("total_power_W")))
+            if occupancy_state in {"empty", "probably_empty"}
+            else 0
         ),
         "switch_avg_power_W": switch_branch["avg_power_W"],
         "switch_peak_power_W": switch_branch["peak_power_W"],
@@ -617,7 +642,10 @@ def apply_post_processing_rules(result: dict[str, Any], payload: dict[str, Any])
         result["post_processing_rules"].append("missing_sensor_data")
         return result
 
-    occupancy_low = as_number(payload.get("occupancy_score")) < 0.2
+    occupancy_state = str(payload.get("occupancy_state", "unknown"))
+    room_empty = occupancy_state in {"empty", "probably_empty"}
+    room_occupied = occupancy_state in {"occupied", "probably_occupied"}
+    occupancy_low = as_number(payload.get("occupancy_score")) < 0.2 or room_empty
     lighting_active = as_number(payload.get("switch_avg_power_W")) > 20
     light_very_high = as_number(payload.get("bright_count")) >= 45
     total_power_active = as_number(payload.get("total_avg_power_W")) > 20
@@ -627,7 +655,7 @@ def apply_post_processing_rules(result: dict[str, Any], payload: dict[str, Any])
         as_number(payload.get("avg_temperature")) >= 27
         or as_number(payload.get("high_temp_count")) > 0
     )
-    occupied = as_number(payload.get("motion_count")) > 0 and not occupancy_low
+    occupied = room_occupied or (as_number(payload.get("motion_count")) > 0 and not occupancy_low)
 
     if smoke_detected:
         set_classifier_result(result, "waste_event", False)
@@ -646,23 +674,40 @@ def apply_post_processing_rules(result: dict[str, Any], payload: dict[str, Any])
         return result
 
     if (
-        light_very_high
+        (bool(payload.get("light_on_while_empty")) or light_very_high)
         and lighting_active
-        and occupancy_low
+        and room_empty
         and as_number(payload.get("switch_avg_power_W")) >= as_number(payload.get("ac_avg_power_W"))
     ):
         set_classifier_result(result, "waste_event", True)
         set_classifier_result(result, "anomaly_label", "light_on_no_motion")
-        set_classifier_result(result, "recommendation_type", "turn_off_lights")
+        set_classifier_result(result, "recommendation_type", "turn_off_lights_or_switch_breaker")
         result["energy_efficiency_score"] = min(
             as_number(result.get("energy_efficiency_score"), 100),
             40,
         )
         result["explanation"] = (
-            "Energy waste is likely because the room is bright, lighting power is active, "
-            "and occupancy appears low."
+            "Light or switch breaker is on while the room appears empty."
         )
-        result["post_processing_rules"].append("lighting_energy_waste")
+        result["post_processing_rules"].append("occupancy_light_energy_waste")
+        return result
+
+    if room_empty and as_number(payload.get("empty_room_power_w")) > 10:
+        set_classifier_result(result, "waste_event", True)
+        set_classifier_result(result, "anomaly_label", "empty_room_power_active")
+        set_classifier_result(result, "recommendation_type", "turn_off_unused_devices")
+        result["explanation"] = "Power is active while the room appears empty."
+        result["post_processing_rules"].append("empty_room_power_active")
+        return result
+
+    if room_occupied and ensure_dict(result.get("anomaly_label")).get("value") == "light_on_no_motion":
+        set_classifier_result(result, "waste_event", False, confidence=0.8)
+        set_classifier_result(result, "anomaly_label", "normal", confidence=0.8)
+        set_classifier_result(result, "recommendation_type", "none", confidence=0.8)
+        result["explanation"] = (
+            "Occupancy evidence suggests the room is still in use, so no-motion alone is not treated as waste."
+        )
+        result["post_processing_rules"].append("occupancy_reduced_false_waste")
         return result
 
     if is_night_hour(payload.get("hour_of_day")) and occupancy_low and total_power_active:

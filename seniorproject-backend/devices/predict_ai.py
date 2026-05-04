@@ -34,6 +34,16 @@ def load_payload(payload_arg: str | None) -> dict[str, Any]:
         "noise_count": 1,
         "high_temp_count": 20,
         "occupancy_score": 0.05,
+        "occupancy_state": "empty",
+        "occupancy_confidence": 0.82,
+        "occupied": False,
+        "minutes_since_last_activity": 12,
+        "motion_recent": False,
+        "sound_recent": False,
+        "sound_active": False,
+        "light_on_while_empty": True,
+        "device_on_while_empty": True,
+        "empty_room_power_w": 100.0,
         "switch_avg_power_W": 20.0,
         "switch_peak_power_W": 50.0,
         "switch_energy_kWh": 0.02,
@@ -65,6 +75,8 @@ def build_explanation(result: dict[str, Any], payload: dict[str, Any]) -> str:
     recommendation = result["recommendation_type"]["value"]
 
     if waste:
+        if payload.get("light_on_while_empty") or payload.get("device_on_while_empty"):
+            return "Energy waste is likely because light or device power is active while the room appears empty."
         if payload.get("occupancy_score", 1) < 0.2 and payload.get("total_avg_power_W", 0) > 0:
             return "Energy waste is likely because power usage is active while occupancy appears low."
         return "Energy waste is likely based on the current power, room, and time pattern."
@@ -125,7 +137,9 @@ def calculate_efficiency_score(result: dict[str, Any], payload: dict[str, Any]) 
     if payload.get("high_temp_count", 0) > 0 and payload.get("ac_avg_power_W", 0) > 0:
         score -= 10
 
-    if payload.get("occupancy_score", 1) < 0.2 and payload.get("total_avg_power_W", 0) > 0:
+    if payload.get("device_on_while_empty") or (
+        payload.get("occupancy_score", 1) < 0.2 and payload.get("total_avg_power_W", 0) > 0
+    ):
         score -= 20
 
     return max(0, min(100, score))

@@ -13,6 +13,8 @@ export type PendingCondition = {
   last_seen_iso?: string | null;
   alert_sent: boolean;
   type: string;
+  light_on?: boolean;
+  breaker_on?: boolean;
   source_log?: string;
 };
 

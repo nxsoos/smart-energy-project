@@ -42,6 +42,14 @@ export const analyzeSensorLog = onValueCreated(
         typeof log.timestamp_ms === "number" ? log.timestamp_ms : now;
 
       const backendRef = admin.database().ref(`/homes/${homeId}/backend`);
+      const occupancySnap = await admin
+        .database()
+        .ref(`/homes/${homeId}/occupancy/room1`)
+        .get();
+      const occupancy =
+        occupancySnap.exists() && typeof occupancySnap.val() === "object" && occupancySnap.val() !== null
+          ? (occupancySnap.val() as Record<string, unknown>)
+          : {};
       const settingsSnap = await admin.database().ref(`/homes/${homeId}/settings`).get();
       const settings =
         settingsSnap.exists() && typeof settingsSnap.val() === "object" && settingsSnap.val() !== null
@@ -51,6 +59,14 @@ export const analyzeSensorLog = onValueCreated(
         typeof settings.high_temperature_threshold === "number"
           ? settings.high_temperature_threshold
           : HIGH_TEMP_THRESHOLD;
+      const breakerSnap = await admin
+        .database()
+        .ref(`/homes/${homeId}/devices/breaker_01/status`)
+        .get();
+      const breakerStatus =
+        breakerSnap.exists() && typeof breakerSnap.val() === "object" && breakerSnap.val() !== null
+          ? (breakerSnap.val() as Record<string, unknown>)
+          : {};
       const currentStateRef = backendRef.child("current_state");
       const esp32StatusRef = admin
         .database()
@@ -65,6 +81,10 @@ export const analyzeSensorLog = onValueCreated(
       );
 
       const isBright = log.light_status === "Bright";
+      const breakerOn =
+        breakerStatus.switch === true ||
+        breakerStatus.state === "on" ||
+        breakerStatus.switch_state === "on";
       const noMotion = log.motion === 0;
       const motionDetected = log.motion === 1;
 
@@ -80,12 +100,17 @@ export const analyzeSensorLog = onValueCreated(
         typeof log.noise_text === "string" ? log.noise_text : null;
       const acousticPresence =
         noise === 1 || (noiseText?.toLowerCase() === "noise");
-      const appearsEmpty = noMotion && !acousticPresence;
+      const occupancyState =
+        typeof occupancy.state === "string" ? occupancy.state : "unknown";
+      const occupancyAppearsEmpty =
+        occupancyState === "empty" || occupancyState === "probably_empty";
+      const appearsEmpty =
+        occupancyState === "unknown" ? noMotion && !acousticPresence : occupancyAppearsEmpty;
 
       let recommendation = "No recommendation";
       let recommendationPriority = 0;
       let wasteRisk = "low";
-      let occupancyState = "unknown";
+      let fallbackOccupancyState = "unknown";
 
       const setRecommendation = (nextRecommendation: string, priority: number) => {
         if (priority >= recommendationPriority) {
@@ -95,12 +120,14 @@ export const analyzeSensorLog = onValueCreated(
       };
 
       if (motionDetected) {
-        occupancyState = "occupied";
+        fallbackOccupancyState = "occupied";
       } else if (acousticPresence) {
-        occupancyState = "possibly_occupied";
+        fallbackOccupancyState = "probably_occupied";
       } else if (noMotion) {
-        occupancyState = "possibly_empty";
+        fallbackOccupancyState = "probably_empty";
       }
+      const currentOccupancyState =
+        occupancyState === "unknown" ? fallbackOccupancyState : occupancyState;
 
       // Immediate safety alert
       if (log.smoke === 1) {
@@ -128,7 +155,7 @@ export const analyzeSensorLog = onValueCreated(
       }
 
       // Start/update light + no motion pending condition
-      if (isBright && appearsEmpty) {
+      if (appearsEmpty && (isBright || breakerOn)) {
         const pendingSnap = await lightNoMotionPendingRef.get();
 
         if (!pendingSnap.exists()) {
@@ -143,6 +170,8 @@ export const analyzeSensorLog = onValueCreated(
             last_seen_iso: msToIso(now),
             alert_sent: false,
             type: "light_on_no_motion",
+            light_on: isBright,
+            breaker_on: breakerOn,
             source_log: logId,
           };
 
@@ -154,6 +183,8 @@ export const analyzeSensorLog = onValueCreated(
             last_seen_at: now,
             last_seen_ms: now,
             last_seen_iso: msToIso(now),
+            light_on: isBright,
+            breaker_on: breakerOn,
             source_log: logId,
           });
         }
@@ -235,7 +266,10 @@ export const analyzeSensorLog = onValueCreated(
         last_processed_at: now,
         last_processed_at_ms: now,
         last_processed_at_iso: msToIso(now),
-        occupancy_state: occupancyState,
+        occupancy_state: currentOccupancyState,
+        occupied: occupancy.occupied ?? null,
+        occupancy_confidence: occupancy.confidence ?? null,
+        occupancy_reason: occupancy.reason ?? null,
         waste_risk: wasteRisk,
         recommendation,
         latest_temperature: log.temperature ?? null,
@@ -272,7 +306,10 @@ export const analyzeSensorLog = onValueCreated(
         light_status: log.light_status ?? null,
         smoke: log.smoke ?? null,
 
-        occupancy_state: occupancyState,
+        occupancy_state: currentOccupancyState,
+        occupied: occupancy.occupied ?? null,
+        occupancy_confidence: occupancy.confidence ?? null,
+        occupancy_reason: occupancy.reason ?? null,
         waste_risk: wasteRisk,
         recommendation,
         comfort_temperature_min:
@@ -347,9 +384,24 @@ export const checkPendingConditions = onSchedule(
           lightCondition &&
           lightCondition.active
         ) {
-          const duration = now - lightCondition.started_at;
+          const occupancySnap = await admin
+            .database()
+            .ref(`/homes/${homeId}/occupancy/room1`)
+            .get();
+          const occupancy =
+            occupancySnap.exists() && typeof occupancySnap.val() === "object" && occupancySnap.val() !== null
+              ? (occupancySnap.val() as Record<string, unknown>)
+              : {};
+          const occupancyState =
+            typeof occupancy.state === "string" ? occupancy.state : "unknown";
+          const roomLooksEmpty =
+            occupancyState === "empty" || occupancyState === "probably_empty";
+          if (!roomLooksEmpty) {
+            await pendingRef.child("light_on_no_motion").remove();
+          } else {
+            const duration = now - lightCondition.started_at;
 
-          if (duration >= lightDelayMs) {
+            if (duration >= lightDelayMs) {
             await createOrUpdateActiveAlert(
               backendRef,
               "light_on_no_motion",
@@ -357,12 +409,14 @@ export const checkPendingConditions = onSchedule(
                 type: "energy_waste",
                 subtype: "light_on_no_motion",
                 level: "medium",
-                message: "Lights may be on while the room appears empty.",
+                message: "Light or switch breaker may be on while the room appears empty.",
                 source: "sensor_analysis",
                 source_log: lightCondition.source_log ?? null,
                 additionalFields: {
                   started_at: lightCondition.started_at,
                   duration_ms: duration,
+                  light_on: lightCondition.light_on ?? null,
+                  breaker_on: lightCondition.breaker_on ?? null,
                 },
               },
               now
@@ -380,7 +434,7 @@ export const checkPendingConditions = onSchedule(
               ...nowTimestamp(now),
               waste_risk: "medium",
               recommendation:
-                "Turn off the lights if the room is actually empty.",
+                "Turn off Switch Breaker if the room is actually empty.",
               last_alert_type: "energy_waste",
               last_alert_at: now,
               last_alert_at_ms: now,
@@ -395,9 +449,10 @@ export const checkPendingConditions = onSchedule(
                   type: "energy_saving",
                   priority: "medium",
                   title: "Possible energy waste",
-                  message: "Turn off the lights if the room is actually empty.",
+                  message: "The room appears empty and Switch Breaker is still on.",
                   source: "backend_analysis",
                   related_alert_key: "light_on_no_motion",
+                  related_device_id: "breaker_01",
                 },
                 now
               );
@@ -415,6 +470,7 @@ export const checkPendingConditions = onSchedule(
               homeId,
               duration_ms: duration,
             });
+            }
           }
         }
 

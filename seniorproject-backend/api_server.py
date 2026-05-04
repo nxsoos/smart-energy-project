@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import credentials, db
 from pydantic import BaseModel, Field
 
+from occupancy_utils import DEFAULT_OCCUPANCY_SETTINGS
 from timestamp_utils import (
     TIMEZONE,
     ms_to_iso,
@@ -110,7 +111,12 @@ DEFAULT_SETTINGS = {
     "humidity_min": 30,
     "humidity_max": 70,
     "light_waste_minutes": 5,
+    "motion_recent_seconds": DEFAULT_OCCUPANCY_SETTINGS["motion_recent_seconds"],
+    "sound_recent_seconds": DEFAULT_OCCUPANCY_SETTINGS["sound_recent_seconds"],
     "occupancy_empty_minutes": 10,
+    "sound_activity_threshold": DEFAULT_OCCUPANCY_SETTINGS["sound_activity_threshold"],
+    "occupancy_confidence_threshold": DEFAULT_OCCUPANCY_SETTINGS["occupancy_confidence_threshold"],
+    "occupancy_history_interval_minutes": DEFAULT_OCCUPANCY_SETTINGS["occupancy_history_interval_minutes"],
     "device_offline_minutes": 2,
     "quiet_hours_enabled": True,
     "quiet_hours_start": "23:00",
@@ -128,6 +134,14 @@ SETTINGS_OPTIONS = {
     "comfort_temperature_min": {"min": 16, "max": 30},
     "comfort_temperature_max": {"min": 18, "max": 35},
     "high_temperature_threshold": {"min": 20, "max": 45},
+    "light_waste_minutes": {"min": 1, "max": 60},
+    "motion_recent_seconds": {"min": 10, "max": 600},
+    "sound_recent_seconds": {"min": 10, "max": 600},
+    "occupancy_empty_minutes": {"min": 1, "max": 120},
+    "sound_activity_threshold": {"min": 0, "max": 4095},
+    "occupancy_confidence_threshold": {"min": 0, "max": 1},
+    "occupancy_history_interval_minutes": {"min": 1, "max": 60},
+    "device_offline_minutes": {"min": 1, "max": 60},
 }
 
 app = FastAPI(
@@ -198,7 +212,12 @@ class SettingsUpdateRequest(BaseModel):
     humidity_min: float | None = None
     humidity_max: float | None = None
     light_waste_minutes: int | None = None
+    motion_recent_seconds: int | None = None
+    sound_recent_seconds: int | None = None
     occupancy_empty_minutes: int | None = None
+    sound_activity_threshold: float | None = None
+    occupancy_confidence_threshold: float | None = None
+    occupancy_history_interval_minutes: int | None = None
     device_offline_minutes: int | None = None
     quiet_hours_enabled: bool | None = None
     quiet_hours_start: str | None = None
@@ -456,11 +475,23 @@ def validate_settings(settings: dict[str, Any]) -> None:
 
     for field in [
         "light_waste_minutes",
+        "motion_recent_seconds",
+        "sound_recent_seconds",
         "occupancy_empty_minutes",
+        "occupancy_history_interval_minutes",
         "device_offline_minutes",
     ]:
         if as_number(settings.get(field), -1) <= 0:
             raise HTTPException(status_code=400, detail=f"{field} must be positive.")
+
+    if as_number(settings.get("sound_activity_threshold"), -1) < 0:
+        raise HTTPException(status_code=400, detail="sound_activity_threshold must be >= 0.")
+    confidence_threshold = as_number(settings.get("occupancy_confidence_threshold"), -1)
+    if confidence_threshold < 0 or confidence_threshold > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="occupancy_confidence_threshold must be between 0 and 1.",
+        )
 
     for field in [
         "quiet_hours_enabled",
@@ -488,6 +519,8 @@ def settings_summary(settings: dict[str, Any]) -> dict[str, Any]:
         ),
         "high_temperature_threshold": settings.get("high_temperature_threshold"),
         "quiet_hours_enabled": settings.get("quiet_hours_enabled"),
+        "occupancy_empty_minutes": settings.get("occupancy_empty_minutes"),
+        "sound_activity_threshold": settings.get("sound_activity_threshold"),
     }
 
 
@@ -802,6 +835,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
         "backend_current_total": as_dict(backend_energy.get("current_total")),
         "backend_branches": as_dict(backend_energy.get("branches")),
         "backend_device_health": as_dict(backend.get("device_health")),
+        "occupancy_room1": as_dict(as_dict(home.get("occupancy")).get("room1")),
     }
 
 
@@ -858,11 +892,16 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
             source.get("latest_sound_raw"),
         ),
         "occupancy": first_present(
+            occupancy.get("state"),
             source.get("occupancy"),
             source.get("occupancy_state"),
             status.get("occupancy"),
             default="unknown",
         ),
+        "occupancy_state": occupancy.get("state", "unknown"),
+        "occupied": bool(occupancy.get("occupied")),
+        "occupancy_confidence": occupancy.get("confidence"),
+        "occupancy_reason": occupancy.get("reason"),
     }
 
 
@@ -1232,6 +1271,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
             "description": control_description(control_mode),
         },
         "room": build_room(bundle),
+        "occupancy": bundle["occupancy_room1"],
         "energy": build_energy(bundle, devices, settings),
         "devices": devices,
         "alerts": alerts,

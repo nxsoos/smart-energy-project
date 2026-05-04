@@ -10,6 +10,8 @@ const ids = {
   commandMessage: document.getElementById("commandMessage"),
   suggestionText: document.getElementById("suggestionText"),
   sensorBanner: document.getElementById("sensorBanner"),
+  occupancyState: document.getElementById("occupancyState"),
+  occupancyReason: document.getElementById("occupancyReason"),
   temperature: document.getElementById("temperature"),
   humidity: document.getElementById("humidity"),
   aqi: document.getElementById("aqi"),
@@ -112,6 +114,13 @@ function setSensorBanner(mode, text) {
   ids.sensorBanner.className = `sensor-banner sensor-banner-${mode}`;
 }
 
+function friendlyOccupancy(value) {
+  return String(value || "unknown")
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function yesNo(value, yesText, noText) {
   if (value === true || value === 1 || value === "1" || value === "true") {
     return yesText;
@@ -129,6 +138,7 @@ function setStatus(mode, text) {
 
 function updateSensors(dashboard) {
   const room = dashboard.room || {};
+  const occupancy = dashboard.occupancy || {};
   const sensorOnline = isSensorOnline(room);
   const temperature = nested(room, ["temperature"]);
   const humidity = nested(room, ["humidity"]);
@@ -148,6 +158,11 @@ function updateSensors(dashboard) {
     formatTimestamp(nested(room, ["sensor_timestamp_iso", "sensor_timestamp_ms"])) ||
     nested(dashboard, ["updated_at_iso"]) ||
     "Unknown";
+
+  ids.occupancyState.textContent = `${friendlyOccupancy(occupancy.state || room.occupancy_state)}${
+    Number.isFinite(Number(occupancy.confidence)) ? ` (${Math.round(Number(occupancy.confidence) * 100)}%)` : ""
+  }`;
+  ids.occupancyReason.textContent = occupancy.reason || room.occupancy_reason || "Waiting for occupancy analysis.";
 
   if (!sensorOnline) {
     setSensorBanner("offline", `Sensor feed offline. Last reading: ${updated}`);
@@ -353,6 +368,10 @@ async function loadSettingsPanel() {
   document.getElementById("prefHighTemp").value = settings.high_temperature_threshold ?? 28;
   document.getElementById("prefLightWaste").value = settings.light_waste_minutes ?? 5;
   document.getElementById("prefOccupancy").value = settings.occupancy_empty_minutes ?? 10;
+  document.getElementById("prefMotionRecent").value = settings.motion_recent_seconds ?? 90;
+  document.getElementById("prefSoundRecent").value = settings.sound_recent_seconds ?? 120;
+  document.getElementById("prefSoundThreshold").value = settings.sound_activity_threshold ?? 45;
+  document.getElementById("prefOccupancyConfidence").value = settings.occupancy_confidence_threshold ?? 0.65;
   document.getElementById("prefOffline").value = settings.device_offline_minutes ?? 2;
   document.getElementById("prefQuiet").checked = settings.quiet_hours_enabled !== false;
   document.getElementById("prefAi").checked = settings.ai_recommendations_enabled !== false;
@@ -393,6 +412,10 @@ async function savePreferences() {
     high_temperature_threshold: Number(document.getElementById("prefHighTemp").value),
     light_waste_minutes: Number(document.getElementById("prefLightWaste").value),
     occupancy_empty_minutes: Number(document.getElementById("prefOccupancy").value),
+    motion_recent_seconds: Number(document.getElementById("prefMotionRecent").value),
+    sound_recent_seconds: Number(document.getElementById("prefSoundRecent").value),
+    sound_activity_threshold: Number(document.getElementById("prefSoundThreshold").value),
+    occupancy_confidence_threshold: Number(document.getElementById("prefOccupancyConfidence").value),
     device_offline_minutes: Number(document.getElementById("prefOffline").value),
     quiet_hours_enabled: document.getElementById("prefQuiet").checked,
     ai_recommendations_enabled: document.getElementById("prefAi").checked,

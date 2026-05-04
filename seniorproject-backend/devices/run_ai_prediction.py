@@ -103,6 +103,7 @@ def calculate_occupancy_score(
 
 
 def build_ai_payload(home_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    home_ref = db.reference(f"/homes/{home_id}")
     backend_ref = db.reference(f"/homes/{home_id}/backend")
 
     latest_summary = backend_ref.child("latest_hourly_summary").get()
@@ -120,6 +121,10 @@ def build_ai_payload(home_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     current_state = backend_ref.child("current_state").get()
     if not isinstance(current_state, dict):
         current_state = {}
+
+    occupancy = home_ref.child("occupancy/room1").get()
+    if not isinstance(occupancy, dict):
+        occupancy = {}
 
     energy = latest_summary.get("energy")
     if not isinstance(energy, dict):
@@ -143,6 +148,9 @@ def build_ai_payload(home_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         motion_count = 1.0 if dashboard_environment.get("motion") == 1 else 0.0
 
     light_is_bright = dashboard_environment.get("light_status") == "Bright"
+    occupancy_state = str(occupancy.get("state", "unknown"))
+    occupancy_empty = occupancy_state in {"empty", "probably_empty"}
+    derived_light_on = bool(occupancy.get("light_on")) or light_is_bright
     temperature = latest_summary.get("avg_temperature")
     humidity = latest_summary.get("avg_humidity")
     sound_raw = latest_summary.get("avg_sound_raw")
@@ -190,6 +198,21 @@ def build_ai_payload(home_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
             noise_count,
             sample_count,
         ),
+        "occupancy_state": occupancy_state,
+        "occupancy_confidence": as_number(occupancy.get("confidence")),
+        "occupied": bool(occupancy.get("occupied")),
+        "minutes_since_last_activity": as_number(occupancy.get("minutes_since_last_activity")),
+        "motion_recent": bool(occupancy.get("motion_recent")),
+        "sound_recent": bool(occupancy.get("sound_recent")),
+        "sound_active": bool(occupancy.get("sound_active")),
+        "light_on_while_empty": occupancy_empty and derived_light_on,
+        "device_on_while_empty": occupancy_empty
+        and as_number(energy.get("total_avg_power_W", energy.get("total_power_W"))) > 10,
+        "empty_room_power_w": (
+            as_number(energy.get("total_avg_power_W", energy.get("total_power_W")))
+            if occupancy_empty
+            else 0
+        ),
         "switch_avg_power_W": switch_branch["avg_power_W"],
         "switch_peak_power_W": switch_branch["peak_power_W"],
         "switch_energy_kWh": switch_branch["energy_kWh"],
@@ -217,6 +240,7 @@ def build_ai_payload(home_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         "dashboard_energy": dashboard_energy,
         "dashboard_environment": dashboard_environment,
         "current_state": current_state,
+        "occupancy": occupancy,
     }
 
     return payload, source
@@ -241,7 +265,7 @@ def make_control_suggestion(result: dict[str, Any], payload: dict[str, Any]) -> 
 
     if (
         waste_detected
-        and anomaly == "light_on_no_motion"
+        and anomaly in {"light_on_no_motion", "empty_room_power_active"}
         and payload.get("switch_avg_power_W", 0) > 0
     ):
         return {
@@ -249,7 +273,7 @@ def make_control_suggestion(result: dict[str, Any], payload: dict[str, Any]) -> 
             "action": "turn_off",
             "priority": "medium",
             "requires_user_approval": True,
-            "reason": "Switch Breaker is active while motion appears low.",
+            "reason": "Switch Breaker is active while the room appears empty.",
         }
 
     return None

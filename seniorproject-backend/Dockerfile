@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY main.py timestamp_utils.py ./
 COPY devices/models/smart_energy_ai.joblib devices/models/smart_energy_ai.joblib
 
 CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}

@@ -252,6 +252,7 @@ def latest():
                 "success": True,
                 "dashboard": data,
                 "room": data.get("room", {}),
+                "occupancy": data.get("occupancy", {}),
                 "devices": data.get("devices", {}),
                 "energy": data.get("energy", {}),
                 "alerts": data.get("alerts", []),

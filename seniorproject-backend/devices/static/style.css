@@ -169,6 +169,27 @@ h3 {
   border-color: #f1ce91;
 }
 
+.occupancy-card {
+  margin-bottom: 12px;
+}
+
+.occupancy-card span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.occupancy-card strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--green);
+  font-size: 24px;
+}
+
+.occupancy-card p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
 .sensor-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

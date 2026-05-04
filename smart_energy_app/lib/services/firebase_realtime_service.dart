@@ -24,6 +24,7 @@ class DashboardData {
   final List<ActionSuggestion> actionSuggestions;
   final List<AutomationLog> automationLogs;
   final Map<String, dynamic> settingsSummary;
+  final Map<String, dynamic> occupancy;
   final ScheduleInfo? nextSchedule;
   final String? scenarioId;
   final String? scenarioName;
@@ -51,6 +52,7 @@ class DashboardData {
     this.actionSuggestions = const [],
     this.automationLogs = const [],
     this.settingsSummary = const {},
+    this.occupancy = const {},
     this.nextSchedule,
     this.scenarioId,
     this.scenarioName,
@@ -72,8 +74,16 @@ class HomeSettings {
   double get highTempThreshold =>
       _asDoubleValue(values['high_temperature_threshold'], 28);
   int get lightWasteMinutes => _asIntValue(values['light_waste_minutes'], 5);
+  int get motionRecentSeconds =>
+      _asIntValue(values['motion_recent_seconds'], 90);
+  int get soundRecentSeconds =>
+      _asIntValue(values['sound_recent_seconds'], 120);
   int get occupancyEmptyMinutes =>
       _asIntValue(values['occupancy_empty_minutes'], 10);
+  double get soundActivityThreshold =>
+      _asDoubleValue(values['sound_activity_threshold'], 45);
+  double get occupancyConfidenceThreshold =>
+      _asDoubleValue(values['occupancy_confidence_threshold'], 0.65);
   int get deviceOfflineMinutes =>
       _asIntValue(values['device_offline_minutes'], 2);
   bool get quietHoursEnabled =>
@@ -503,6 +513,7 @@ class FirebaseRealtimeService {
       automationLogs: automationLogs.map(_parseAutomationLog).toList()
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
       settingsSummary: _asMap(data['settings_summary']),
+      occupancy: _asMap(data['occupancy']),
       nextSchedule: _parseOptionalSchedule(_asMap(data['next_schedule'])),
       scenarioId: null,
       scenarioName: null,
