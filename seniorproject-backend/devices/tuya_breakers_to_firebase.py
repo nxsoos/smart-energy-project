@@ -72,6 +72,16 @@ openapi.connect()
 # =========================================================
 # HELPERS
 # =========================================================
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on", "online"}
+    return False
+
+
 def normalize_status(result, online):
     timestamp_ms = now_ms()
     raw = {}
@@ -248,7 +258,7 @@ def fetch_breaker_online(device_id):
     if not response.get("success"):
         raise Exception(f"Tuya device read failed for {device_id}: {response}")
     result = response.get("result") or {}
-    return result.get("online") is True
+    return as_bool(result.get("online"))
 
 # =========================================================
 # MAIN LOOP

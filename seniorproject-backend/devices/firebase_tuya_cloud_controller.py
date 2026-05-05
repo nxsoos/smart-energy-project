@@ -87,6 +87,16 @@ def as_int(value: Any, default: int = 0) -> int:
     return default
 
 
+def as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on", "online"}
+    return False
+
+
 def readable_time() -> str:
     return ms_to_iso(now_ms()) or ""
 
@@ -249,7 +259,7 @@ def fetch_tuya_device_online(cloud, tuya_device_id: str) -> bool:
         raise RuntimeError(f"Tuya device read failed: {response}")
 
     result = response.get("result") or {}
-    return result.get("online") is True
+    return as_bool(result.get("online"))
 
 
 def ensure_tuya_device_powered(cloud, tuya_device_id: str) -> Dict[str, Any]:
