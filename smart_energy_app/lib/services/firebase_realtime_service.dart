@@ -6,6 +6,7 @@ import '../models/ai_insights.dart';
 import '../models/device.dart';
 import '../models/energy_reading.dart';
 import '../models/sensor_data.dart';
+import 'auth_service.dart';
 import '../utils/constants.dart';
 
 class DashboardData {
@@ -215,6 +216,20 @@ class DemoScenario {
   final String description;
 }
 
+class HomeMember {
+  const HomeMember({
+    required this.uid,
+    required this.email,
+    required this.displayName,
+    required this.role,
+  });
+
+  final String uid;
+  final String email;
+  final String displayName;
+  final String role;
+}
+
 class DeviceCommandState {
   const DeviceCommandState({
     required this.status,
@@ -275,7 +290,50 @@ class FirebaseRealtimeService {
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
         ),
-      );
+      ) {
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          final token = await AuthService().getIdToken();
+          if (token != null && token.isNotEmpty) {
+            options.headers['Authorization'] = 'Bearer $token';
+          }
+          handler.next(options);
+        },
+        onError: (error, handler) async {
+          if (error.response?.statusCode == 401) {
+            await AuthService().signOut();
+          }
+          if (error.response?.statusCode == 403) {
+            handler.reject(
+              DioException(
+                requestOptions: error.requestOptions,
+                response: error.response,
+                type: error.type,
+                error: 'You do not have permission to perform this action.',
+              ),
+            );
+            return;
+          }
+          handler.next(error);
+        },
+      ),
+    );
+    _firebaseDio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          final token = await AuthService().getIdToken();
+          if (token != null && token.isNotEmpty) {
+            options.queryParameters = {
+              ...options.queryParameters,
+              'auth': token,
+            };
+          }
+          handler.next(options);
+        },
+      ),
+    );
+  }
 
   final Dio _dio;
   final Dio _firebaseDio;
@@ -936,6 +994,40 @@ class FirebaseRealtimeService {
     );
   }
 
+  Future<List<HomeMember>> fetchMembers({required String homeId}) async {
+    final response = await _dio.get('/api/home/$homeId/members');
+    return _asList(_asMap(response.data)['members']).map(_parseMember).toList();
+  }
+
+  Future<void> addMember({
+    required String homeId,
+    required String email,
+    required String role,
+  }) async {
+    await _dio.post(
+      '/api/home/$homeId/members',
+      data: {'email': email, 'role': role},
+    );
+  }
+
+  Future<void> updateMemberRole({
+    required String homeId,
+    required String uid,
+    required String role,
+  }) async {
+    await _dio.put(
+      '/api/home/$homeId/members/$uid/role',
+      data: {'role': role},
+    );
+  }
+
+  Future<void> removeMember({
+    required String homeId,
+    required String uid,
+  }) async {
+    await _dio.delete('/api/home/$homeId/members/$uid');
+  }
+
   Future<Map<String, dynamic>> turnOffSafeDevices({
     required String homeId,
   }) async {
@@ -1461,6 +1553,18 @@ class FirebaseRealtimeService {
       nextRunAt: _parseOptionalDateTime(
         _pick(data, ['next_run_at_ms', 'next_run_at_iso']),
       ),
+    );
+  }
+
+  HomeMember _parseMember(Map<String, dynamic> data) {
+    return HomeMember(
+      uid: _asString(_pick(data, ['uid', 'id'])),
+      email: _asString(_pick(data, ['email'])),
+      displayName: _asString(
+        _pick(data, ['display_name', 'displayName']),
+        fallback: 'User',
+      ),
+      role: _asString(_pick(data, ['role']), fallback: 'viewer'),
     );
   }
 

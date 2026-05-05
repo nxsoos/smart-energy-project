@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import hmac
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import firebase_admin
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from firebase_admin import credentials, db, messaging
+from firebase_admin import auth, credentials, db, messaging
 from pydantic import BaseModel, Field
 
 from occupancy_utils import DEFAULT_OCCUPANCY_SETTINGS
@@ -287,6 +290,73 @@ class ScheduleEnabledRequest(BaseModel):
     updated_by: str = "api"
 
 
+class ChatProxyRequest(BaseModel):
+    message: str
+    home_name: str | None = None
+    scenario_id: str | None = None
+    scenario_name: str | None = None
+    conversation_history: list[dict[str, Any]] | None = None
+
+
+class SignupProfileRequest(BaseModel):
+    display_name: str
+    home_id: str = DEFAULT_HOME_ID
+
+
+class MemberCreateRequest(BaseModel):
+    email: str
+    role: str = "member"
+
+
+class MemberRoleUpdateRequest(BaseModel):
+    role: str
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    actor_type: str
+    actor_id: str
+    actor_role: str
+    permissions: dict[str, bool]
+    uid: str | None = None
+    email: str | None = None
+    claims: dict[str, Any] | None = None
+
+
+ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
+    "admin": {
+        "can_view": True,
+        "can_control_devices": True,
+        "can_change_settings": True,
+        "can_manage_users": True,
+        "can_manage_schedules": True,
+        "can_change_control_mode": True,
+        "can_use_ai_chat": True,
+        "can_acknowledge_alerts": True,
+    },
+    "member": {
+        "can_view": True,
+        "can_control_devices": True,
+        "can_change_settings": False,
+        "can_manage_users": False,
+        "can_manage_schedules": True,
+        "can_change_control_mode": False,
+        "can_use_ai_chat": True,
+        "can_acknowledge_alerts": True,
+    },
+    "viewer": {
+        "can_view": True,
+        "can_control_devices": False,
+        "can_change_settings": False,
+        "can_manage_users": False,
+        "can_manage_schedules": False,
+        "can_change_control_mode": False,
+        "can_use_ai_chat": False,
+        "can_acknowledge_alerts": False,
+    },
+}
+
+
 def iso_from_ms(timestamp_ms: Any) -> str | None:
     return ms_to_iso(timestamp_ms)
 
@@ -343,6 +413,320 @@ def safe_update(path: str, value: dict[str, Any]) -> None:
             status_code=502,
             detail=f"Failed to update Firebase path {path}: {error}",
         ) from error
+
+
+def get_permissions_for_role(role: str) -> dict[str, bool]:
+    normalized = role.strip().lower()
+    if normalized not in ROLE_PERMISSIONS:
+        raise HTTPException(status_code=400, detail="Invalid role.")
+    return dict(ROLE_PERMISSIONS[normalized])
+
+
+def validate_role(role: str) -> str:
+    normalized = role.strip().lower()
+    if normalized not in ROLE_PERMISSIONS:
+        raise HTTPException(status_code=400, detail="Role must be admin, member, or viewer.")
+    return normalized
+
+
+def hash_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def secret_matches(secret: str, expected: str | None) -> bool:
+    if not secret or not expected:
+        return False
+    expected_text = str(expected)
+    candidate_hash = hash_secret(secret)
+    return hmac.compare_digest(secret, expected_text) or hmac.compare_digest(
+        candidate_hash,
+        expected_text,
+    )
+
+
+def bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
+
+
+def audit_log(
+    home_id: str,
+    actor: AuthContext | None,
+    action: str,
+    resource_type: str,
+    resource_id: str | None = None,
+    details: dict[str, Any] | None = None,
+    result: str = "success",
+) -> None:
+    timestamp_ms = now_ms()
+    audit_id = f"audit_{timestamp_ms}"
+    try:
+        safe_set(
+            f"/homes/{home_id}/audit_logs/{audit_id}",
+            {
+                "audit_id": audit_id,
+                "home_id": home_id,
+                "actor_type": actor.actor_type if actor else "service",
+                "actor_id": actor.actor_id if actor else SERVICE_NAME,
+                "actor_role": actor.actor_role if actor else "service",
+                "action": action,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "details": details or {},
+                "result": result,
+                "created_at_ms": timestamp_ms,
+                "created_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+    except Exception:
+        return
+
+
+def user_has_permission(uid: str, home_id: str, permission: str) -> bool:
+    member = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
+    role = validate_role(str(member.get("role", "viewer"))) if member else "viewer"
+    permissions = {**get_permissions_for_role(role), **as_dict(member.get("permissions"))}
+    return permissions.get(permission) is True
+
+
+def home_exists(home_id: str) -> bool:
+    return safe_get(f"/homes/{home_id}") is not None
+
+
+def authenticate_user_token(token: str) -> AuthContext:
+    try:
+        decoded = auth.verify_id_token(token)
+    except Exception as error:
+        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.") from error
+
+    uid = str(decoded.get("uid") or "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.")
+    profile = as_dict(safe_get(f"/users/{uid}", {}))
+    if not profile:
+        raise HTTPException(status_code=403, detail="User profile does not exist.")
+    return AuthContext(
+        actor_type="user",
+        actor_id=uid,
+        actor_role="user",
+        uid=uid,
+        email=str(decoded.get("email") or profile.get("email") or ""),
+        claims=decoded,
+        permissions={},
+    )
+
+
+def authenticate_trusted_device(home_id: str, device_token: str) -> AuthContext:
+    trusted_devices = as_dict(safe_get(f"/homes/{home_id}/trusted_devices", {}))
+    for device_id, raw_device in trusted_devices.items():
+        device = as_dict(raw_device)
+        if device.get("active") is not True:
+            continue
+        expected = device.get("token_hash") or device.get("api_key_hash")
+        if secret_matches(device_token, str(expected or "")):
+            safe_update(
+                f"/homes/{home_id}/trusted_devices/{device_id}",
+                {"last_seen_at_ms": now_ms(), "last_seen_at_iso": iso_from_ms(now_ms())},
+            )
+            return AuthContext(
+                actor_type="trusted_device",
+                actor_id=str(device.get("device_id") or device_id),
+                actor_role=str(device.get("device_type") or "trusted_device"),
+                permissions={key: bool(value) for key, value in as_dict(device.get("permissions")).items()},
+            )
+
+    fallback_token = os.environ.get("PI_DASHBOARD_TOKEN", "")
+    if secret_matches(device_token, fallback_token):
+        return AuthContext(
+            actor_type="trusted_device",
+            actor_id="pi_dashboard_01",
+            actor_role="pi_dashboard",
+            permissions={
+                "can_view": True,
+                "can_control_devices": True,
+                "can_change_settings": False,
+                "can_manage_schedules": True,
+                "can_change_control_mode": False,
+                "can_acknowledge_alerts": True,
+            },
+        )
+    raise HTTPException(status_code=401, detail="Invalid trusted device token.")
+
+
+def authenticate_service_token(service_token: str) -> AuthContext:
+    expected = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
+    if not secret_matches(service_token, expected):
+        raise HTTPException(status_code=401, detail="Invalid internal service token.")
+    return AuthContext(
+        actor_type="service",
+        actor_id=SERVICE_NAME,
+        actor_role="service",
+        permissions={permission: True for permissions in ROLE_PERMISSIONS.values() for permission in permissions},
+    )
+
+
+def require_authenticated_user(
+    authorization: str | None = Header(default=None),
+) -> AuthContext:
+    token = bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Authorization bearer token.")
+    return authenticate_user_token(token)
+
+
+def require_permission(home_id: str, permission: str):
+    return require_home_permission(permission)
+
+
+def require_home_permission(permission: str):
+    def dependency(
+        home_id: str,
+        authorization: str | None = Header(default=None),
+        x_device_token: str | None = Header(default=None),
+        x_service_token: str | None = Header(default=None),
+    ) -> AuthContext:
+        if not home_exists(home_id):
+            raise HTTPException(status_code=404, detail="Home does not exist.")
+
+        token = bearer_token(authorization)
+        actor: AuthContext
+        if token:
+            actor = authenticate_user_token(token)
+            member = as_dict(safe_get(f"/homes/{home_id}/members/{actor.uid}", {}))
+            if not member:
+                audit_log(home_id, actor, "permission_check_failed", "home", home_id, {"permission": permission}, "denied")
+                raise HTTPException(status_code=403, detail="User is not a member of this home.")
+            role = validate_role(str(member.get("role", "viewer")))
+            permissions = {**get_permissions_for_role(role), **as_dict(member.get("permissions"))}
+            actor = AuthContext(
+                actor_type=actor.actor_type,
+                actor_id=actor.actor_id,
+                actor_role=role,
+                uid=actor.uid,
+                email=actor.email,
+                claims=actor.claims,
+                permissions=permissions,
+            )
+        elif x_device_token:
+            actor = authenticate_trusted_device(home_id, x_device_token)
+        elif x_service_token:
+            actor = authenticate_service_token(x_service_token)
+        else:
+            raise HTTPException(status_code=401, detail="Authentication token is required.")
+
+        if actor.permissions.get(permission) is not True:
+            audit_log(home_id, actor, "permission_check_failed", "home", home_id, {"permission": permission}, "denied")
+            raise HTTPException(status_code=403, detail="You do not have permission to perform this action.")
+        return actor
+
+    return dependency
+
+
+def require_home_role(required_role: str):
+    def dependency(actor: AuthContext = Depends(require_home_permission("can_view"))) -> AuthContext:
+        if actor.actor_role != required_role and actor.actor_type != "service":
+            raise HTTPException(status_code=403, detail="Admin role is required.")
+        return actor
+
+    return dependency
+
+
+def admin_count(home_id: str) -> int:
+    members = as_dict(safe_get(f"/homes/{home_id}/members", {}))
+    return sum(1 for member in members.values() if as_dict(member).get("role") == "admin")
+
+
+def member_record(uid: str, email: str, display_name: str, role: str) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    permissions = get_permissions_for_role(role)
+    return {
+        "uid": uid,
+        "email": email,
+        "display_name": display_name,
+        "role": role,
+        "permissions": permissions,
+        "added_at_ms": timestamp_ms,
+        "added_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+
+
+@app.post("/api/auth/complete-signup")
+def complete_signup_profile(
+    request: SignupProfileRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    token = bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Authorization bearer token.")
+    try:
+        decoded = auth.verify_id_token(token)
+    except Exception as error:
+        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.") from error
+
+    uid = str(decoded.get("uid") or "")
+    email = str(decoded.get("email") or "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.")
+    home_id = request.home_id.strip() or DEFAULT_HOME_ID
+    display_name = request.display_name.strip() or email or uid
+    existing_profile = as_dict(safe_get(f"/users/{uid}", {}))
+    existing_member = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
+    if existing_profile and existing_member:
+        return {
+            "success": True,
+            "home_id": home_id,
+            "uid": uid,
+            "role": existing_member.get("role", "viewer"),
+            "created": False,
+        }
+
+    role = "admin" if admin_count(home_id) == 0 else "viewer"
+    timestamp_ms = now_ms()
+    timestamp_iso = iso_from_ms(timestamp_ms)
+    permissions = get_permissions_for_role(role)
+    profile = {
+        "uid": uid,
+        "email": email,
+        "display_name": display_name,
+        "default_home_id": existing_profile.get("default_home_id") or home_id,
+        "homes": {
+            **as_dict(existing_profile.get("homes")),
+            home_id: {"role": role, **permissions},
+        },
+        "created_at_ms": existing_profile.get("created_at_ms") or timestamp_ms,
+        "created_at_iso": existing_profile.get("created_at_iso") or timestamp_iso,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": timestamp_iso,
+    }
+    member = {
+        "uid": uid,
+        "email": email,
+        "display_name": display_name,
+        "role": role,
+        "permissions": permissions,
+        "added_at_ms": timestamp_ms,
+        "added_at_iso": timestamp_iso,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": timestamp_iso,
+    }
+    safe_set(f"/users/{uid}", profile)
+    safe_set(f"/homes/{home_id}/members/{uid}", member)
+    actor = AuthContext("user", uid, role, permissions, uid=uid, email=email)
+    audit_log(
+        home_id,
+        actor,
+        "signup_profile_created",
+        "user",
+        uid,
+        {"email": email, "first_admin": role == "admin"},
+    )
+    return {"success": True, "home_id": home_id, "uid": uid, "role": role, "created": True}
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -1471,7 +1855,7 @@ def health() -> dict[str, Any]:
     }
 
 
-@app.get("/api/home/{home_id}/dashboard")
+@app.get("/api/home/{home_id}/dashboard", dependencies=[Depends(require_home_permission("can_view"))])
 def get_dashboard(home_id: str) -> dict[str, Any]:
     resolve_smoke_emergency_if_clear(home_id)
     bundle = read_home_bundle(home_id)
@@ -1532,13 +1916,13 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     }
 
 
-@app.get("/api/home/{home_id}/settings")
+@app.get("/api/home/{home_id}/settings", dependencies=[Depends(require_home_permission("can_view"))])
 def get_settings(home_id: str) -> dict[str, Any]:
     settings = ensure_settings(home_id)
     return {"home_id": home_id, "settings": settings, "options": SETTINGS_OPTIONS}
 
 
-@app.put("/api/home/{home_id}/settings")
+@app.put("/api/home/{home_id}/settings", dependencies=[Depends(require_home_permission("can_change_settings"))])
 def update_settings(home_id: str, request: SettingsUpdateRequest) -> dict[str, Any]:
     previous = ensure_settings(home_id)
     updates = request.dict(exclude_unset=True)
@@ -1583,12 +1967,12 @@ def update_settings(home_id: str, request: SettingsUpdateRequest) -> dict[str, A
     return {"home_id": home_id, "settings": merged, "options": SETTINGS_OPTIONS}
 
 
-@app.get("/api/home/{home_id}/control")
+@app.get("/api/home/{home_id}/control", dependencies=[Depends(require_home_permission("can_view"))])
 def get_control(home_id: str) -> dict[str, Any]:
     return control_response(home_id, ensure_control(home_id))
 
 
-@app.put("/api/home/{home_id}/control/mode")
+@app.put("/api/home/{home_id}/control/mode", dependencies=[Depends(require_home_permission("can_change_control_mode"))])
 def update_control_mode(
     home_id: str,
     request: ControlModeUpdateRequest,
@@ -1630,7 +2014,7 @@ def update_control_mode(
     }
 
 
-@app.get("/api/home/{home_id}/schedules")
+@app.get("/api/home/{home_id}/schedules", dependencies=[Depends(require_home_permission("can_view"))])
 def get_schedules(home_id: str) -> dict[str, Any]:
     schedules = [
         item for item in object_to_list(safe_get(f"/homes/{home_id}/schedules", {}))
@@ -1646,7 +2030,7 @@ def get_schedules(home_id: str) -> dict[str, Any]:
     return {"home_id": home_id, "count": len(schedules), "schedules": schedules}
 
 
-@app.post("/api/home/{home_id}/schedules")
+@app.post("/api/home/{home_id}/schedules", dependencies=[Depends(require_home_permission("can_manage_schedules"))])
 def create_schedule(home_id: str, request: ScheduleCreateRequest) -> dict[str, Any]:
     timestamp_ms = now_ms()
     schedule_id = f"sch_{timestamp_ms}"
@@ -1671,7 +2055,7 @@ def create_schedule(home_id: str, request: ScheduleCreateRequest) -> dict[str, A
     return {"home_id": home_id, "schedule": schedule}
 
 
-@app.put("/api/home/{home_id}/schedules/{schedule_id}")
+@app.put("/api/home/{home_id}/schedules/{schedule_id}", dependencies=[Depends(require_home_permission("can_manage_schedules"))])
 def update_schedule(
     home_id: str,
     schedule_id: str,
@@ -1701,7 +2085,7 @@ def update_schedule(
     return {"home_id": home_id, "schedule": updated}
 
 
-@app.patch("/api/home/{home_id}/schedules/{schedule_id}/enabled")
+@app.patch("/api/home/{home_id}/schedules/{schedule_id}/enabled", dependencies=[Depends(require_home_permission("can_manage_schedules"))])
 def set_schedule_enabled(
     home_id: str,
     schedule_id: str,
@@ -1732,7 +2116,7 @@ def set_schedule_enabled(
     return {"home_id": home_id, "schedule": updated}
 
 
-@app.delete("/api/home/{home_id}/schedules/{schedule_id}")
+@app.delete("/api/home/{home_id}/schedules/{schedule_id}", dependencies=[Depends(require_home_permission("can_manage_schedules"))])
 def delete_schedule(home_id: str, schedule_id: str, deleted_by: str = "api") -> dict[str, Any]:
     previous = as_dict(safe_get(f"/homes/{home_id}/schedules/{schedule_id}", {}))
     if not previous or previous.get("deleted") is True:
@@ -1861,12 +2245,12 @@ def run_schedule(home_id: str, schedule_id: str, manual: bool = False) -> dict[s
     }
 
 
-@app.post("/api/home/{home_id}/schedules/{schedule_id}/run-now")
+@app.post("/api/home/{home_id}/schedules/{schedule_id}/run-now", dependencies=[Depends(require_home_permission("can_manage_schedules"))])
 def run_schedule_now(home_id: str, schedule_id: str) -> dict[str, Any]:
     return run_schedule(home_id, schedule_id, manual=True)
 
 
-@app.post("/api/home/{home_id}/schedules/run-due")
+@app.post("/api/home/{home_id}/schedules/run-due", dependencies=[Depends(require_home_permission("can_manage_schedules"))])
 def run_due_schedules(home_id: str) -> dict[str, Any]:
     now = now_ms()
     schedules = [
@@ -1892,7 +2276,7 @@ def run_due_schedules(home_id: str) -> dict[str, Any]:
     return {"home_id": home_id, "count": len(results), "results": results}
 
 
-@app.get("/api/home/{home_id}/action-suggestions/active")
+@app.get("/api/home/{home_id}/action-suggestions/active", dependencies=[Depends(require_home_permission("can_view"))])
 def get_active_action_suggestions(home_id: str) -> dict[str, Any]:
     suggestions = dedupe_action_suggestions(
         active_only(
@@ -1933,6 +2317,7 @@ def remove_matching_emergency_suggestions(home_id: str, suggestion: dict[str, An
 @app.post(
     "/api/home/{home_id}/action-suggestions/{suggestion_id}/approve",
     response_model=SuggestionDecisionResponse,
+    dependencies=[Depends(require_home_permission("can_control_devices"))],
 )
 def approve_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDecisionResponse:
     suggestion = read_waiting_suggestion(home_id, suggestion_id)
@@ -1981,6 +2366,7 @@ def approve_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
 @app.post(
     "/api/home/{home_id}/action-suggestions/{suggestion_id}/dismiss",
     response_model=SuggestionDecisionResponse,
+    dependencies=[Depends(require_home_permission("can_acknowledge_alerts"))],
 )
 def dismiss_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDecisionResponse:
     suggestion = as_dict(
@@ -2016,7 +2402,7 @@ def dismiss_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
     )
 
 
-@app.post("/api/home/{home_id}/safety/smoke/actions/turn-off-safe-devices")
+@app.post("/api/home/{home_id}/safety/smoke/actions/turn-off-safe-devices", dependencies=[Depends(require_home_permission("can_control_devices"))])
 def turn_off_safe_devices(home_id: str) -> dict[str, Any]:
     alert = as_dict(safe_get(f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}", {}))
     if not alert or alert.get("status") != "active":
@@ -2074,7 +2460,7 @@ def turn_off_safe_devices(home_id: str) -> dict[str, Any]:
     }
 
 
-@app.post("/api/home/{home_id}/safety/smoke/actions/mark-safe")
+@app.post("/api/home/{home_id}/safety/smoke/actions/mark-safe", dependencies=[Depends(require_home_permission("can_acknowledge_alerts"))])
 def mark_smoke_safe(home_id: str) -> dict[str, Any]:
     timestamp_ms = now_ms()
     if latest_smoke_is_clear_for(home_id):
@@ -2150,7 +2536,7 @@ def mark_smoke_safe(home_id: str) -> dict[str, Any]:
     return {"success": True, "resolved": True, "message": "Smoke/gas alert resolved and emergency mode disabled."}
 
 
-@app.post("/api/home/{home_id}/notifications/register-token")
+@app.post("/api/home/{home_id}/notifications/register-token", dependencies=[Depends(require_home_permission("can_view"))])
 def register_notification_token(home_id: str, request: NotificationTokenRequest) -> dict[str, Any]:
     timestamp_ms = now_ms()
     token_id = re.sub(r"[^A-Za-z0-9_-]", "_", request.token[-32:]) or f"token_{timestamp_ms}"
@@ -2170,7 +2556,7 @@ def register_notification_token(home_id: str, request: NotificationTokenRequest)
     return {"success": True, "home_id": home_id, "token_id": token_id}
 
 
-@app.post("/api/home/{home_id}/notifications/{notification_id}/read")
+@app.post("/api/home/{home_id}/notifications/{notification_id}/read", dependencies=[Depends(require_home_permission("can_view"))])
 def mark_notification_read(home_id: str, notification_id: str) -> dict[str, Any]:
     timestamp_ms = now_ms()
     safe_update(
@@ -2180,7 +2566,120 @@ def mark_notification_read(home_id: str, notification_id: str) -> dict[str, Any]
     return {"success": True, "home_id": home_id, "notification_id": notification_id}
 
 
-@app.get("/api/home/{home_id}/devices")
+@app.get("/api/home/{home_id}/members")
+def get_members(
+    home_id: str,
+    actor: AuthContext = Depends(require_home_permission("can_manage_users")),
+) -> dict[str, Any]:
+    members = object_to_list(safe_get(f"/homes/{home_id}/members", {}))
+    audit_log(home_id, actor, "members_listed", "home", home_id)
+    return {"success": True, "home_id": home_id, "count": len(members), "members": members}
+
+
+@app.post("/api/home/{home_id}/members")
+def add_member(
+    home_id: str,
+    request: MemberCreateRequest,
+    actor: AuthContext = Depends(require_home_permission("can_manage_users")),
+) -> dict[str, Any]:
+    role = validate_role(request.role)
+    email = request.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email is required.")
+
+    try:
+        user = auth.get_user_by_email(email)
+    except Exception:
+        timestamp_ms = now_ms()
+        invitation_id = re.sub(r"[^A-Za-z0-9_-]", "_", email)
+        safe_set(
+            f"/homes/{home_id}/invitations/{invitation_id}",
+            {
+                "email": email,
+                "role": role,
+                "status": "pending_signup",
+                "created_by": actor.actor_id,
+                "created_at_ms": timestamp_ms,
+                "created_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+        audit_log(home_id, actor, "member_invited_signup_required", "member", email, {"role": role})
+        return {
+            "success": True,
+            "home_id": home_id,
+            "status": "pending_signup",
+            "message": "User must sign up first. Invitation record created.",
+        }
+
+    uid = user.uid
+    profile = as_dict(safe_get(f"/users/{uid}", {}))
+    display_name = str(profile.get("display_name") or user.display_name or email)
+    record = member_record(uid, email, display_name, role)
+    safe_set(f"/homes/{home_id}/members/{uid}", record)
+    safe_update(
+        f"/users/{uid}",
+        {
+            "uid": uid,
+            "email": email,
+            "display_name": display_name,
+            "default_home_id": profile.get("default_home_id") or home_id,
+            "homes": {**as_dict(profile.get("homes")), home_id: {"role": role, **get_permissions_for_role(role)}},
+            "updated_at_ms": record["updated_at_ms"],
+            "updated_at_iso": record["updated_at_iso"],
+        },
+    )
+    audit_log(home_id, actor, "member_added", "member", uid, {"role": role})
+    return {"success": True, "home_id": home_id, "member": record}
+
+
+@app.put("/api/home/{home_id}/members/{uid}/role")
+def update_member_role(
+    home_id: str,
+    uid: str,
+    request: MemberRoleUpdateRequest,
+    actor: AuthContext = Depends(require_home_permission("can_manage_users")),
+) -> dict[str, Any]:
+    role = validate_role(request.role)
+    existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
+    if not existing:
+        raise HTTPException(status_code=404, detail="Member does not exist.")
+    if existing.get("role") == "admin" and role != "admin" and admin_count(home_id) <= 1:
+        raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
+
+    timestamp_ms = now_ms()
+    permissions = get_permissions_for_role(role)
+    update = {
+        "role": role,
+        "permissions": permissions,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(f"/homes/{home_id}/members/{uid}", update)
+    safe_update(f"/users/{uid}/homes/{home_id}", {"role": role, **permissions})
+    safe_update(f"/users/{uid}", {"updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+    audit_log(home_id, actor, "member_role_changed", "member", uid, {"role": role})
+    return {"success": True, "home_id": home_id, "uid": uid, "role": role, "permissions": permissions}
+
+
+@app.delete("/api/home/{home_id}/members/{uid}")
+def remove_member(
+    home_id: str,
+    uid: str,
+    actor: AuthContext = Depends(require_home_permission("can_manage_users")),
+) -> dict[str, Any]:
+    existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
+    if not existing:
+        raise HTTPException(status_code=404, detail="Member does not exist.")
+    if existing.get("role") == "admin" and admin_count(home_id) <= 1:
+        raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
+    safe_set(f"/homes/{home_id}/members/{uid}", None)
+    safe_set(f"/users/{uid}/homes/{home_id}", None)
+    safe_update(f"/users/{uid}", {"updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
+    audit_log(home_id, actor, "member_removed", "member", uid)
+    return {"success": True, "home_id": home_id, "uid": uid}
+
+
+@app.get("/api/home/{home_id}/devices", dependencies=[Depends(require_home_permission("can_view"))])
 def get_devices(home_id: str) -> dict[str, Any]:
     bundle = read_home_bundle(home_id)
     devices = build_devices(bundle, home_id)
@@ -2191,7 +2690,7 @@ def get_devices(home_id: str) -> dict[str, Any]:
     }
 
 
-@app.get("/api/home/{home_id}/alerts/active")
+@app.get("/api/home/{home_id}/alerts/active", dependencies=[Depends(require_home_permission("can_view"))])
 def get_active_alerts(home_id: str) -> dict[str, Any]:
     bundle = read_home_bundle(home_id)
     alerts = active_only(
@@ -2201,7 +2700,32 @@ def get_active_alerts(home_id: str) -> dict[str, Any]:
     return {"home_id": home_id, "count": len(alerts), "alerts": alerts}
 
 
-@app.get("/api/home/{home_id}/recommendations/active")
+@app.post("/api/home/{home_id}/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(
+    home_id: str,
+    alert_id: str,
+    actor: AuthContext = Depends(require_home_permission("can_acknowledge_alerts")),
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    alert = as_dict(safe_get(f"/homes/{home_id}/alerts/active/{alert_id}", {}))
+    if not alert:
+        alert = as_dict(safe_get(f"/homes/{home_id}/backend/active_alerts/{alert_id}", {}))
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert does not exist.")
+    update = {
+        "acknowledged": True,
+        "acknowledged_by": actor.actor_id,
+        "acknowledged_at_ms": timestamp_ms,
+        "acknowledged_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(f"/homes/{home_id}/alerts/active/{alert_id}", update)
+    audit_log(home_id, actor, "alert_acknowledged", "alert", alert_id)
+    return {"success": True, "home_id": home_id, "alert_id": alert_id}
+
+
+@app.get("/api/home/{home_id}/recommendations/active", dependencies=[Depends(require_home_permission("can_view"))])
 def get_active_recommendations(home_id: str) -> dict[str, Any]:
     bundle = read_home_bundle(home_id)
     recommendations = active_only(
@@ -2218,6 +2742,7 @@ def get_active_recommendations(home_id: str) -> dict[str, Any]:
 @app.post(
     "/api/home/{home_id}/devices/{device_id}/command",
     response_model=DeviceCommandResponse,
+    dependencies=[Depends(require_home_permission("can_control_devices"))],
 )
 def create_device_command(
     home_id: str,
@@ -2456,7 +2981,41 @@ def create_device_command(
     )
 
 
-@app.post("/api/home/{home_id}/ai/predict")
+@app.post("/api/home/{home_id}/chat", dependencies=[Depends(require_home_permission("can_use_ai_chat"))])
+def chat_with_ai(home_id: str, request: ChatProxyRequest) -> dict[str, Any]:
+    ai_service_url = os.environ.get("AI_SERVICE_URL", "").strip().rstrip("/")
+    if not ai_service_url:
+        raise HTTPException(status_code=503, detail="AI_SERVICE_URL is not configured.")
+    payload = {
+        "message": request.message,
+        "home_id": home_id,
+        "home_name": request.home_name,
+        "scenario_id": request.scenario_id,
+        "scenario_name": request.scenario_name,
+        "conversation_history": request.conversation_history or [],
+    }
+    headers = {}
+    internal_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
+    if internal_token:
+        headers["X-Service-Token"] = internal_token
+    try:
+        response = requests.post(
+            f"{ai_service_url}/chat/{home_id}",
+            json=payload,
+            headers=headers,
+            timeout=45,
+        )
+        data = response.json() if response.content else {}
+        if not response.ok:
+            raise HTTPException(status_code=response.status_code, detail=data)
+        return data
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"AI chat request failed: {error}") from error
+
+
+@app.post("/api/home/{home_id}/ai/predict", dependencies=[Depends(require_home_role("admin"))])
 def trigger_ai_prediction(home_id: str) -> dict[str, Any]:
     ai_service_url = os.environ.get("AI_SERVICE_URL", "").strip().rstrip("/")
     if not ai_service_url:
@@ -2467,7 +3026,11 @@ def trigger_ai_prediction(home_id: str) -> dict[str, Any]:
         }
 
     try:
-        response = requests.post(f"{ai_service_url}/predict/{home_id}", timeout=30)
+        headers = {}
+        internal_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
+        if internal_token:
+            headers["X-Service-Token"] = internal_token
+        response = requests.post(f"{ai_service_url}/predict/{home_id}", headers=headers, timeout=30)
         payload = response.json() if response.content else {}
         return {
             "success": response.ok,
@@ -2485,6 +3048,7 @@ def trigger_ai_prediction(home_id: str) -> dict[str, Any]:
 @app.post(
     "/api/home/{home_id}/scenarios/{scenario_id}/run",
     response_model=ScenarioRunResponse,
+    dependencies=[Depends(require_home_role("admin"))],
 )
 def run_scenario(home_id: str, scenario_id: str) -> ScenarioRunResponse:
     timestamp_ms = now_ms()

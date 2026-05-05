@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
+import 'services/auth_service.dart';
 import 'services/firebase_realtime_service.dart';
 import 'utils/constants.dart';
 
@@ -23,11 +26,13 @@ Future<void> _registerPushNotifications() async {
   if (token == null || token.isEmpty) {
     return;
   }
-  await FirebaseRealtimeService().registerNotificationToken(
-    homeId: NetworkConfig.firebaseHomeId,
-    token: token,
-    platform: 'android',
-  );
+  if (FirebaseAuth.instance.currentUser != null) {
+    await FirebaseRealtimeService().registerNotificationToken(
+      homeId: NetworkConfig.firebaseHomeId,
+      token: token,
+      platform: 'android',
+    );
+  }
 }
 
 class SmartEnergyApp extends StatelessWidget {
@@ -62,7 +67,31 @@ class SmartEnergyApp extends StatelessWidget {
           ),
         ),
       ),
-      home: HomeScreen(enableRealtimeSync: enableRealtimeSync),
+      home: AuthGate(enableRealtimeSync: enableRealtimeSync),
+    );
+  }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key, required this.enableRealtimeSync});
+
+  final bool enableRealtimeSync;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: AuthService().authStateChanges,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (!snapshot.hasData) {
+          return const AuthScreen();
+        }
+        return HomeScreen(enableRealtimeSync: enableRealtimeSync);
+      },
     );
   }
 }

@@ -1,0 +1,54 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid && !data.exists()",
+        "homes": {
+          "$home_id": {
+            ".validate": "newData.hasChildren(['role', 'can_view'])"
+          }
+        }
+      }
+    },
+    "homes": {
+      "$home_id": {
+        ".read": "auth != null && root.child('homes').child($home_id).child('members').child(auth.uid).exists()",
+        ".write": false,
+        "members": {
+          "$uid": {
+            ".read": "auth != null && (auth.uid == $uid || root.child('homes').child($home_id).child('members').child(auth.uid).child('permissions').child('can_manage_users').val() == true)",
+            ".write": "auth != null && auth.uid == $uid && !data.exists()"
+          }
+        },
+        "audit_logs": {
+          "$audit_id": {
+            ".read": "auth != null && root.child('homes').child($home_id).child('members').child(auth.uid).child('permissions').child('can_manage_users').val() == true",
+            ".write": false
+          }
+        },
+        "commands": {
+          ".write": false
+        },
+        "devices": {
+          ".write": false
+        },
+        "settings": {
+          ".write": false
+        },
+        "control": {
+          ".write": false
+        },
+        "schedules": {
+          ".write": false
+        },
+        "trusted_devices": {
+          ".read": false,
+          ".write": false
+        }
+      }
+    }
+  }
+}

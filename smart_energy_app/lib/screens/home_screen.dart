@@ -9,8 +9,10 @@ import '../models/ai_insights.dart';
 import '../models/device.dart';
 import '../models/energy_reading.dart';
 import '../models/sensor_data.dart';
+import '../models/user_permissions.dart';
 import '../screens/ai_chatbot_screen.dart';
 import '../screens/sensors_status_screen.dart';
+import '../services/auth_service.dart';
 import '../services/firebase_realtime_service.dart';
 import '../widgets/metric_card.dart';
 import '../widgets/device_card.dart';
@@ -47,6 +49,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final FirebaseRealtimeService _firebaseRealtimeService =
       FirebaseRealtimeService();
+  final AuthService _authService = AuthService();
 
   late EnergyReading _currentReading;
   late SensorData _sensorData;
@@ -98,6 +101,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = false;
   String? _loadError;
   CancelToken? _activeRequestToken;
+  UserPermissions _permissions = UserPermissions.viewer;
 
   static const List<_HomeChoice> _homeChoices = [
     _HomeChoice(
@@ -128,6 +132,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _initializeEmptyData();
+    _loadPermissions();
     _sensorFreshnessTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) {
         return;
@@ -341,6 +346,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _toggleDevice(Device device, bool value) async {
+    if (!_permissions.canControlDevices) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You do not have permission to perform this action.'),
+        ),
+      );
+      return;
+    }
+
     if (!_deviceControlEnabled || _isDemoHome) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -412,7 +426,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(result.message)));
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
@@ -420,11 +434,11 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _pendingDeviceCommands.remove(deviceId);
         _deviceCommandErrors[deviceId] =
-            'Could not send command. Please try again.';
+            _friendlyActionError(error, 'Could not send command. Please try again.');
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not send device command.')),
+        SnackBar(content: Text(_deviceCommandErrors[deviceId]!)),
       );
     }
   }
@@ -573,6 +587,25 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  Future<void> _loadPermissions() async {
+    try {
+      final permissions = await _authService.loadPermissions(
+        homeId: _selectedHomeId,
+      );
+      if (mounted) {
+        setState(() {
+          _permissions = permissions;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _permissions = UserPermissions.viewer;
+        });
+      }
+    }
+  }
+
   Future<void> _refreshData({
     bool showErrorSnackBar = true,
     bool updateLoading = true,
@@ -633,7 +666,9 @@ class _HomeScreenState extends State<HomeScreen> {
         _activeScenarioName = dashboardData.scenarioName;
         _activeScenarioDescription = dashboardData.scenarioDescription;
         _deviceControlEnabled =
-            !_isDemoHome && dashboardData.deviceControlEnabled;
+            !_isDemoHome &&
+            dashboardData.deviceControlEnabled &&
+            _permissions.canControlDevices;
         _pendingDeviceCommands
           ..clear()
           ..addAll(dashboardData.pendingDeviceCommands);
@@ -787,6 +822,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _devices = const [];
     });
 
+    _loadPermissions();
     _refreshData(showErrorSnackBar: false);
     _startLiveSensorListener();
     _startAlertsListener();
@@ -810,14 +846,29 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showSettingsSheet() async {
+    if (!_permissions.canChangeSettings &&
+        !_permissions.canManageSchedules &&
+        !_permissions.canChangeControlMode) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You do not have permission to perform this action.'),
+        ),
+      );
+      return;
+    }
+
     final results = await Future.wait<dynamic>([
       _firebaseRealtimeService.fetchControlModes(homeId: _selectedHomeId),
       _firebaseRealtimeService.fetchSettings(homeId: _selectedHomeId),
       _firebaseRealtimeService.fetchSchedules(homeId: _selectedHomeId),
+      _permissions.canManageUsers
+          ? _firebaseRealtimeService.fetchMembers(homeId: _selectedHomeId)
+          : Future.value(<HomeMember>[]),
     ]);
     final options = results[0] as List<ControlModeOption>;
     var settings = results[1] as HomeSettings;
     var schedules = results[2] as List<ScheduleInfo>;
+    var members = results[3] as List<HomeMember>;
     if (!mounted) {
       return;
     }
@@ -903,146 +954,153 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Control Mode',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 10),
-                  ...options.map(
-                    (option) => _buildModeOptionTile(
-                      option: option,
-                      isSelected: option.mode == _controlMode.mode,
-                      isBusy: _isUpdatingControlMode,
-                      onSelected: () async {
-                        setSheetState(() {
-                          _isUpdatingControlMode = true;
-                        });
-                        await _changeControlMode(option.mode);
-                        if (!mounted) {
-                          return;
-                        }
-                        setSheetState(() {
-                          _isUpdatingControlMode = false;
-                        });
-                      },
+                  if (_permissions.canChangeControlMode) ...[
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Control Mode',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
                     ),
-                  ),
-                  const SizedBox(height: 18),
-                  const Text(
-                    'System Preferences',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 10),
-                  _buildNumberField(costController, 'Cost per kWh'),
-                  _buildNumberField(
-                    comfortMinController,
-                    'Comfort temperature min',
-                  ),
-                  _buildNumberField(
-                    comfortMaxController,
-                    'Comfort temperature max',
-                  ),
-                  _buildNumberField(
-                    highTempController,
-                    'High temperature threshold',
-                  ),
-                  _buildNumberField(
-                    lightWasteController,
-                    'Light waste delay minutes',
-                  ),
-                  _buildNumberField(
-                    motionRecentController,
-                    'Motion recent seconds',
-                  ),
-                  _buildNumberField(
-                    soundRecentController,
-                    'Sound recent seconds',
-                  ),
-                  _buildNumberField(
-                    occupancyController,
-                    'Occupancy empty delay minutes',
-                  ),
-                  _buildNumberField(
-                    soundThresholdController,
-                    'Sound activity threshold',
-                  ),
-                  _buildNumberField(
-                    occupancyConfidenceController,
-                    'Occupancy confidence threshold',
-                  ),
-                  _buildNumberField(
-                    offlineController,
-                    'Device offline delay minutes',
-                  ),
-                  SwitchListTile(
-                    value: quietEnabled,
-                    onChanged: (value) =>
-                        setSheetState(() => quietEnabled = value),
-                    title: const Text('Quiet hours'),
-                    subtitle: Text(
-                      '${settings.quietHoursStart} - ${settings.quietHoursEnd}',
-                    ),
-                  ),
-                  SwitchListTile(
-                    value: aiEnabled,
-                    onChanged: (value) =>
-                        setSheetState(() => aiEnabled = value),
-                    title: const Text('AI recommendations'),
-                  ),
-                  SwitchListTile(
-                    value: autoEnabled,
-                    onChanged: (value) =>
-                        setSheetState(() => autoEnabled = value),
-                    title: const Text('Auto control'),
-                  ),
-                  SwitchListTile(
-                    value: notificationsEnabled,
-                    onChanged: (value) =>
-                        setSheetState(() => notificationsEnabled = value),
-                    title: const Text('Notifications'),
-                  ),
-                  SwitchListTile(
-                    value: schedulesEnabled,
-                    onChanged: (value) =>
-                        setSheetState(() => schedulesEnabled = value),
-                    title: const Text('Schedules'),
-                  ),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: () async {
-                        final updated = await _saveSettings(
-                          costController: costController,
-                          comfortMinController: comfortMinController,
-                          comfortMaxController: comfortMaxController,
-                          highTempController: highTempController,
-                          lightWasteController: lightWasteController,
-                          motionRecentController: motionRecentController,
-                          soundRecentController: soundRecentController,
-                          occupancyController: occupancyController,
-                          soundThresholdController: soundThresholdController,
-                          occupancyConfidenceController:
-                              occupancyConfidenceController,
-                          offlineController: offlineController,
-                          quietEnabled: quietEnabled,
-                          aiEnabled: aiEnabled,
-                          autoEnabled: autoEnabled,
-                          notificationsEnabled: notificationsEnabled,
-                          schedulesEnabled: schedulesEnabled,
-                        );
-                        if (updated != null) {
+                    const SizedBox(height: 10),
+                    ...options.map(
+                      (option) => _buildModeOptionTile(
+                        option: option,
+                        isSelected: option.mode == _controlMode.mode,
+                        isBusy: _isUpdatingControlMode,
+                        onSelected: () async {
                           setSheetState(() {
-                            settings = updated;
+                            _isUpdatingControlMode = true;
                           });
-                        }
-                      },
-                      icon: const Icon(Icons.save_outlined),
-                      label: const Text('Save Preferences'),
+                          await _changeControlMode(option.mode);
+                          if (!mounted) {
+                            return;
+                          }
+                          setSheetState(() {
+                            _isUpdatingControlMode = false;
+                          });
+                        },
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 18),
-                  Row(
+                  ],
+                  if (_permissions.canChangeSettings) ...[
+                    const SizedBox(height: 18),
+                    const Text(
+                      'System Preferences',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 10),
+                    _buildNumberField(costController, 'Cost per kWh'),
+                    _buildNumberField(
+                      comfortMinController,
+                      'Comfort temperature min',
+                    ),
+                    _buildNumberField(
+                      comfortMaxController,
+                      'Comfort temperature max',
+                    ),
+                    _buildNumberField(
+                      highTempController,
+                      'High temperature threshold',
+                    ),
+                    _buildNumberField(
+                      lightWasteController,
+                      'Light waste delay minutes',
+                    ),
+                    _buildNumberField(
+                      motionRecentController,
+                      'Motion recent seconds',
+                    ),
+                    _buildNumberField(
+                      soundRecentController,
+                      'Sound recent seconds',
+                    ),
+                    _buildNumberField(
+                      occupancyController,
+                      'Occupancy empty delay minutes',
+                    ),
+                    _buildNumberField(
+                      soundThresholdController,
+                      'Sound activity threshold',
+                    ),
+                    _buildNumberField(
+                      occupancyConfidenceController,
+                      'Occupancy confidence threshold',
+                    ),
+                    _buildNumberField(
+                      offlineController,
+                      'Device offline delay minutes',
+                    ),
+                    SwitchListTile(
+                      value: quietEnabled,
+                      onChanged: (value) =>
+                          setSheetState(() => quietEnabled = value),
+                      title: const Text('Quiet hours'),
+                      subtitle: Text(
+                        '${settings.quietHoursStart} - ${settings.quietHoursEnd}',
+                      ),
+                    ),
+                    SwitchListTile(
+                      value: aiEnabled,
+                      onChanged: (value) =>
+                          setSheetState(() => aiEnabled = value),
+                      title: const Text('AI recommendations'),
+                    ),
+                    SwitchListTile(
+                      value: autoEnabled,
+                      onChanged: (value) =>
+                          setSheetState(() => autoEnabled = value),
+                      title: const Text('Auto control'),
+                    ),
+                    SwitchListTile(
+                      value: notificationsEnabled,
+                      onChanged: (value) =>
+                          setSheetState(() => notificationsEnabled = value),
+                      title: const Text('Notifications'),
+                    ),
+                    SwitchListTile(
+                      value: schedulesEnabled,
+                      onChanged: (value) =>
+                          setSheetState(() => schedulesEnabled = value),
+                      title: const Text('Schedules'),
+                    ),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () async {
+                          final updated = await _saveSettings(
+                            costController: costController,
+                            comfortMinController: comfortMinController,
+                            comfortMaxController: comfortMaxController,
+                            highTempController: highTempController,
+                            lightWasteController: lightWasteController,
+                            motionRecentController: motionRecentController,
+                            soundRecentController: soundRecentController,
+                            occupancyController: occupancyController,
+                            soundThresholdController: soundThresholdController,
+                            occupancyConfidenceController:
+                                occupancyConfidenceController,
+                            offlineController: offlineController,
+                            quietEnabled: quietEnabled,
+                            aiEnabled: aiEnabled,
+                            autoEnabled: autoEnabled,
+                            notificationsEnabled: notificationsEnabled,
+                            schedulesEnabled: schedulesEnabled,
+                          );
+                          if (updated != null) {
+                            setSheetState(() {
+                              settings = updated;
+                            });
+                          }
+                        },
+                        icon: const Icon(Icons.save_outlined),
+                        label: const Text('Save Preferences'),
+                      ),
+                    ),
+                  ],
+                  if (_permissions.canManageSchedules) ...[
+                    const SizedBox(height: 18),
+                    Row(
                     children: [
                       const Expanded(
                         child: Text(
@@ -1071,49 +1129,104 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ],
                   ),
-                  ...schedules.map(
-                    (schedule) => _buildScheduleTile(
-                      schedule,
-                      onChanged: (enabled) async {
-                        await _firebaseRealtimeService.updateScheduleEnabled(
-                          homeId: _selectedHomeId,
-                          scheduleId: schedule.id,
-                          enabled: enabled,
-                        );
-                        final next = await _firebaseRealtimeService
-                            .fetchSchedules(homeId: _selectedHomeId);
-                        setSheetState(() => schedules = next);
-                        await _refreshData(
-                          showErrorSnackBar: false,
-                          updateLoading: false,
-                        );
-                      },
-                      onRunNow: () async {
-                        final message = await _firebaseRealtimeService
-                            .runScheduleNow(
-                              homeId: _selectedHomeId,
-                              scheduleId: schedule.id,
-                            );
-                        if (!mounted) {
-                          return;
-                        }
-                        _showSnackBarDeferred(SnackBar(content: Text(message)));
-                      },
-                      onDelete: () async {
-                        await _firebaseRealtimeService.deleteSchedule(
-                          homeId: _selectedHomeId,
-                          scheduleId: schedule.id,
-                        );
-                        final next = await _firebaseRealtimeService
-                            .fetchSchedules(homeId: _selectedHomeId);
-                        setSheetState(() => schedules = next);
-                        await _refreshData(
-                          showErrorSnackBar: false,
-                          updateLoading: false,
-                        );
-                      },
+                    ...schedules.map(
+                      (schedule) => _buildScheduleTile(
+                        schedule,
+                        onChanged: (enabled) async {
+                          await _firebaseRealtimeService.updateScheduleEnabled(
+                            homeId: _selectedHomeId,
+                            scheduleId: schedule.id,
+                            enabled: enabled,
+                          );
+                          final next = await _firebaseRealtimeService
+                              .fetchSchedules(homeId: _selectedHomeId);
+                          setSheetState(() => schedules = next);
+                          await _refreshData(
+                            showErrorSnackBar: false,
+                            updateLoading: false,
+                          );
+                        },
+                        onRunNow: () async {
+                          final message = await _firebaseRealtimeService
+                              .runScheduleNow(
+                                homeId: _selectedHomeId,
+                                scheduleId: schedule.id,
+                              );
+                          if (!mounted) {
+                            return;
+                          }
+                          _showSnackBarDeferred(
+                            SnackBar(content: Text(message)),
+                          );
+                        },
+                        onDelete: () async {
+                          await _firebaseRealtimeService.deleteSchedule(
+                            homeId: _selectedHomeId,
+                            scheduleId: schedule.id,
+                          );
+                          final next = await _firebaseRealtimeService
+                              .fetchSchedules(homeId: _selectedHomeId);
+                          setSheetState(() => schedules = next);
+                          await _refreshData(
+                            showErrorSnackBar: false,
+                            updateLoading: false,
+                          );
+                        },
+                      ),
                     ),
-                  ),
+                  ],
+                  if (_permissions.canManageUsers) ...[
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Members',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        TextButton.icon(
+                          onPressed: () async {
+                            final added = await _showAddMemberDialog();
+                            if (added == true) {
+                              final next = await _firebaseRealtimeService
+                                  .fetchMembers(homeId: _selectedHomeId);
+                              setSheetState(() => members = next);
+                            }
+                          },
+                          icon: const Icon(Icons.person_add_alt_1),
+                          label: const Text('Add'),
+                        ),
+                      ],
+                    ),
+                    ...members.map(
+                      (member) => _buildMemberTile(
+                        member,
+                        onRoleChanged: (role) async {
+                          await _firebaseRealtimeService.updateMemberRole(
+                            homeId: _selectedHomeId,
+                            uid: member.uid,
+                            role: role,
+                          );
+                          final next = await _firebaseRealtimeService
+                              .fetchMembers(homeId: _selectedHomeId);
+                          setSheetState(() => members = next);
+                        },
+                        onRemove: () async {
+                          await _firebaseRealtimeService.removeMember(
+                            homeId: _selectedHomeId,
+                            uid: member.uid,
+                          );
+                          final next = await _firebaseRealtimeService
+                              .fetchMembers(homeId: _selectedHomeId);
+                          setSheetState(() => members = next);
+                        },
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1364,6 +1477,64 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<bool?> _showAddMemberDialog() async {
+    final emailController = TextEditingController();
+    var role = 'member';
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Add Member'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(labelText: 'Email'),
+                ),
+                DropdownButtonFormField<String>(
+                  initialValue: role,
+                  decoration: const InputDecoration(labelText: 'Role'),
+                  items: const [
+                    DropdownMenuItem(value: 'admin', child: Text('Admin')),
+                    DropdownMenuItem(value: 'member', child: Text('Member')),
+                    DropdownMenuItem(value: 'viewer', child: Text('Viewer')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() => role = value);
+                    }
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  await _firebaseRealtimeService.addMember(
+                    homeId: _selectedHomeId,
+                    email: emailController.text.trim(),
+                    role: role,
+                  );
+                  if (context.mounted) {
+                    Navigator.pop(context, true);
+                  }
+                },
+                child: const Text('Add'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   String _formatTimeOfDay(TimeOfDay time) {
     return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   }
@@ -1430,9 +1601,30 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: AppColors.primary,
         elevation: 0,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.settings, color: Colors.white),
-            onPressed: _showSettingsSheet,
+          if (_permissions.canChangeSettings ||
+              _permissions.canManageSchedules ||
+              _permissions.canChangeControlMode)
+            IconButton(
+              icon: const Icon(Icons.settings, color: Colors.white),
+              onPressed: _showSettingsSheet,
+            ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.account_circle_outlined, color: Colors.white),
+            onSelected: (value) {
+              if (value == 'logout') {
+                _authService.signOut();
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                enabled: false,
+                child: Text('Role: ${_permissions.role}'),
+              ),
+              const PopupMenuItem(
+                value: 'logout',
+                child: Text('Logout'),
+              ),
+            ],
           ),
         ],
       ),
@@ -2116,10 +2308,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
-            IconButton(
-              icon: const Icon(Icons.settings),
-              onPressed: _showSettingsSheet,
-            ),
+            if (_permissions.canChangeSettings ||
+                _permissions.canManageSchedules ||
+                _permissions.canChangeControlMode)
+              IconButton(
+                icon: const Icon(Icons.settings),
+                onPressed: _showSettingsSheet,
+              ),
           ],
         ),
       ),
@@ -2151,6 +2346,18 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
+  }
+
+  String _friendlyActionError(Object error, String fallback) {
+    if (error is DioException) {
+      if (error.response?.statusCode == 403 || error.error?.toString().contains('permission') == true) {
+        return 'You do not have permission to perform this action.';
+      }
+      if (error.response?.statusCode == 401) {
+        return 'Your session expired. Please log in again.';
+      }
+    }
+    return fallback;
   }
 
   Widget _buildOccupancySummary() {
@@ -2250,6 +2457,48 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: const Icon(Icons.delete_outline),
               onPressed: onDelete,
               tooltip: 'Delete',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMemberTile(
+    HomeMember member, {
+    required ValueChanged<String> onRoleChanged,
+    required VoidCallback onRemove,
+  }) {
+    return Card(
+      elevation: 0,
+      child: ListTile(
+        leading: const Icon(Icons.person_outline),
+        title: Text(
+          member.displayName,
+          style: const TextStyle(fontWeight: FontWeight.w800),
+        ),
+        subtitle: Text(member.email),
+        trailing: Wrap(
+          spacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            DropdownButton<String>(
+              value: member.role,
+              items: const [
+                DropdownMenuItem(value: 'admin', child: Text('Admin')),
+                DropdownMenuItem(value: 'member', child: Text('Member')),
+                DropdownMenuItem(value: 'viewer', child: Text('Viewer')),
+              ],
+              onChanged: (value) {
+                if (value != null && value != member.role) {
+                  onRoleChanged(value);
+                }
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.person_remove_outlined),
+              onPressed: onRemove,
+              tooltip: 'Remove member',
             ),
           ],
         ),
@@ -2517,22 +2766,23 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ],
             const SizedBox(height: 12),
-            FilledButton.icon(
-              icon: const Icon(Icons.chat_bubble_outline),
-              label: const Text('Smart Energy Chatbot'),
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => AiChatbotScreen(
-                      homeId: _selectedHomeId,
-                      homeName: selectedHome.label,
-                      scenarioId: _isDemoHome ? _selectedScenarioId : null,
-                      scenarioName: _isDemoHome ? _activeScenarioName : null,
+            if (_permissions.canUseAiChat)
+              FilledButton.icon(
+                icon: const Icon(Icons.chat_bubble_outline),
+                label: const Text('Smart Energy Chatbot'),
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => AiChatbotScreen(
+                        homeId: _selectedHomeId,
+                        homeName: selectedHome.label,
+                        scenarioId: _isDemoHome ? _selectedScenarioId : null,
+                        scenarioName: _isDemoHome ? _activeScenarioName : null,
+                      ),
                     ),
-                  ),
-                );
-              },
-            ),
+                  );
+                },
+              ),
           ],
         ),
       ),

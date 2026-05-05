@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hmac
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import firebase_admin
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from firebase_admin import db
 
@@ -54,6 +55,16 @@ class ChatResponse(BaseModel):
     answer: str
     used_data: bool
     timestamp: int
+
+
+def require_internal_service_token(
+    x_service_token: str | None = Header(default=None),
+) -> None:
+    expected = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
+    if not expected:
+        return
+    if not x_service_token or not hmac.compare_digest(x_service_token, expected):
+        raise HTTPException(status_code=401, detail="Invalid internal service token.")
 
 
 def initialize_firebase() -> None:
@@ -1972,7 +1983,7 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok", service=SERVICE_NAME)
 
 
-@app.post("/chat/{home_id}", response_model=ChatResponse)
+@app.post("/chat/{home_id}", response_model=ChatResponse, dependencies=[Depends(require_internal_service_token)])
 def chat_home(home_id: str, request: ChatRequest) -> ChatResponse:
     user_message = request.message.strip()
     created_at = now_ms()
@@ -2027,12 +2038,12 @@ def chat_home(home_id: str, request: ChatRequest) -> ChatResponse:
     )
 
 
-@app.post("/predict")
+@app.post("/predict", dependencies=[Depends(require_internal_service_token)])
 def predict_default_home() -> dict[str, Any]:
     return predict_home(DEFAULT_HOME_ID)
 
 
-@app.post("/predict/{home_id}")
+@app.post("/predict/{home_id}", dependencies=[Depends(require_internal_service_token)])
 def predict_home(home_id: str) -> dict[str, Any]:
     payload, input_source = build_ai_payload(home_id)
     prediction = run_model(payload)
@@ -2041,7 +2052,7 @@ def predict_home(home_id: str) -> dict[str, Any]:
     return flatten_response(home_id, firebase_result, firebase_path_written)
 
 
-@app.post("/predict/{home_id}/scenario/{scenario_id}")
+@app.post("/predict/{home_id}/scenario/{scenario_id}", dependencies=[Depends(require_internal_service_token)])
 def predict_home_scenario(home_id: str, scenario_id: str) -> dict[str, Any]:
     if home_id != "home_test":
         raise HTTPException(

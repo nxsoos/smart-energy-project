@@ -9,17 +9,19 @@ from firebase_admin import credentials, db
 from flask import Flask, jsonify, render_template, request
 
 
-SERVICE_ACCOUNT_PATH = "serviceAccountKey.json"
-DATABASE_URL = (
+SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
+DATABASE_URL = os.environ.get(
+    "FIREBASE_DATABASE_URL",
     "https://seniorproject-energy-default-rtdb.asia-southeast1."
-    "firebasedatabase.app"
+    "firebasedatabase.app",
 )
 
-HOME_ID = "home_001"
+HOME_ID = os.environ.get("HOME_ID", "home_001")
 SMART_ENERGY_API_URL = os.environ.get(
     "SMART_ENERGY_API_URL",
     "https://smart-energy-api-qs7uzdqawq-as.a.run.app",
 ).rstrip("/")
+PI_DASHBOARD_TOKEN = os.environ.get("PI_DASHBOARD_TOKEN", "")
 ALLOWED_DEVICES = {"breaker_01", "breaker_02"}
 ALLOWED_ACTIONS = {"turn_on", "turn_off"}
 SENSOR_STALE_AFTER_MS = 2 * 60 * 1000
@@ -41,12 +43,8 @@ def initialize_firebase() -> None:
     )
 
 
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def command_id(now: datetime) -> str:
-    return f"cmd_{now.strftime('%Y%m%d_%H%M%S_%f')}"
+def api_headers() -> dict[str, str]:
+    return {"X-Device-Token": PI_DASHBOARD_TOKEN} if PI_DASHBOARD_TOKEN else {}
 
 
 def home_ref(path: str):
@@ -78,83 +76,6 @@ def active_only(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def local_firebase_dashboard(message: str) -> dict[str, Any]:
-    home = as_dict(db.reference(f"/homes/{HOME_ID}").get())
-    esp32 = as_dict(as_dict(home.get("devices")).get("esp32_01"))
-    live_devices = as_dict(home.get("devices"))
-    room = format_live_room(esp32) if esp32 else {}
-    devices = {
-        device_id: format_live_device(device_id, as_dict(device))
-        for device_id, device in live_devices.items()
-        if device_id.startswith("breaker_") or device_id == "esp32_01"
-    }
-    safety = as_dict(home.get("safety"))
-    alerts = active_only(object_to_list(as_dict(home.get("alerts")).get("active")))
-    data = {
-        "home_id": HOME_ID,
-        "fallback": True,
-        "fallback_message": message,
-        "room": room,
-        "occupancy": as_dict(as_dict(home.get("occupancy")).get("room1")),
-        "devices": devices,
-        "energy": as_dict(as_dict(home.get("backend")).get("energy")),
-        "alerts": alerts,
-        "critical_alerts": [
-            alert
-            for alert in alerts
-            if str(alert.get("severity", alert.get("level", ""))).lower() == "critical"
-            or str(alert.get("category", "")).lower() == "safety"
-        ],
-        "recommendations": active_only(object_to_list(as_dict(home.get("recommendations")).get("active"))),
-        "control": as_dict(home.get("control")),
-        "action_suggestions": active_only(object_to_list(as_dict(home.get("action_suggestions")).get("active"))),
-        "automation_logs": object_to_list(home.get("automation_logs"))[-10:],
-        "settings_summary": as_dict(home.get("settings_summary")),
-        "next_schedule": None,
-        "ai": {},
-        "safety": {
-            "emergency_mode": as_dict(safety.get("emergency_mode")),
-            "smoke_state": as_dict(safety.get("smoke_state")),
-        },
-    }
-    return data
-
-
-def dismiss_suggestion_locally(suggestion_id: str) -> dict[str, Any]:
-    suggestion = as_dict(home_ref(f"action_suggestions/active/{suggestion_id}").get())
-    if not suggestion:
-        return {"success": True, "message": "Action suggestion dismissed."}
-
-    timestamp_ms = int(time.time() * 1000)
-    dismissed = {
-        **suggestion,
-        "status": "dismissed",
-        "timestamp_ms": timestamp_ms,
-        "timestamp_iso": datetime.now(timezone.utc).isoformat(),
-        "dismissed_at_ms": timestamp_ms,
-        "dismissed_at_iso": datetime.now(timezone.utc).isoformat(),
-    }
-    home_ref(f"action_suggestions/history/{suggestion_id}").set(dismissed)
-
-    active = as_dict(home_ref("action_suggestions/active").get())
-    device_id = str(suggestion.get("device_id", ""))
-    command = str(suggestion.get("suggested_command", suggestion.get("command", "")))
-    reason = str(suggestion.get("reason", ""))
-    for active_id, raw_item in active.items():
-        item = as_dict(raw_item)
-        if (
-            active_id == suggestion_id
-            or (
-                str(item.get("device_id", "")) == device_id
-                and str(item.get("suggested_command", item.get("command", ""))) == command
-                and str(item.get("reason", "")) == reason
-            )
-        ):
-            home_ref(f"action_suggestions/active/{active_id}").delete()
-
-    return {"success": True, "message": "Action suggestion dismissed."}
-
-
 def normalize_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -162,7 +83,7 @@ def normalize_bool(value: Any) -> bool | None:
         return value != 0
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in {"true", "1", "on", "yes", "motion", "detected"}:
+        if normalized in {"true", "1", "on", "yes", "motion", "detected", "smoke", "gas"}:
             return True
         if normalized in {"false", "0", "off", "no", "no motion", "clear"}:
             return False
@@ -303,6 +224,82 @@ def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def local_firebase_dashboard(message: str) -> dict[str, Any]:
+    home = as_dict(db.reference(f"/homes/{HOME_ID}").get())
+    esp32 = as_dict(as_dict(home.get("devices")).get("esp32_01"))
+    live_devices = as_dict(home.get("devices"))
+    room = format_live_room(esp32) if esp32 else {}
+    devices = {
+        device_id: format_live_device(device_id, as_dict(device))
+        for device_id, device in live_devices.items()
+        if device_id.startswith("breaker_") or device_id == "esp32_01"
+    }
+    safety = as_dict(home.get("safety"))
+    alerts = active_only(object_to_list(as_dict(home.get("alerts")).get("active")))
+    return {
+        "home_id": HOME_ID,
+        "fallback": True,
+        "fallback_message": message,
+        "room": room,
+        "occupancy": as_dict(as_dict(home.get("occupancy")).get("room1")),
+        "devices": devices,
+        "energy": as_dict(as_dict(home.get("backend")).get("energy")),
+        "alerts": alerts,
+        "critical_alerts": [
+            alert
+            for alert in alerts
+            if str(alert.get("severity", alert.get("level", ""))).lower() == "critical"
+            or str(alert.get("category", "")).lower() == "safety"
+        ],
+        "recommendations": active_only(object_to_list(as_dict(home.get("recommendations")).get("active"))),
+        "control": as_dict(home.get("control")),
+        "action_suggestions": active_only(object_to_list(as_dict(home.get("action_suggestions")).get("active"))),
+        "automation_logs": object_to_list(home.get("automation_logs"))[-10:],
+        "settings_summary": as_dict(home.get("settings_summary")),
+        "next_schedule": None,
+        "ai": {},
+        "safety": {
+            "emergency_mode": as_dict(safety.get("emergency_mode")),
+            "smoke_state": as_dict(safety.get("smoke_state")),
+        },
+    }
+
+
+def dismiss_suggestion_locally(suggestion_id: str) -> dict[str, Any]:
+    suggestion = as_dict(home_ref(f"action_suggestions/active/{suggestion_id}").get())
+    if not suggestion:
+        return {"success": True, "message": "Action suggestion dismissed."}
+
+    timestamp_ms = int(time.time() * 1000)
+    dismissed = {
+        **suggestion,
+        "status": "dismissed",
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+        "dismissed_at_ms": timestamp_ms,
+        "dismissed_at_iso": datetime.now(timezone.utc).isoformat(),
+    }
+    home_ref(f"action_suggestions/history/{suggestion_id}").set(dismissed)
+
+    active = as_dict(home_ref("action_suggestions/active").get())
+    device_id = str(suggestion.get("device_id", ""))
+    command = str(suggestion.get("suggested_command", suggestion.get("command", "")))
+    reason = str(suggestion.get("reason", ""))
+    for active_id, raw_item in active.items():
+        item = as_dict(raw_item)
+        if (
+            active_id == suggestion_id
+            or (
+                str(item.get("device_id", "")) == device_id
+                and str(item.get("suggested_command", item.get("command", ""))) == command
+                and str(item.get("reason", "")) == reason
+            )
+        ):
+            home_ref(f"action_suggestions/active/{active_id}").delete()
+
+    return {"success": True, "message": "Action suggestion dismissed."}
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -314,6 +311,7 @@ def latest():
         try:
             response = requests.get(
                 f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/dashboard",
+                headers=api_headers(),
                 timeout=10,
             )
             data = response.json()
@@ -325,9 +323,6 @@ def latest():
             print(f"[DASHBOARD FALLBACK] API unavailable: {api_error}", flush=True)
             data = local_firebase_dashboard(str(api_error))
 
-        # Keep the local touchscreen feeling live by reading fast-changing
-        # sensor/device values straight from Firebase, while AI/alerts/summary
-        # still come from the shared API layer.
         esp32 = as_dict(home_ref("devices/esp32_01").get())
         live_devices = as_dict(home_ref("devices").get())
         if esp32:
@@ -397,6 +392,7 @@ def send_command():
 
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/devices/{device_id}/command",
+            headers=api_headers(),
             json={
                 "command": action,
                 "requested_by": "user_emergency_action" if data.get("emergency") else "pi_dashboard",
@@ -411,26 +407,8 @@ def send_command():
             detail = result.get("detail", "Command failed")
             if isinstance(detail, dict):
                 detail = detail.get("message", "Command failed")
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "message": detail,
-                    }
-                ),
-                response.status_code,
-            )
+            return jsonify({"success": False, "message": detail}), response.status_code
 
-        if result.get("no_action") is True:
-            print(
-                f"[DASHBOARD] No command needed: {device_id} {action}",
-                flush=True,
-            )
-        else:
-            print(
-                f"[DASHBOARD] Command accepted through API: {device_id} {action}",
-                flush=True,
-            )
         return jsonify(
             {
                 "success": True,
@@ -450,6 +428,7 @@ def turn_off_safe_devices():
     try:
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/turn-off-safe-devices",
+            headers=api_headers(),
             timeout=10,
         )
         return jsonify(response.json()), response.status_code
@@ -462,6 +441,7 @@ def mark_smoke_safe():
     try:
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/mark-safe",
+            headers=api_headers(),
             timeout=10,
         )
         return jsonify(response.json()), response.status_code
@@ -479,20 +459,13 @@ def update_control_mode():
         mode = str(data.get("mode", "")).strip().lower()
         response = requests.put(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/control/mode",
+            headers=api_headers(),
             json={"mode": mode, "updated_by": "pi_dashboard"},
             timeout=10,
         )
         result = response.json()
         if not response.ok:
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "message": result.get("detail", "Control mode update failed"),
-                    }
-                ),
-                response.status_code,
-            )
+            return jsonify({"success": False, "message": result.get("detail", "Control mode update failed")}), response.status_code
         return jsonify(result)
     except Exception as error:
         return jsonify({"success": False, "message": str(error)}), 500
@@ -505,6 +478,7 @@ def decide_action_suggestion(suggestion_id: str, decision: str):
     try:
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/action-suggestions/{suggestion_id}/{decision}",
+            headers=api_headers(),
             timeout=10,
         )
         result = response.json()
@@ -527,6 +501,7 @@ def get_settings():
     try:
         response = requests.get(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
+            headers=api_headers(),
             timeout=10,
         )
         return jsonify(response.json()), response.status_code
@@ -543,6 +518,7 @@ def update_settings():
         data["updated_by"] = "pi_dashboard"
         response = requests.put(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
+            headers=api_headers(),
             json=data,
             timeout=10,
         )
@@ -556,6 +532,7 @@ def get_schedules():
     try:
         response = requests.get(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
+            headers=api_headers(),
             timeout=10,
         )
         return jsonify(response.json()), response.status_code
@@ -572,6 +549,7 @@ def create_schedule():
         data["created_by"] = "pi_dashboard"
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
+            headers=api_headers(),
             json=data,
             timeout=10,
         )
@@ -589,6 +567,7 @@ def update_schedule_enabled(schedule_id: str):
         data["updated_by"] = "pi_dashboard"
         response = requests.patch(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/enabled",
+            headers=api_headers(),
             json=data,
             timeout=10,
         )
@@ -602,6 +581,7 @@ def run_schedule_now(schedule_id: str):
     try:
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/run-now",
+            headers=api_headers(),
             timeout=10,
         )
         return jsonify(response.json()), response.status_code
@@ -614,6 +594,7 @@ def delete_schedule(schedule_id: str):
     try:
         response = requests.delete(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}",
+            headers=api_headers(),
             params={"deleted_by": "pi_dashboard"},
             timeout=10,
         )

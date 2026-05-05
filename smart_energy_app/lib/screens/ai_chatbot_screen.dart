@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 
 import '../config/app_config.dart';
+import '../services/auth_service.dart';
 import '../utils/constants.dart';
 
 class AiChatbotScreen extends StatefulWidget {
@@ -25,7 +26,7 @@ class AiChatbotScreen extends StatefulWidget {
 class _AiChatbotScreenState extends State<AiChatbotScreen> {
   final Dio _dio = Dio(
     BaseOptions(
-      baseUrl: AppConfig.aiServiceUrl,
+      baseUrl: AppConfig.backendApiUrl,
       connectTimeout: const Duration(seconds: 15),
       receiveTimeout: const Duration(seconds: 45),
       headers: {'Content-Type': 'application/json'},
@@ -66,7 +67,8 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
 
     try {
       final response = await _dio.post(
-        '/chat/${widget.homeId}',
+        '/api/home/${widget.homeId}/chat',
+        options: Options(headers: await _authHeaders()),
         data: {
           'message': message,
           'home_id': widget.homeId,
@@ -118,6 +120,11 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
         });
       }
     }
+  }
+
+  Future<Map<String, String>> _authHeaders() async {
+    final token = await AuthService().getIdToken();
+    return token == null ? const {} : {'Authorization': 'Bearer $token'};
   }
 
   @override

@@ -1,5 +1,8 @@
 import sys
 import threading
+import hashlib
+import hmac
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,8 +11,9 @@ from firebase_admin import credentials, db
 from flask import Flask, jsonify, request
 
 
-SERVICE_ACCOUNT_PATH = "serviceAccountKey.json"
-DATABASE_URL = (
+SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
+DATABASE_URL = os.environ.get(
+    "FIREBASE_DATABASE_URL",
     "https://seniorproject-energy-default-rtdb.asia-southeast1."
     "firebasedatabase.app"
 )
@@ -29,6 +33,23 @@ from occupancy_utils import calculate_occupancy, merged_occupancy_settings, shou
 from timestamp_utils import TIMEZONE, ms_to_iso, now_timestamp
 
 app = Flask(__name__)
+
+
+def hash_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def request_has_valid_device_key() -> bool:
+    expected_key = os.environ.get("ESP32_DEVICE_KEY", "")
+    expected_hash = os.environ.get("ESP32_DEVICE_KEY_HASH", "")
+    provided_key = request.headers.get("X-Device-Key", "")
+    if not provided_key:
+        return False
+    if expected_key and hmac.compare_digest(provided_key, expected_key):
+        return True
+    if expected_hash and hmac.compare_digest(hash_secret(provided_key), expected_hash):
+        return True
+    return False
 
 
 def initialize_firebase() -> None:
@@ -369,6 +390,17 @@ def save_to_firebase_background(payload: dict[str, Any]) -> None:
 @app.post("/api/sensors/room1")
 def receive_room1_sensors():
     try:
+        if not request_has_valid_device_key():
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "Missing or invalid ESP32 device key",
+                    }
+                ),
+                401,
+            )
+
         data = request.get_json(silent=True)
         if data is None:
             return (

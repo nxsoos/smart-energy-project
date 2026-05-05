@@ -11,6 +11,7 @@ SMART_ENERGY_API_URL = os.environ.get(
     "https://smart-energy-api-qs7uzdqawq-as.a.run.app",
 ).rstrip("/")
 POLL_INTERVAL_SECONDS = 60
+INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
 
 def log(message: str) -> None:
@@ -18,8 +19,12 @@ def log(message: str) -> None:
 
 
 def run_due_schedules() -> None:
+    headers = {}
+    if INTERNAL_SERVICE_TOKEN:
+        headers["X-Service-Token"] = INTERNAL_SERVICE_TOKEN
     response = requests.post(
         f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/run-due",
+        headers=headers,
         timeout=30,
     )
     response.raise_for_status()
