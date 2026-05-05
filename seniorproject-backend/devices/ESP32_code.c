@@ -17,6 +17,7 @@ const char* password = "nasser04";
 // Raspberry Pi hub endpoint
 // =====================================
 const char* PI_SERVER_URL = "http://10.220.38.94:5000/api/sensors/room1";
+const char* ESP32_DEVICE_KEY = "esp32_01_key_123";
 
 // Disabled because sensor data now goes through Raspberry Pi hub.
 // Previous direct Firebase base URL:
@@ -247,6 +248,7 @@ bool sendPostRequest(const String& url, const String& jsonPayload) {
   }
 
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Device-Key", ESP32_DEVICE_KEY);
 
   int httpCode = http.POST(jsonPayload);
 

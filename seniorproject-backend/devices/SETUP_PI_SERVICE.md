@@ -47,6 +47,23 @@ python3 -m venv venv
 ./venv/bin/pip install -r requirements-ai.txt
 ```
 
+## Configure ESP32 Device Key
+
+The Pi receiver rejects sensor uploads unless the ESP32 sends the same shared
+key in the `X-Device-Key` HTTP header.
+
+Create a local environment file on the Raspberry Pi:
+
+```bash
+cat >/home/ali/smart-energy-hub/.env <<'EOF'
+ESP32_DEVICE_KEY=replace-with-a-long-random-device-key
+EOF
+chmod 600 /home/ali/smart-energy-hub/.env
+```
+
+Use that same value in `ESP32_DEVICE_KEY` inside `ESP32_code.c`, then flash the
+ESP32.
+
 ## Install Or Update The systemd Service
 
 ```bash
@@ -121,6 +138,7 @@ homes/home_001/history/sensor_logs/{YYYYMMDD_HHMMSS_microseconds}
 ```bash
 curl -X POST http://10.220.38.94:5000/api/sensors/room1 \
   -H "Content-Type: application/json" \
+  -H "X-Device-Key: replace-with-a-long-random-device-key" \
   -d '{"sensors":{"temperature":25.5,"humidity":50},"status":{"online":true}}'
 ```
 
