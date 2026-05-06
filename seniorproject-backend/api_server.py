@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import firebase_admin
 import requests
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import auth, credentials, db, messaging
 from pydantic import BaseModel, Field
@@ -152,6 +152,7 @@ DEFAULT_SETTINGS = {
     "auto_control_enabled": True,
     "notifications_enabled": True,
     "schedules_enabled": True,
+    "chat_history_retention_days": 90,
 }
 
 SETTINGS_OPTIONS = {
@@ -169,6 +170,7 @@ SETTINGS_OPTIONS = {
     "occupancy_confidence_threshold": {"min": 0, "max": 1},
     "occupancy_history_interval_minutes": {"min": 1, "max": 60},
     "device_offline_minutes": {"min": 1, "max": 60},
+    "chat_history_retention_days": {"min": 1, "max": 3650},
 }
 
 app = FastAPI(
@@ -297,6 +299,21 @@ class ChatProxyRequest(BaseModel):
     scenario_id: str | None = None
     scenario_name: str | None = None
     conversation_history: list[dict[str, Any]] | None = None
+
+
+class ChatSessionCreateRequest(BaseModel):
+    title: str | None = None
+
+
+class ChatSessionRenameRequest(BaseModel):
+    title: str
+
+
+class ChatSessionMessageRequest(BaseModel):
+    message: str
+    home_name: str | None = None
+    scenario_id: str | None = None
+    scenario_name: str | None = None
 
 
 class SignupProfileRequest(BaseModel):
@@ -552,6 +569,7 @@ def authenticate_trusted_device(home_id: str, device_token: str) -> AuthContext:
                 "can_change_settings": False,
                 "can_manage_schedules": True,
                 "can_change_control_mode": False,
+                "can_use_ai_chat": True,
                 "can_acknowledge_alerts": True,
             },
         )
@@ -1074,6 +1092,7 @@ def validate_settings(settings: dict[str, Any]) -> None:
         "occupancy_empty_minutes",
         "occupancy_history_interval_minutes",
         "device_offline_minutes",
+        "chat_history_retention_days",
     ]:
         if as_number(settings.get(field), -1) <= 0:
             raise HTTPException(status_code=400, detail=f"{field} must be positive.")
@@ -3010,8 +3029,141 @@ def create_device_command(
     )
 
 
-@app.post("/api/home/{home_id}/chat", dependencies=[Depends(require_home_permission("can_use_ai_chat"))])
-def chat_with_ai(home_id: str, request: ChatProxyRequest) -> dict[str, Any]:
+def chat_actor_id(actor: AuthContext) -> str:
+    return actor.uid or actor.actor_id
+
+
+def chat_actor_name(actor: AuthContext) -> str:
+    if actor.email:
+        return actor.email
+    return actor.actor_id
+
+
+def chat_session_ref(home_id: str, session_id: str) -> str:
+    return f"/homes/{home_id}/chat/sessions/{session_id}"
+
+
+def chat_messages_ref(home_id: str, session_id: str) -> str:
+    return f"{chat_session_ref(home_id, session_id)}/messages"
+
+
+def sanitize_chat_title(title: str | None) -> str:
+    clean = " ".join(str(title or "").strip().split())
+    return clean[:80] if clean else "New Chat"
+
+
+def title_from_message(message: str) -> str:
+    words = re.findall(r"[A-Za-z0-9]+", message)
+    stop = {
+        "what",
+        "why",
+        "how",
+        "is",
+        "are",
+        "the",
+        "a",
+        "an",
+        "my",
+        "me",
+        "please",
+        "explain",
+        "meaning",
+        "of",
+    }
+    picked = [word for word in words if word.lower() not in stop][:4]
+    if not picked:
+        picked = words[:4]
+    title = " ".join(word.capitalize() for word in picked[:5]).strip()
+    if not title:
+        return "Smart Energy Chat"
+    if any(word.lower() in {"power", "cost", "energy", "usage"} for word in picked):
+        title = f"{title} Explanation" if "explanation" not in title.lower() else title
+    return title[:60]
+
+
+def preview_text(content: str, limit: int = 120) -> str:
+    clean = " ".join(content.strip().split())
+    return clean if len(clean) <= limit else f"{clean[: limit - 3]}..."
+
+
+def sorted_chat_messages(messages: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
+    items = object_to_list(messages)
+    items.sort(key=lambda item: as_number(item.get("created_at_ms")))
+    if limit is not None and limit > 0:
+        return items[-limit:]
+    return items
+
+
+def conversation_history_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    history: list[dict[str, str]] = []
+    for item in messages:
+        role = str(item.get("role", "")).lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(first_present(item.get("content"), item.get("message"), default="")).strip()
+        if not content:
+            continue
+        history.append({"role": role, "message": content[:2000]})
+    return history
+
+
+def require_chat_session_access(
+    home_id: str,
+    session_id: str,
+    actor: AuthContext,
+    *,
+    allow_archived: bool = False,
+) -> dict[str, Any]:
+    session = as_dict(safe_get(chat_session_ref(home_id, session_id), {}))
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session does not exist.")
+    if session.get("archived") is True and not allow_archived:
+        raise HTTPException(status_code=404, detail="Chat session is archived.")
+    created_by = str(session.get("created_by") or "")
+    if actor.actor_type != "service" and actor.actor_role != "admin" and created_by != chat_actor_id(actor):
+        raise HTTPException(status_code=403, detail="You do not have access to this chat session.")
+    return session
+
+
+def create_chat_session_record(
+    home_id: str,
+    actor: AuthContext,
+    title: str | None = None,
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    actual_session_id = session_id or f"chat_{timestamp_ms}"
+    session = {
+        "session_id": actual_session_id,
+        "home_id": home_id,
+        "title": sanitize_chat_title(title),
+        "created_by": chat_actor_id(actor),
+        "created_by_name": chat_actor_name(actor),
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+        "last_message_preview": "",
+        "message_count": 0,
+        "archived": False,
+        "archived_at_ms": None,
+        "archived_at_iso": None,
+    }
+    safe_set(chat_session_ref(home_id, actual_session_id), session)
+    audit_log(home_id, actor, "chat_session_created", "chat_session", actual_session_id)
+    return session
+
+
+def default_chat_session(home_id: str, actor: AuthContext) -> dict[str, Any]:
+    session_id = f"chat_default_{re.sub(r'[^A-Za-z0-9_-]', '_', chat_actor_id(actor))}"
+    session = as_dict(safe_get(chat_session_ref(home_id, session_id), {}))
+    if session and session.get("archived") is not True:
+        return session
+    return create_chat_session_record(home_id, actor, "New Chat", session_id=session_id)
+
+
+def call_ai_chat_service(home_id: str, request: ChatProxyRequest, history: list[dict[str, str]]) -> dict[str, Any]:
     ai_service_url = os.environ.get("AI_SERVICE_URL", "").strip().rstrip("/")
     if not ai_service_url:
         raise HTTPException(status_code=503, detail="AI_SERVICE_URL is not configured.")
@@ -3021,7 +3173,7 @@ def chat_with_ai(home_id: str, request: ChatProxyRequest) -> dict[str, Any]:
         "home_name": request.home_name,
         "scenario_id": request.scenario_id,
         "scenario_name": request.scenario_name,
-        "conversation_history": request.conversation_history or [],
+        "conversation_history": history,
     }
     headers = {}
     internal_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
@@ -3042,6 +3194,218 @@ def chat_with_ai(home_id: str, request: ChatProxyRequest) -> dict[str, Any]:
         raise
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"AI chat request failed: {error}") from error
+
+
+def send_chat_session_message(
+    home_id: str,
+    session_id: str,
+    request: ChatSessionMessageRequest,
+    actor: AuthContext,
+) -> dict[str, Any]:
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message must not be empty.")
+
+    session = require_chat_session_access(home_id, session_id, actor)
+    timestamp_ms = now_ms()
+    user_message_id = f"msg_{timestamp_ms}_user"
+    user_message = {
+        "message_id": user_message_id,
+        "session_id": session_id,
+        "role": "user",
+        "content": message,
+        "created_by": chat_actor_id(actor),
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"{chat_messages_ref(home_id, session_id)}/{user_message_id}", user_message)
+
+    recent_messages = sorted_chat_messages(
+        as_dict(safe_get(chat_messages_ref(home_id, session_id), {})),
+        limit=20,
+    )
+    history = conversation_history_from_messages(recent_messages)
+    proxy_request = ChatProxyRequest(
+        message=message,
+        home_name=request.home_name,
+        scenario_id=request.scenario_id,
+        scenario_name=request.scenario_name,
+        conversation_history=history,
+    )
+    ai_data = call_ai_chat_service(home_id, proxy_request, history)
+    answer = str(ai_data.get("answer") or "No chatbot answer was returned.").strip()
+    assistant_timestamp_ms = now_ms()
+    assistant_message_id = f"msg_{assistant_timestamp_ms}_assistant"
+    assistant_message = {
+        "message_id": assistant_message_id,
+        "session_id": session_id,
+        "role": "assistant",
+        "content": answer,
+        "created_by": "assistant",
+        "created_at_ms": assistant_timestamp_ms,
+        "created_at_iso": iso_from_ms(assistant_timestamp_ms),
+        "model": "gemini",
+        "used_home_context": bool(ai_data.get("used_data", True)),
+        "used_recent_history_count": len(history),
+        "sources": ["dashboard", "alerts", "recommendations", "ai_latest"],
+    }
+    safe_set(f"{chat_messages_ref(home_id, session_id)}/{assistant_message_id}", assistant_message)
+
+    all_messages = sorted_chat_messages(as_dict(safe_get(chat_messages_ref(home_id, session_id), {})))
+    next_title = str(session.get("title") or "New Chat")
+    if next_title.strip().lower() == "new chat":
+        next_title = title_from_message(message)
+    session_update = {
+        "title": next_title,
+        "updated_at_ms": assistant_timestamp_ms,
+        "updated_at_iso": iso_from_ms(assistant_timestamp_ms),
+        "last_message_preview": preview_text(answer),
+        "message_count": len(all_messages),
+    }
+    safe_update(chat_session_ref(home_id, session_id), session_update)
+    updated_session = {**session, **session_update}
+    audit_log(
+        home_id,
+        actor,
+        "chat_message_sent",
+        "chat_session",
+        session_id,
+        {"user_message_id": user_message_id, "assistant_message_id": assistant_message_id},
+    )
+    return {
+        **ai_data,
+        "answer": answer,
+        "session": updated_session,
+        "user_message": user_message,
+        "assistant_message": assistant_message,
+    }
+
+
+@app.get("/api/home/{home_id}/chat/sessions")
+def list_chat_sessions(
+    home_id: str,
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    sessions = object_to_list(safe_get(f"/homes/{home_id}/chat/sessions", {}))
+    actor_id = chat_actor_id(actor)
+    visible = [
+        item
+        for item in sessions
+        if item.get("archived") is not True
+        and (actor.actor_role == "admin" or str(item.get("created_by")) == actor_id)
+    ]
+    visible.sort(key=lambda item: as_number(item.get("updated_at_ms")), reverse=True)
+    return {"home_id": home_id, "count": len(visible), "sessions": visible}
+
+
+@app.post("/api/home/{home_id}/chat/sessions")
+def create_chat_session(
+    home_id: str,
+    request: ChatSessionCreateRequest,
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    session = create_chat_session_record(home_id, actor, request.title or "New Chat")
+    return {"home_id": home_id, "session": session}
+
+
+@app.get("/api/home/{home_id}/chat/sessions/{session_id}/messages")
+def get_chat_session_messages(
+    home_id: str,
+    session_id: str,
+    limit: int = Query(default=100, ge=1, le=200),
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    require_chat_session_access(home_id, session_id, actor, allow_archived=True)
+    messages = sorted_chat_messages(as_dict(safe_get(chat_messages_ref(home_id, session_id), {})), limit=limit)
+    return {"home_id": home_id, "session_id": session_id, "count": len(messages), "messages": messages}
+
+
+@app.post("/api/home/{home_id}/chat/sessions/{session_id}/message")
+def send_chat_message_to_session(
+    home_id: str,
+    session_id: str,
+    request: ChatSessionMessageRequest,
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    return send_chat_session_message(home_id, session_id, request, actor)
+
+
+@app.patch("/api/home/{home_id}/chat/sessions/{session_id}")
+def rename_chat_session(
+    home_id: str,
+    session_id: str,
+    request: ChatSessionRenameRequest,
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    session = require_chat_session_access(home_id, session_id, actor)
+    timestamp_ms = now_ms()
+    update = {
+        "title": sanitize_chat_title(request.title),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(chat_session_ref(home_id, session_id), update)
+    audit_log(home_id, actor, "chat_session_renamed", "chat_session", session_id)
+    return {"home_id": home_id, "session": {**session, **update}}
+
+
+@app.delete("/api/home/{home_id}/chat/sessions/{session_id}")
+def archive_chat_session(
+    home_id: str,
+    session_id: str,
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    session = require_chat_session_access(home_id, session_id, actor)
+    timestamp_ms = now_ms()
+    update = {
+        "archived": True,
+        "archived_at_ms": timestamp_ms,
+        "archived_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(chat_session_ref(home_id, session_id), update)
+    audit_log(home_id, actor, "chat_session_archived", "chat_session", session_id)
+    return {"home_id": home_id, "session": {**session, **update}, "archived": True}
+
+
+@app.post("/api/home/{home_id}/chat/sessions/{session_id}/clear")
+def clear_chat_session_messages(
+    home_id: str,
+    session_id: str,
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    session = require_chat_session_access(home_id, session_id, actor)
+    timestamp_ms = now_ms()
+    messages = as_dict(safe_get(chat_messages_ref(home_id, session_id), {}))
+    if messages:
+        safe_set(f"{chat_session_ref(home_id, session_id)}/archived_messages/messages_{timestamp_ms}", messages)
+        safe_set(chat_messages_ref(home_id, session_id), None)
+    update = {
+        "last_message_preview": "",
+        "message_count": 0,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(chat_session_ref(home_id, session_id), update)
+    audit_log(home_id, actor, "chat_session_cleared", "chat_session", session_id)
+    return {"home_id": home_id, "session": {**session, **update}, "cleared": True}
+
+
+@app.post("/api/home/{home_id}/chat")
+def chat_with_ai(
+    home_id: str,
+    request: ChatProxyRequest,
+    actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
+) -> dict[str, Any]:
+    session = default_chat_session(home_id, actor)
+    session_request = ChatSessionMessageRequest(
+        message=request.message,
+        home_name=request.home_name,
+        scenario_id=request.scenario_id,
+        scenario_name=request.scenario_name,
+    )
+    return send_chat_session_message(home_id, str(session["session_id"]), session_request, actor)
 
 
 @app.post("/api/home/{home_id}/ai/predict", dependencies=[Depends(require_home_role("admin"))])
