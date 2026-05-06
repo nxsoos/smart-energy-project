@@ -139,6 +139,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       setState(() {});
+      _showEmergencyPopupIfNeeded();
     });
     _dashboardRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!mounted) {
@@ -196,9 +197,11 @@ class _HomeScreenState extends State<HomeScreen> {
             }
 
             setState(() {
+              _updateSmokeClearTimer(sensorData);
               _sensorData = sensorData;
               _hasLiveData = true;
             });
+            _showEmergencyPopupIfNeeded();
           },
           onError: (_) {
             if (!mounted) {
@@ -433,13 +436,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _pendingDeviceCommands.remove(deviceId);
-        _deviceCommandErrors[deviceId] =
-            _friendlyActionError(error, 'Could not send command. Please try again.');
+        _deviceCommandErrors[deviceId] = _friendlyActionError(
+          error,
+          'Could not send command. Please try again.',
+        );
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(_deviceCommandErrors[deviceId]!)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_deviceCommandErrors[deviceId]!)));
     }
   }
 
@@ -958,8 +963,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 10),
                     const Text(
                       'Control Mode',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                     const SizedBox(height: 10),
                     ...options.map(
@@ -986,8 +993,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 18),
                     const Text(
                       'System Preferences',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                     const SizedBox(height: 10),
                     _buildNumberField(costController, 'Cost per kWh'),
@@ -1101,34 +1110,34 @@ class _HomeScreenState extends State<HomeScreen> {
                   if (_permissions.canManageSchedules) ...[
                     const SizedBox(height: 18),
                     Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Schedules',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Schedules',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                            ),
                           ),
                         ),
-                      ),
-                      TextButton.icon(
-                        onPressed: () async {
-                          final created = await _showCreateScheduleDialog();
-                          if (created == true) {
-                            final next = await _firebaseRealtimeService
-                                .fetchSchedules(homeId: _selectedHomeId);
-                            setSheetState(() => schedules = next);
-                            await _refreshData(
-                              showErrorSnackBar: false,
-                              updateLoading: false,
-                            );
-                          }
-                        },
-                        icon: const Icon(Icons.add),
-                        label: const Text('Add'),
-                      ),
-                    ],
-                  ),
+                        TextButton.icon(
+                          onPressed: () async {
+                            final created = await _showCreateScheduleDialog();
+                            if (created == true) {
+                              final next = await _firebaseRealtimeService
+                                  .fetchSchedules(homeId: _selectedHomeId);
+                              setSheetState(() => schedules = next);
+                              await _refreshData(
+                                showErrorSnackBar: false,
+                                updateLoading: false,
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.add),
+                          label: const Text('Add'),
+                        ),
+                      ],
+                    ),
                     ...schedules.map(
                       (schedule) => _buildScheduleTile(
                         schedule,
@@ -1303,7 +1312,8 @@ class _HomeScreenState extends State<HomeScreen> {
           'light_waste_minutes': int.tryParse(lightWasteController.text) ?? 5,
           'motion_recent_seconds':
               int.tryParse(motionRecentController.text) ?? 90,
-          'sound_recent_seconds': int.tryParse(soundRecentController.text) ?? 120,
+          'sound_recent_seconds':
+              int.tryParse(soundRecentController.text) ?? 120,
           'occupancy_empty_minutes':
               int.tryParse(occupancyController.text) ?? 10,
           'sound_activity_threshold':
@@ -1609,7 +1619,10 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: _showSettingsSheet,
             ),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.account_circle_outlined, color: Colors.white),
+            icon: const Icon(
+              Icons.account_circle_outlined,
+              color: Colors.white,
+            ),
             onSelected: (value) {
               if (value == 'logout') {
                 _authService.signOut();
@@ -1620,10 +1633,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 enabled: false,
                 child: Text('Role: ${_permissions.role}'),
               ),
-              const PopupMenuItem(
-                value: 'logout',
-                child: Text('Logout'),
-              ),
+              const PopupMenuItem(value: 'logout', child: Text('Logout')),
             ],
           ),
         ],
@@ -2350,7 +2360,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _friendlyActionError(Object error, String fallback) {
     if (error is DioException) {
-      if (error.response?.statusCode == 403 || error.error?.toString().contains('permission') == true) {
+      if (error.response?.statusCode == 403 ||
+          error.error?.toString().contains('permission') == true) {
         return 'You do not have permission to perform this action.';
       }
       if (error.response?.statusCode == 401) {
@@ -2364,9 +2375,11 @@ class _HomeScreenState extends State<HomeScreen> {
     final state = (_occupancy['state'] ?? 'unknown').toString();
     final label = state
         .split('_')
-        .map((part) => part.isEmpty
-            ? part
-            : '${part[0].toUpperCase()}${part.substring(1)}')
+        .map(
+          (part) => part.isEmpty
+              ? part
+              : '${part[0].toUpperCase()}${part.substring(1)}',
+        )
         .join(' ');
     final confidence = _occupancy['confidence'] is num
         ? ((_occupancy['confidence'] as num).toDouble() * 100).round()
@@ -2964,7 +2977,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 _buildInsightPill(
                   icon: Icons.payments_outlined,
-                  label: '${ai.nextHourCostBhd.toStringAsFixed(3)} BD next hour',
+                  label:
+                      '${ai.nextHourCostBhd.toStringAsFixed(3)} BD next hour',
                   color: Colors.indigo,
                 ),
                 _buildInsightPill(
@@ -3066,8 +3080,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 _buildInsightPill(
                   icon: Icons.timeline_outlined,
-                  label:
-                      '${summary.abnormalPredictionCount} unusual moments',
+                  label: '${summary.abnormalPredictionCount} unusual moments',
                   color: Colors.deepOrange,
                 ),
                 _buildInsightPill(
@@ -3612,7 +3625,8 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _actionSuggestions = _actionSuggestions.where((item) {
         final sameDevice = item.deviceId == suggestion.deviceId;
-        final sameCommand = item.suggestedCommand == suggestion.suggestedCommand;
+        final sameCommand =
+            item.suggestedCommand == suggestion.suggestedCommand;
         final sameReason = item.reason == suggestion.reason;
         return item.id != suggestion.id &&
             !(sameDevice && sameCommand && sameReason);
@@ -3662,7 +3676,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final emergency = (_safety['emergency_mode'] is Map)
         ? Map<String, dynamic>.from(_safety['emergency_mode'] as Map)
         : const <String, dynamic>{};
-    if (emergency['active'] == true && emergency['reason'] == 'smoke_detected') {
+    if (emergency['active'] == true &&
+        emergency['reason'] == 'smoke_detected') {
       return {
         'alert_id': 'smoke_detected_room1',
         'title': 'Smoke/Gas Detected',
@@ -3821,9 +3836,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               onPressed: () async {
                 Navigator.of(dialogContext).pop();
-                final result = await _firebaseRealtimeService.turnOffSafeDevices(
-                  homeId: _selectedHomeId,
-                );
+                final result = await _firebaseRealtimeService
+                    .turnOffSafeDevices(homeId: _selectedHomeId);
                 if (!mounted) {
                   return;
                 }

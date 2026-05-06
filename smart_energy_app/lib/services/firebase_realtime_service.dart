@@ -1051,6 +1051,7 @@ class FirebaseRealtimeService {
     required String token,
     String userId = 'user_001',
     String platform = 'android',
+    String? installationId,
   }) async {
     await _dio.post(
       '/api/home/$homeId/notifications/register-token',
@@ -1058,6 +1059,7 @@ class FirebaseRealtimeService {
         'user_id': userId,
         'token': token,
         'platform': platform,
+        if (installationId != null) 'installation_id': installationId,
       },
     );
   }

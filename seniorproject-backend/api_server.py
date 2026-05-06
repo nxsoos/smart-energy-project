@@ -283,6 +283,7 @@ class NotificationTokenRequest(BaseModel):
     user_id: str = "user_001"
     token: str
     platform: str = "android"
+    installation_id: str | None = None
 
 
 class ScheduleEnabledRequest(BaseModel):
@@ -941,6 +942,9 @@ def resolve_smoke_emergency_if_clear(home_id: str) -> None:
             "consecutive_detections": 0,
             "last_clear_at_ms": timestamp_ms,
             "last_clear_at_iso": iso_from_ms(timestamp_ms),
+            "notification_sent": False,
+            "notification_sent_at_ms": None,
+            "notification_sent_at_iso": None,
             "updated_at_ms": timestamp_ms,
             "updated_at_iso": iso_from_ms(timestamp_ms),
         },
@@ -2528,6 +2532,9 @@ def mark_smoke_safe(home_id: str) -> dict[str, Any]:
             "consecutive_detections": 0,
             "last_clear_at_ms": timestamp_ms,
             "last_clear_at_iso": iso_from_ms(timestamp_ms),
+            "notification_sent": False,
+            "notification_sent_at_ms": None,
+            "notification_sent_at_iso": None,
             "updated_at_ms": timestamp_ms,
             "updated_at_iso": iso_from_ms(timestamp_ms),
         },
@@ -2540,10 +2547,30 @@ def mark_smoke_safe(home_id: str) -> dict[str, Any]:
 def register_notification_token(home_id: str, request: NotificationTokenRequest) -> dict[str, Any]:
     timestamp_ms = now_ms()
     token_id = re.sub(r"[^A-Za-z0-9_-]", "_", request.token[-32:]) or f"token_{timestamp_ms}"
+    existing_tokens = as_dict(safe_get(f"/homes/{home_id}/notification_tokens", {}))
+    updates: dict[str, Any] = {}
+    for existing_id, existing_value in existing_tokens.items():
+        existing = as_dict(existing_value)
+        if existing_id == token_id or existing.get("active") is not True:
+            continue
+        same_installation = (
+            request.installation_id is not None
+            and existing.get("installation_id") == request.installation_id
+        )
+        same_user_platform = (
+            existing.get("user_id") == request.user_id
+            and existing.get("platform") == request.platform
+        )
+        if same_installation or same_user_platform:
+            updates[f"{existing_id}/active"] = False
+            updates[f"{existing_id}/deactivated_at_ms"] = timestamp_ms
+            updates[f"{existing_id}/deactivated_at_iso"] = iso_from_ms(timestamp_ms)
+            updates[f"{existing_id}/deactivation_reason"] = "replaced_by_latest_token"
     record = {
         "token": request.token,
         "platform": request.platform,
         "user_id": request.user_id,
+        "installation_id": request.installation_id,
         "active": True,
         "created_at_ms": timestamp_ms,
         "created_at_iso": iso_from_ms(timestamp_ms),
@@ -2552,6 +2579,8 @@ def register_notification_token(home_id: str, request: NotificationTokenRequest)
         "updated_at_ms": timestamp_ms,
         "updated_at_iso": iso_from_ms(timestamp_ms),
     }
+    if updates:
+        safe_update(f"/homes/{home_id}/notification_tokens", updates)
     safe_set(f"/homes/{home_id}/notification_tokens/{token_id}", record)
     return {"success": True, "home_id": home_id, "token_id": token_id}
 

@@ -20,8 +20,6 @@ import { handleSuggestedAction } from "../control";
 import { msToIso, nowTimestamp } from "../utils";
 
 const SMOKE_ALERT_ID = "smoke_detected_room1";
-const SMOKE_CONFIRMATION_COUNT = 2;
-const SMOKE_CONFIRMATION_MS = 7000;
 const SMOKE_CLEAR_DELAY_MS = 15000;
 
 function asRecord(value: unknown): Record<string, any> {
@@ -105,7 +103,7 @@ async function createEmergencySuggestion(
 }
 
 async function createNotification(homeId: string, timestampMs: number): Promise<void> {
-  const notificationId = `notif_${timestampMs}`;
+  const notificationId = `notif_${SMOKE_ALERT_ID}_${timestampMs}`;
   const notification = {
     ...nowTimestamp(timestampMs),
     notification_id: notificationId,
@@ -126,19 +124,33 @@ async function createNotification(homeId: string, timestampMs: number): Promise<
   const tokens = asRecord(
     (await admin.database().ref(`/homes/${homeId}/notification_tokens`).get()).val()
   );
-  const activeTokens = Object.values(tokens)
-    .map((item) => asRecord(item))
-    .filter((item) => item.active === true && typeof item.token === "string")
-    .map((item) => item.token as string);
+  const activeTokensByValue = new Map<string, { id: string; token: string }>();
+  Object.entries(tokens)
+    .map(([id, item]) => ({ id, data: asRecord(item) }))
+    .filter((item) => item.data.active === true && typeof item.data.token === "string")
+    .forEach((item) => {
+      activeTokensByValue.set(item.data.token as string, {
+        id: item.id,
+        token: item.data.token as string,
+      });
+    });
+  const activeTokens = Array.from(activeTokensByValue.values());
   if (!activeTokens.length) {
     return;
   }
   let delivered = false;
-  for (const token of activeTokens) {
+  for (const item of activeTokens) {
     try {
       await admin.messaging().send({
-        token,
+        token: item.token,
         notification: { title: notification.title, body: notification.body },
+        android: {
+          collapseKey: SMOKE_ALERT_ID,
+          priority: "high",
+          notification: {
+            tag: SMOKE_ALERT_ID,
+          },
+        },
         data: {
           home_id: homeId,
           notification_id: notificationId,
@@ -148,7 +160,21 @@ async function createNotification(homeId: string, timestampMs: number): Promise<
       });
       delivered = true;
     } catch (error) {
-      logger.warn("Failed to send smoke notification", { homeId, error });
+      const errorRecord = asRecord(error);
+      const errorInfo = asRecord(errorRecord.errorInfo);
+      const code = String(errorRecord.code ?? errorInfo.code ?? "");
+      if (
+        code.includes("registration-token-not-registered") ||
+        code.includes("invalid-registration-token")
+      ) {
+        await admin.database().ref(`/homes/${homeId}/notification_tokens/${item.id}`).update({
+          active: false,
+          deactivated_at_ms: Date.now(),
+          deactivated_at_iso: msToIso(Date.now()),
+          deactivation_reason: code,
+        });
+      }
+      logger.warn("Failed to send smoke notification", { homeId, token_id: item.id, error });
     }
   }
   if (delivered) {
@@ -230,7 +256,12 @@ async function createEmergencyCommand(
   return commandId;
 }
 
-async function confirmSmokeEmergency(homeId: string, logId: string, timestampMs: number): Promise<void> {
+async function confirmSmokeEmergency(
+  homeId: string,
+  logId: string,
+  timestampMs: number,
+  shouldCreateNotification: boolean
+): Promise<void> {
   const homeRef = admin.database().ref(`/homes/${homeId}`);
   const existingAlert = await homeRef.child(`alerts/active/${SMOKE_ALERT_ID}`).get();
   const alert = {
@@ -281,20 +312,22 @@ async function confirmSmokeEmergency(homeId: string, logId: string, timestampMs:
       homeId,
       "smoke_confirmed",
       "Smoke or gas was confirmed in Room 1.",
-      existingAlert.exists()
+      existingAlert.exists() && !shouldCreateNotification
         ? ["emergency_mode_enabled"]
         : [
             "critical_alert_created",
             "emergency_mode_enabled",
-            "notification_created",
+            ...(shouldCreateNotification ? ["notification_created"] : []),
             "popup_required",
           ],
       timestampMs
     ),
   ];
+  if (shouldCreateNotification) {
+    emergencyTasks.push(createNotification(homeId, timestampMs));
+  }
   if (!existingAlert.exists()) {
     emergencyTasks.push(
-      createNotification(homeId, timestampMs),
       createEmergencySuggestion(
         homeId,
         "breaker_01",
@@ -350,43 +383,53 @@ async function confirmSmokeEmergency(homeId: string, logId: string, timestampMs:
 
 async function handleSmokeConfirmation(homeId: string, logId: string, smokeDetected: boolean, timestampMs: number): Promise<void> {
   const smokeRef = admin.database().ref(`/homes/${homeId}/safety/smoke_state`);
-  const current = asRecord((await smokeRef.get()).val());
   if (smokeDetected) {
-    const firstDetectedAt =
-      current.status === "pending" || current.status === "confirmed"
-        ? Number(current.first_detected_at_ms ?? timestampMs)
-        : timestampMs;
-    const consecutive = Number(current.consecutive_detections ?? 0) + 1;
-    const confirmed =
-      consecutive >= SMOKE_CONFIRMATION_COUNT ||
-      timestampMs - firstDetectedAt >= SMOKE_CONFIRMATION_MS ||
-      current.status === "confirmed";
-    await smokeRef.set({
-      ...nowTimestamp(timestampMs),
-      status: confirmed ? "confirmed" : "pending",
-      consecutive_detections: consecutive,
-      first_detected_at_ms: firstDetectedAt,
-      first_detected_at_iso: msToIso(firstDetectedAt),
-      last_detected_at_ms: timestampMs,
-      last_detected_at_iso: msToIso(timestampMs),
-      last_clear_at_ms: null,
-      last_clear_at_iso: null,
-      updated_at_ms: timestampMs,
-      updated_at_iso: msToIso(timestampMs),
+    const transactionResult = await smokeRef.transaction((value) => {
+      const state = asRecord(value);
+      const firstDetectedAt =
+        state.status === "pending" || state.status === "confirmed"
+          ? Number(state.first_detected_at_ms ?? timestampMs)
+          : timestampMs;
+      const consecutive = Number(state.consecutive_detections ?? 0) + 1;
+      const notificationAlreadySent = state.notification_sent === true;
+
+      return {
+        ...nowTimestamp(timestampMs),
+        status: "confirmed",
+        consecutive_detections: consecutive,
+        first_detected_at_ms: firstDetectedAt,
+        first_detected_at_iso: msToIso(firstDetectedAt),
+        last_detected_at_ms: timestampMs,
+        last_detected_at_iso: msToIso(timestampMs),
+        last_clear_at_ms: null,
+        last_clear_at_iso: null,
+        notification_sent: true,
+        notification_sent_at_ms: notificationAlreadySent
+          ? state.notification_sent_at_ms ?? null
+          : timestampMs,
+        notification_sent_at_iso: notificationAlreadySent
+          ? state.notification_sent_at_iso ?? null
+          : msToIso(timestampMs),
+        updated_at_ms: timestampMs,
+        updated_at_iso: msToIso(timestampMs),
+      };
     });
+    const committedState = asRecord(transactionResult.snapshot.val());
+    const shouldCreateNotification =
+      transactionResult.committed === true &&
+      committedState.notification_sent_at_ms === timestampMs;
     await writeSafetyEvent(
       homeId,
-      confirmed ? "smoke_confirmed" : "smoke_pending",
-      confirmed ? "Smoke or gas was confirmed in Room 1." : "Smoke or gas detection is pending confirmation.",
-      confirmed ? ["confirmation_threshold_met"] : [],
+      "smoke_confirmed",
+      "Smoke or gas was confirmed in Room 1.",
+      shouldCreateNotification ? ["incident_notification_started"] : [],
       timestampMs
     );
-    if (confirmed) {
-      await confirmSmokeEmergency(homeId, logId, timestampMs);
-    }
+    await confirmSmokeEmergency(homeId, logId, timestampMs, shouldCreateNotification);
     return;
   }
 
+  const current = asRecord((await smokeRef.get()).val());
   const lastClearAt =
     typeof current.last_clear_at_ms === "number" ? current.last_clear_at_ms : timestampMs;
   const remainsConfirmedDuringClearDelay = current.status === "confirmed" && timestampMs - lastClearAt < SMOKE_CLEAR_DELAY_MS;
@@ -400,6 +443,9 @@ async function handleSmokeConfirmation(homeId: string, logId: string, smokeDetec
     last_detected_at_iso: current.last_detected_at_iso ?? null,
     last_clear_at_ms: lastClearAt,
     last_clear_at_iso: msToIso(lastClearAt),
+    notification_sent: remainsConfirmedDuringClearDelay ? current.notification_sent === true : false,
+    notification_sent_at_ms: remainsConfirmedDuringClearDelay ? current.notification_sent_at_ms ?? null : null,
+    notification_sent_at_iso: remainsConfirmedDuringClearDelay ? current.notification_sent_at_iso ?? null : null,
     updated_at_ms: timestampMs,
     updated_at_iso: msToIso(timestampMs),
   });
