@@ -31,11 +31,31 @@ const DEFAULT_AUTOMATION: Record<string, Record<string, unknown>> = {
     comfort_max_temp: 25,
     cooldown_ms: 10 * 60 * 1000,
   },
+  matter_socket_switch: {
+    manual_allowed: true,
+    assist_allowed: true,
+    auto_allowed: true,
+    auto_actions: ["turn_off"],
+    requires_confirmation: false,
+    cooldown_ms: 5 * 60 * 1000,
+  },
+  matter_ac_switch: {
+    manual_allowed: true,
+    assist_allowed: true,
+    auto_allowed: true,
+    auto_actions: ["turn_on", "turn_off"],
+    requires_confirmation: false,
+    comfort_min_temp: 22,
+    comfort_max_temp: 25,
+    cooldown_ms: 10 * 60 * 1000,
+  },
 };
 
 const SAFE_AUTO_ACTIONS: Record<string, Set<string>> = {
   breaker_01: new Set(["turn_off"]),
   breaker_02: new Set(["turn_on", "turn_off"]),
+  matter_socket_switch: new Set(["turn_off"]),
+  matter_ac_switch: new Set(["turn_on", "turn_off"]),
 };
 
 function targetState(command: string): string {
@@ -190,7 +210,7 @@ export async function tryCreateAutomaticCommand(
   }
 
   const status = asRecord(device.status);
-  const online = normalizeBool(status.online);
+  const online = normalizeBool(device.local_online) ?? normalizeBool(status.online);
   if (online === false) {
     return false;
   }
@@ -223,9 +243,13 @@ export async function tryCreateAutomaticCommand(
     command: action.command,
     action: action.command,
     target_state: targetState(action.command),
-    previous_state: normalizeBool(status.switch) === true ? "on" : "off",
+    previous_state: String(
+      device.state ?? (normalizeBool(status.switch) === true ? "on" : "off")
+    ).toLowerCase(),
     requested_by: "backend_automation",
     reason: action.reason,
+    control_method: String(device.control_method ?? (action.deviceId.startsWith("breaker_") ? "tuya_cloud" : "")),
+    ha_entity_id: device.ha_entity_id ?? null,
     status: "pending",
     requested_at_ms: now,
     requested_at_iso: msToIso(now),

@@ -4,6 +4,8 @@ import os
 import re
 import hashlib
 import hmac
+import threading
+import time
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +25,12 @@ from timestamp_utils import (
     ms_to_iso,
     now_ms,
 )
+from home_assistant_controller import (
+    HomeAssistantError,
+    execute_home_assistant_command,
+    get_entity_state,
+    is_home_assistant_configured,
+)
 
 
 load_dotenv()
@@ -30,9 +38,11 @@ load_dotenv()
 SERVICE_NAME = "smart_energy_api"
 BAHRAIN_TZ = ZoneInfo(TIMEZONE)
 DEFAULT_HOME_ID = "home_001"
-CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02"}
+MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch"}
+CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *MATTER_DEVICE_IDS}
 VALID_COMMANDS = {"turn_on", "turn_off"}
 DEVICE_STALE_AFTER_MS = 45 * 1000
+HA_SYNC_INTERVAL_SECONDS = int(os.environ.get("HA_SYNC_INTERVAL_SECONDS", "30"))
 VALID_CONTROL_MODES = {"manual", "assist", "auto"}
 AUTO_REQUESTERS = {"ai", "backend_ai", "automation", "backend_automation"}
 EMERGENCY_REQUESTERS = {"user_emergency_action", "emergency_auto_shutdown"}
@@ -57,12 +67,85 @@ DEFAULT_DEVICE_NAMES = {
     "esp32_01": "Room Sensor",
     "breaker_01": "Switch Breaker",
     "breaker_02": "AC Breaker",
+    "matter_socket_switch": "Socket Switch",
+    "matter_ac_switch": "AC Switch",
 }
 
 DEFAULT_DEVICE_TYPES = {
     "esp32_01": "sensor_hub",
     "breaker_01": "smart_breaker",
     "breaker_02": "smart_breaker",
+    "matter_socket_switch": "matter_switch",
+    "matter_ac_switch": "matter_switch",
+}
+
+MATTER_DEVICE_DEFINITIONS = {
+    "matter_socket_switch": {
+        "device_id": "matter_socket_switch",
+        "name": "Socket Switch",
+        "type": "matter_switch",
+        "branch": "Socket",
+        "control_method": "home_assistant",
+        "ha_entity_id": "switch.smart_plug_switch_1",
+        "online": True,
+        "local_online": True,
+        "cloud_online": False,
+        "controllable": True,
+        "state": "off",
+        "display_state": "off",
+        "power_w": None,
+        "energy_supported": False,
+        "command_in_progress": False,
+        "pending_command_id": None,
+        "pending_target_state": None,
+        "last_command_status": None,
+        "last_command_message": None,
+        "automation": {
+            "manual_allowed": True,
+            "assist_allowed": True,
+            "auto_allowed": True,
+            "auto_actions": ["turn_off"],
+            "requires_confirmation": False,
+        },
+        "safety": {
+            "critical_device": False,
+            "emergency_shutdown_allowed": True,
+            "auto_shutdown_on_smoke": False,
+        },
+    },
+    "matter_ac_switch": {
+        "device_id": "matter_ac_switch",
+        "name": "AC Switch",
+        "type": "matter_switch",
+        "branch": "AC",
+        "control_method": "home_assistant",
+        "ha_entity_id": "switch.smart_plug_switch_1_2",
+        "online": True,
+        "local_online": True,
+        "cloud_online": False,
+        "controllable": True,
+        "state": "off",
+        "display_state": "off",
+        "power_w": None,
+        "energy_supported": False,
+        "command_in_progress": False,
+        "pending_command_id": None,
+        "pending_target_state": None,
+        "last_command_status": None,
+        "last_command_message": None,
+        "automation": {
+            "manual_allowed": True,
+            "assist_allowed": True,
+            "auto_allowed": True,
+            "auto_actions": ["turn_on", "turn_off"],
+            "requires_confirmation": False,
+        },
+        "safety": {
+            "critical_device": False,
+            "emergency_shutdown_allowed": True,
+            "auto_shutdown_on_smoke": False,
+        },
+    },
 }
 
 CONTROL_MODE_OPTIONS = [
@@ -102,11 +185,31 @@ DEFAULT_AUTOMATION_BY_DEVICE = {
         "comfort_max_temp": 25,
         "cooldown_ms": 10 * 60 * 1000,
     },
+    "matter_socket_switch": {
+        "manual_allowed": True,
+        "assist_allowed": True,
+        "auto_allowed": True,
+        "auto_actions": ["turn_off"],
+        "requires_confirmation": False,
+        "cooldown_ms": 5 * 60 * 1000,
+    },
+    "matter_ac_switch": {
+        "manual_allowed": True,
+        "assist_allowed": True,
+        "auto_allowed": True,
+        "auto_actions": ["turn_on", "turn_off"],
+        "requires_confirmation": False,
+        "comfort_min_temp": 22,
+        "comfort_max_temp": 25,
+        "cooldown_ms": 10 * 60 * 1000,
+    },
 }
 
 SAFE_AUTO_ACTIONS = {
     "breaker_01": {"turn_off"},
     "breaker_02": {"turn_on", "turn_off"},
+    "matter_socket_switch": {"turn_off"},
+    "matter_ac_switch": {"turn_on", "turn_off"},
 }
 
 DEFAULT_DEVICE_SAFETY_BY_DEVICE = {
@@ -116,6 +219,16 @@ DEFAULT_DEVICE_SAFETY_BY_DEVICE = {
         "auto_shutdown_on_smoke": True,
     },
     "breaker_02": {
+        "critical_device": False,
+        "emergency_shutdown_allowed": True,
+        "auto_shutdown_on_smoke": False,
+    },
+    "matter_socket_switch": {
+        "critical_device": False,
+        "emergency_shutdown_allowed": True,
+        "auto_shutdown_on_smoke": False,
+    },
+    "matter_ac_switch": {
         "critical_device": False,
         "emergency_shutdown_allowed": True,
         "auto_shutdown_on_smoke": False,
@@ -402,6 +515,8 @@ def initialize_firebase() -> None:
 @app.on_event("startup")
 def startup() -> None:
     initialize_firebase()
+    ensure_matter_devices(DEFAULT_HOME_ID)
+    start_home_assistant_sync_thread(DEFAULT_HOME_ID)
 
 
 def safe_get(path: str, default: Any = None) -> Any:
@@ -431,6 +546,144 @@ def safe_update(path: str, value: dict[str, Any]) -> None:
             status_code=502,
             detail=f"Failed to update Firebase path {path}: {error}",
         ) from error
+
+
+def ensure_matter_devices(home_id: str) -> None:
+    timestamp_ms = now_ms()
+    timestamp_iso = iso_from_ms(timestamp_ms)
+    for device_id, definition in MATTER_DEVICE_DEFINITIONS.items():
+        path = f"/homes/{home_id}/devices/{device_id}"
+        existing = as_dict(safe_get(path, {}))
+        created_at_ms = existing.get("created_at_ms") or timestamp_ms
+        created_at_iso = existing.get("created_at_iso") or timestamp_iso
+        static_update = {
+            **definition,
+            "created_at_ms": created_at_ms,
+            "created_at_iso": created_at_iso,
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": timestamp_iso,
+        }
+        if existing:
+            static_update["state"] = existing.get("state", definition["state"])
+            static_update["display_state"] = existing.get(
+                "display_state",
+                static_update["state"],
+            )
+            static_update["command_in_progress"] = existing.get("command_in_progress", False)
+            static_update["pending_command_id"] = existing.get("pending_command_id")
+            static_update["pending_target_state"] = existing.get("pending_target_state")
+            static_update["last_command_status"] = existing.get("last_command_status")
+            static_update["last_command_message"] = existing.get("last_command_message")
+            static_update["last_command"] = existing.get("last_command")
+        safe_update(path, static_update) if existing else safe_set(path, static_update)
+
+
+def ha_error_payload(error: HomeAssistantError) -> dict[str, str]:
+    return {
+        "error_code": error.code,
+        "user_message": error.user_message,
+        "raw_error": str(error.raw_error or error),
+    }
+
+
+def update_ha_device_from_state(home_id: str, device_id: str, state: str) -> None:
+    timestamp_ms = now_ms()
+    online = state in {"on", "off"}
+    safe_update(
+        f"/homes/{home_id}/devices/{device_id}",
+        {
+            "state": state,
+            "display_state": state,
+            "online": online,
+            "local_online": online,
+            "cloud_online": False,
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+
+
+def mark_ha_device_error(
+    home_id: str,
+    device_id: str,
+    error: HomeAssistantError,
+    *,
+    state: str | None = None,
+) -> None:
+    timestamp_ms = now_ms()
+    device_updates: dict[str, Any] = {
+        "online": False,
+        "local_online": False,
+        "cloud_online": False,
+        "command_in_progress": False,
+        "pending_command_id": None,
+        "pending_target_state": None,
+        "last_command_status": "failed",
+        "last_command_message": error.user_message,
+        "last_command": {
+            "status": "failed",
+            "user_message": error.user_message,
+            "error_code": error.code,
+        },
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    if state:
+        device_updates["state"] = state
+        device_updates["display_state"] = state
+    safe_update(f"/homes/{home_id}/devices/{device_id}", device_updates)
+
+
+def sync_home_assistant_device(home_id: str, device_id: str, device: dict[str, Any]) -> str:
+    entity_id = str(device.get("ha_entity_id") or "").strip()
+    if not entity_id:
+        raise HomeAssistantError(
+            "HA_ENTITY_NOT_FOUND",
+            "Matter switch was not found in Home Assistant.",
+            "Missing ha_entity_id.",
+        )
+    try:
+        state = get_entity_state(entity_id)
+        update_ha_device_from_state(home_id, device_id, state)
+        return state
+    except HomeAssistantError as error:
+        mark_ha_device_error(home_id, device_id, error, state="unknown")
+        raise
+
+
+def sync_home_assistant_devices(home_id: str) -> dict[str, Any]:
+    devices = as_dict(safe_get(f"/homes/{home_id}/devices", {}))
+    results: dict[str, Any] = {}
+    for device_id, raw_device in devices.items():
+        device = as_dict(raw_device)
+        if str(device.get("control_method", "")).lower() != "home_assistant":
+            continue
+        try:
+            results[device_id] = {"state": sync_home_assistant_device(home_id, device_id, device)}
+        except HomeAssistantError as error:
+            results[device_id] = {"error": ha_error_payload(error)}
+    return results
+
+
+_ha_sync_thread_started = False
+
+
+def start_home_assistant_sync_thread(home_id: str) -> None:
+    global _ha_sync_thread_started
+    if _ha_sync_thread_started or not is_home_assistant_configured():
+        return
+    _ha_sync_thread_started = True
+
+    def sync_loop() -> None:
+        while True:
+            try:
+                sync_home_assistant_devices(home_id)
+            except Exception:
+                pass
+            time.sleep(max(5, HA_SYNC_INTERVAL_SECONDS))
+
+    thread = threading.Thread(target=sync_loop, name="ha-state-sync", daemon=True)
+    thread.start()
 
 
 def get_permissions_for_role(role: str) -> dict[str, bool]:
@@ -1293,6 +1546,8 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
     status = as_dict(raw.get("status"))
     metering = as_dict(raw.get("metering"))
     backend_energy = as_dict(raw.get("_backend_energy"))
+    control_method = str(raw.get("control_method") or ("tuya_cloud" if device_id.startswith("breaker_") else "")).lower()
+    is_home_assistant_device = control_method == "home_assistant"
 
     explicit_state = raw.get("state")
     switch_value = first_present(
@@ -1329,9 +1584,14 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         status.get("last_seen_ms"),
         status.get("last_seen_at"),
         backend_energy.get("last_seen_at"),
+        raw.get("updated_at_ms"),
     )
 
     online = normalize_bool(status.get("online"))
+    if is_home_assistant_device:
+        online = normalize_bool(raw.get("local_online"))
+        if online is None:
+            online = normalize_bool(raw.get("online"))
     is_stale = not isinstance(last_seen_ms, (int, float)) or (
         now_ms() - int(last_seen_ms) > DEVICE_STALE_AFTER_MS
     )
@@ -1341,39 +1601,50 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
     } or device_id.startswith("breaker_")
     if online is None:
         online = not is_stale
-    elif is_stale and not is_breaker:
+    elif is_stale and not is_breaker and not is_home_assistant_device:
         online = False
+    if is_home_assistant_device:
+        is_stale = False
 
     command_in_progress = bool(normalize_bool(raw.get("command_in_progress")))
     pending_target_state = raw.get("pending_target_state")
     if pending_target_state not in {"on", "off"}:
         pending_target_state = None
     display_state = pending_target_state if command_in_progress and pending_target_state else state
-    if not online:
+    if not online and not is_home_assistant_device:
         display_state = "off"
     latest_command = as_dict(raw.get("last_command"))
-    power_w = as_number(
-        first_present(
-            metering.get("power_W"),
-            metering.get("power"),
-            raw.get("power_W"),
-            raw.get("currentPower"),
-            backend_energy.get("power_W"),
-        )
+    energy_supported = normalize_bool(raw.get("energy_supported"))
+    if energy_supported is None:
+        energy_supported = not is_home_assistant_device
+    raw_power = first_present(
+        raw.get("power_w"),
+        metering.get("power_W"),
+        metering.get("power"),
+        raw.get("power_W"),
+        raw.get("currentPower"),
+        backend_energy.get("power_W"),
     )
-    if not online:
+    power_w = None if energy_supported is False or raw_power is None else as_number(raw_power)
+    if not online and energy_supported is not False:
         power_w = 0.0
 
     return {
         "device_id": device_id,
         "name": raw.get("name") or DEFAULT_DEVICE_NAMES.get(device_id, device_id),
         "type": raw.get("type") or DEFAULT_DEVICE_TYPES.get(device_id, "unknown"),
+        "branch": raw.get("branch"),
+        "control_method": control_method or None,
+        "ha_entity_id": raw.get("ha_entity_id"),
         "online": bool(online),
+        "local_online": bool(normalize_bool(raw.get("local_online")) if raw.get("local_online") is not None else online),
+        "cloud_online": bool(normalize_bool(raw.get("cloud_online")) if raw.get("cloud_online") is not None else not is_home_assistant_device),
         "stale": is_stale,
         "controllable": is_controllable_device(device_id, raw),
         "state": state,
         "display_state": display_state,
         "power_w": power_w,
+        "energy_supported": bool(energy_supported),
         "today_kwh": as_number(
             first_present(
                 metering.get("energy_kWh"),
@@ -1543,7 +1814,7 @@ def build_devices(bundle: dict[str, Any], home_id: str | None = None) -> dict[st
     branches = bundle["backend_branches"]
     health_devices = as_dict(bundle["backend_device_health"].get("devices"))
 
-    for device_id in ["esp32_01", "breaker_01", "breaker_02"]:
+    for device_id in ["esp32_01", "breaker_01", "breaker_02", *MATTER_DEVICE_IDS]:
         raw_devices.setdefault(device_id, {})
 
     formatted: dict[str, dict[str, Any]] = {}
@@ -2738,6 +3009,11 @@ def get_devices(home_id: str) -> dict[str, Any]:
     }
 
 
+@app.post("/api/home/{home_id}/devices/home-assistant/sync", dependencies=[Depends(require_home_permission("can_view"))])
+def sync_home_assistant(home_id: str) -> dict[str, Any]:
+    return {"success": True, "home_id": home_id, "results": sync_home_assistant_devices(home_id)}
+
+
 @app.get("/api/home/{home_id}/alerts/active", dependencies=[Depends(require_home_permission("can_view"))])
 def get_active_alerts(home_id: str) -> dict[str, Any]:
     bundle = read_home_bundle(home_id)
@@ -2787,6 +3063,440 @@ def get_active_recommendations(home_id: str) -> dict[str, Any]:
     }
 
 
+def build_command_record(
+    home_id: str,
+    device_id: str,
+    device_name: str,
+    command: str,
+    target_state: str,
+    current_state: str,
+    request: DeviceCommandRequest,
+    *,
+    control_method: str,
+    ha_entity_id: str | None = None,
+    status: str = "pending",
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    timestamp_iso = iso_from_ms(timestamp_ms)
+    command_id = f"cmd_{timestamp_ms}"
+    return {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": timestamp_iso,
+        "timezone": TIMEZONE,
+        "command_id": command_id,
+        "home_id": home_id,
+        "device_id": device_id,
+        "device_name": device_name,
+        "command": command,
+        "action": command,
+        "target_state": target_state,
+        "previous_state": current_state,
+        "requested_by": request.requested_by,
+        "reason": request.reason,
+        "source": request.source,
+        "emergency": request.emergency,
+        "alert_id": request.alert_id,
+        "source_suggestion_id": request.source_suggestion_id,
+        "control_method": control_method,
+        "ha_entity_id": ha_entity_id,
+        "status": status,
+        "requested_at_ms": timestamp_ms,
+        "requested_at_iso": timestamp_iso,
+        "sent_at_ms": None,
+        "sent_at_iso": None,
+        "confirmed_at_ms": None,
+        "confirmed_at_iso": None,
+        "failed_at_ms": None,
+        "failed_at_iso": None,
+        "timeout_at_ms": None,
+        "timeout_at_iso": None,
+        "result": {
+            "success": None,
+            "actual_state": None,
+            "error_code": None,
+            "user_message": None,
+            "raw_error": None,
+        },
+        "retry_count": 0,
+        "max_retries": 1,
+    }
+
+
+def write_command_record(
+    home_id: str,
+    device_id: str,
+    command_record: dict[str, Any],
+    *,
+    pending: bool,
+) -> None:
+    command_id = str(command_record["command_id"])
+    if pending:
+        safe_set(f"/homes/{home_id}/commands/pending/{command_id}", command_record)
+    else:
+        safe_set(f"/homes/{home_id}/commands/pending/{command_id}", None)
+    safe_set(f"/homes/{home_id}/commands/history/{command_id}", command_record)
+    safe_set(f"/homes/{home_id}/commands/latest_by_device/{device_id}", command_record)
+    safe_set(
+        f"/homes/{home_id}/commands/{device_id}/latest",
+        {
+            **command_record,
+            "created_at": command_record.get("requested_at_ms"),
+            "created_at_ms": command_record.get("requested_at_ms"),
+            "created_at_iso": command_record.get("requested_at_iso"),
+            "source": command_record.get("requested_by"),
+        },
+    )
+
+
+def execute_home_assistant_device_command(
+    home_id: str,
+    device_id: str,
+    device: dict[str, Any],
+    request: DeviceCommandRequest,
+    command: str,
+    requested_by: str,
+) -> DeviceCommandResponse:
+    entity_id = str(device.get("ha_entity_id") or "").strip()
+    if not entity_id:
+        error = HomeAssistantError(
+            "HA_ENTITY_NOT_FOUND",
+            "Matter switch was not found in Home Assistant.",
+            "Missing ha_entity_id.",
+        )
+        mark_ha_device_error(home_id, device_id, error)
+        raise HTTPException(status_code=409, detail={"success": False, "status": error.code, "message": error.user_message})
+
+    target_state = command_to_target_state(command)
+    device_name = device_message_name(device_id, device)
+
+    try:
+        current_state = get_entity_state(entity_id)
+        update_ha_device_from_state(home_id, device_id, current_state)
+    except HomeAssistantError as error:
+        mark_ha_device_error(home_id, device_id, error, state="unknown")
+        raise HTTPException(
+            status_code=409,
+            detail={"success": False, "status": error.code, "message": error.user_message},
+        ) from error
+
+    if current_state == target_state:
+        already_record = build_command_record(
+            home_id,
+            device_id,
+            device_name,
+            command,
+            target_state,
+            current_state,
+            request,
+            control_method="home_assistant",
+            ha_entity_id=entity_id,
+            status="already_in_state",
+        )
+        already_record["result"] = {
+            "success": True,
+            "actual_state": current_state,
+            "error_code": None,
+            "user_message": f"{device_name} is already {target_state}.",
+            "raw_error": None,
+        }
+        write_command_record(home_id, device_id, already_record, pending=False)
+        safe_update(
+            f"/homes/{home_id}/devices/{device_id}",
+            {
+                "last_requested_state": target_state,
+                "last_command_status": "already_in_state",
+                "last_command_message": f"{device_name} is already {target_state}.",
+                "last_command": {
+                    "status": "already_in_state",
+                    "user_message": f"{device_name} is already {target_state}.",
+                    "error_code": None,
+                },
+            },
+        )
+        if is_auto_requester(requested_by):
+            write_automation_log(home_id, device_id, device_name, command, already_record["command_id"], request.reason)
+        return DeviceCommandResponse(
+            success=True,
+            no_action=True,
+            status="already_in_state",
+            device_id=device_id,
+            command_id=already_record["command_id"],
+            command=command,
+            current_state=current_state,
+            target_state=target_state,
+            message=f"{device_name} is already {target_state}.",
+        )
+
+    command_record = build_command_record(
+        home_id,
+        device_id,
+        device_name,
+        command,
+        target_state,
+        current_state,
+        request,
+        control_method="home_assistant",
+        ha_entity_id=entity_id,
+    )
+    command_id = str(command_record["command_id"])
+    write_command_record(home_id, device_id, command_record, pending=True)
+    safe_update(
+        f"/homes/{home_id}/devices/{device_id}",
+        {
+            "command_in_progress": True,
+            "pending_command_id": command_id,
+            "pending_target_state": target_state,
+            "last_requested_state": target_state,
+            "last_command_status": "pending",
+            "last_command_message": "Command sent. Waiting for Matter confirmation.",
+            "last_command": {
+                "status": "pending",
+                "user_message": None,
+                "error_code": None,
+            },
+        },
+    )
+
+    sent_at = now_ms()
+    command_record.update(
+        {
+            "timestamp_ms": sent_at,
+            "timestamp_iso": iso_from_ms(sent_at),
+            "status": "sent",
+            "sent_at_ms": sent_at,
+            "sent_at_iso": iso_from_ms(sent_at),
+        }
+    )
+    write_command_record(home_id, device_id, command_record, pending=True)
+
+    try:
+        execute_home_assistant_command(entity_id, command)
+        time.sleep(1.5)
+        actual_state = get_entity_state(entity_id)
+        if actual_state != target_state:
+            raise HomeAssistantError(
+                "HA_COMMAND_FAILED",
+                "Matter switch command failed. Please try again.",
+                f"Expected {target_state}, got {actual_state}.",
+            )
+
+        confirmed_at = now_ms()
+        message = f"{device_name} turned {target_state} successfully."
+        command_record.update(
+            {
+                "timestamp_ms": confirmed_at,
+                "timestamp_iso": iso_from_ms(confirmed_at),
+                "status": "confirmed",
+                "confirmed_at_ms": confirmed_at,
+                "confirmed_at_iso": iso_from_ms(confirmed_at),
+                "result": {
+                    "success": True,
+                    "actual_state": actual_state,
+                    "error_code": None,
+                    "user_message": message,
+                    "raw_error": None,
+                },
+            }
+        )
+        write_command_record(home_id, device_id, command_record, pending=False)
+        safe_update(
+            f"/homes/{home_id}/devices/{device_id}",
+            {
+                "state": actual_state,
+                "display_state": actual_state,
+                "online": True,
+                "local_online": True,
+                "cloud_online": False,
+                "command_in_progress": False,
+                "pending_command_id": None,
+                "pending_target_state": None,
+                "last_requested_state": actual_state,
+                "last_command_status": "confirmed",
+                "last_command_message": message,
+                "last_command": {
+                    "status": "confirmed",
+                    "user_message": message,
+                    "error_code": None,
+                },
+                "updated_at_ms": confirmed_at,
+                "updated_at_iso": iso_from_ms(confirmed_at),
+            },
+        )
+        if is_auto_requester(requested_by):
+            write_automation_log(home_id, device_id, device_name, command, command_id, request.reason)
+        return DeviceCommandResponse(
+            success=True,
+            no_action=False,
+            command_id=command_id,
+            device_id=device_id,
+            command=command,
+            target_state=target_state,
+            previous_state=current_state,
+            current_state=actual_state,
+            status="confirmed",
+            message=message,
+        )
+    except HomeAssistantError as error:
+        failed_at = now_ms()
+        previous_state = current_state if current_state in {"on", "off"} else device.get("state", "unknown")
+        command_record.update(
+            {
+                "timestamp_ms": failed_at,
+                "timestamp_iso": iso_from_ms(failed_at),
+                "status": "failed",
+                "failed_at_ms": failed_at,
+                "failed_at_iso": iso_from_ms(failed_at),
+                "result": {
+                    "success": False,
+                    "actual_state": previous_state,
+                    "error_code": error.code,
+                    "user_message": error.user_message,
+                    "raw_error": str(error.raw_error or error),
+                },
+            }
+        )
+        write_command_record(home_id, device_id, command_record, pending=False)
+        device_updates = {
+            "command_in_progress": False,
+            "pending_command_id": None,
+            "pending_target_state": None,
+            "last_command_status": "failed",
+            "last_command_message": error.user_message,
+            "last_command": {
+                "status": "failed",
+                "user_message": error.user_message,
+                "error_code": error.code,
+            },
+            "updated_at_ms": failed_at,
+            "updated_at_iso": iso_from_ms(failed_at),
+        }
+        if error.code in {"HOME_ASSISTANT_UNREACHABLE", "HA_STATE_UNKNOWN", "HA_ENTITY_NOT_FOUND"}:
+            device_updates.update({"online": False, "local_online": False})
+            if error.code != "HA_COMMAND_FAILED":
+                device_updates.update({"state": "unknown", "display_state": "unknown"})
+        safe_update(f"/homes/{home_id}/devices/{device_id}", device_updates)
+        raise HTTPException(
+            status_code=502 if error.code == "HOME_ASSISTANT_UNREACHABLE" else 409,
+            detail={"success": False, "status": error.code, "message": error.user_message},
+        ) from error
+
+
+def queue_home_assistant_device_command(
+    home_id: str,
+    device_id: str,
+    device: dict[str, Any],
+    request: DeviceCommandRequest,
+    command: str,
+    requested_by: str,
+) -> DeviceCommandResponse:
+    entity_id = str(device.get("ha_entity_id") or "").strip()
+    if not entity_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "status": "HA_ENTITY_NOT_FOUND",
+                "message": "Matter switch was not found in Home Assistant.",
+            },
+        )
+
+    formatted_device = format_device(device_id, device)
+    target_state = command_to_target_state(command)
+    current_state = str(formatted_device.get("state", "unknown")).lower()
+    device_name = device_message_name(device_id, device)
+
+    if current_state == target_state:
+        already_record = build_command_record(
+            home_id,
+            device_id,
+            device_name,
+            command,
+            target_state,
+            current_state,
+            request,
+            control_method="home_assistant",
+            ha_entity_id=entity_id,
+            status="already_in_state",
+        )
+        already_record["result"] = {
+            "success": True,
+            "actual_state": current_state,
+            "error_code": None,
+            "user_message": f"{device_name} is already {target_state}.",
+            "raw_error": None,
+        }
+        write_command_record(home_id, device_id, already_record, pending=False)
+        safe_update(
+            f"/homes/{home_id}/devices/{device_id}",
+            {
+                "last_requested_state": target_state,
+                "last_command_status": "already_in_state",
+                "last_command_message": f"{device_name} is already {target_state}.",
+                "last_command": {
+                    "status": "already_in_state",
+                    "user_message": f"{device_name} is already {target_state}.",
+                    "error_code": None,
+                },
+            },
+        )
+        if is_auto_requester(requested_by):
+            write_automation_log(home_id, device_id, device_name, command, already_record["command_id"], request.reason)
+        return DeviceCommandResponse(
+            success=True,
+            no_action=True,
+            status="already_in_state",
+            device_id=device_id,
+            command_id=already_record["command_id"],
+            command=command,
+            current_state=current_state,
+            target_state=target_state,
+            message=f"{device_name} is already {target_state}.",
+        )
+
+    command_record = build_command_record(
+        home_id,
+        device_id,
+        device_name,
+        command,
+        target_state,
+        current_state,
+        request,
+        control_method="home_assistant",
+        ha_entity_id=entity_id,
+    )
+    command_id = str(command_record["command_id"])
+    write_command_record(home_id, device_id, command_record, pending=True)
+    safe_update(
+        f"/homes/{home_id}/devices/{device_id}",
+        {
+            "command_in_progress": True,
+            "pending_command_id": command_id,
+            "pending_target_state": target_state,
+            "last_requested_state": target_state,
+            "last_command_status": "pending",
+            "last_command_message": "Command queued for local Matter controller.",
+            "last_command": {
+                "status": "pending",
+                "user_message": None,
+                "error_code": None,
+            },
+        },
+    )
+    if is_auto_requester(requested_by):
+        write_automation_log(home_id, device_id, device_name, command, command_id, request.reason)
+    return DeviceCommandResponse(
+        success=True,
+        no_action=False,
+        command_id=command_id,
+        device_id=device_id,
+        command=command,
+        target_state=target_state,
+        previous_state=current_state,
+        status="pending",
+        message="Command queued for local Matter controller.",
+    )
+
+
 @app.post(
     "/api/home/{home_id}/devices/{device_id}/command",
     response_model=DeviceCommandResponse,
@@ -2825,16 +3535,10 @@ def create_device_command(
     if is_auto_requester(requested_by):
         check_auto_safety(home_id, device_id, command, device)
 
+    control_method = str(
+        device.get("control_method") or ("tuya_cloud" if device_id.startswith("breaker_") else "")
+    ).strip().lower()
     formatted_device = format_device(device_id, device)
-    if formatted_device.get("online") is not True:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "success": False,
-                "status": "device_offline",
-                "message": "Device is offline. Check power or Wi-Fi connection.",
-            },
-        )
 
     target_state = command_to_target_state(command)
     current_state = str(formatted_device.get("state", "unknown")).lower()
@@ -2864,6 +3568,39 @@ def create_device_command(
             },
         )
 
+    if control_method == "home_assistant":
+        ha_mode = os.environ.get("HOME_ASSISTANT_COMMAND_MODE", "auto").strip().lower()
+        if ha_mode == "queue" or not is_home_assistant_configured():
+            return queue_home_assistant_device_command(
+                home_id,
+                device_id,
+                device,
+                request,
+                command,
+                requested_by,
+            )
+        return execute_home_assistant_device_command(
+            home_id,
+            device_id,
+            device,
+            request,
+            command,
+            requested_by,
+        )
+
+    if control_method and control_method != "tuya_cloud":
+        raise HTTPException(status_code=400, detail=f"Unsupported control_method: {control_method}.")
+
+    if formatted_device.get("online") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "status": "device_offline",
+                "message": "Device is offline. Check power or Wi-Fi connection.",
+            },
+        )
+
     if current_state == target_state:
         timestamp_ms = now_ms()
         command_id = f"cmd_{timestamp_ms}"
@@ -2884,6 +3621,9 @@ def create_device_command(
             "source": request.source,
             "emergency": request.emergency,
             "alert_id": request.alert_id,
+            "source_suggestion_id": request.source_suggestion_id,
+            "control_method": "tuya_cloud",
+            "ha_entity_id": None,
             "status": "already_in_state",
             "requested_at_ms": timestamp_ms,
             "requested_at_iso": iso_from_ms(timestamp_ms),
@@ -2932,47 +3672,19 @@ def create_device_command(
             message=f"{device_name} is already {target_state}.",
         )
 
-    timestamp_ms = now_ms()
-    timestamp_iso = iso_from_ms(timestamp_ms)
-    command_id = f"cmd_{timestamp_ms}"
-    command_record = {
-        "timestamp_ms": timestamp_ms,
-        "timestamp_iso": timestamp_iso,
-        "timezone": TIMEZONE,
-        "command_id": command_id,
-        "home_id": home_id,
-        "device_id": device_id,
-        "device_name": device_name,
-        "command": command,
-        "target_state": target_state,
-        "previous_state": current_state,
-            "requested_by": request.requested_by,
-            "reason": request.reason,
-            "source": request.source,
-            "emergency": request.emergency,
-            "alert_id": request.alert_id,
-            "source_suggestion_id": request.source_suggestion_id,
-            "status": "pending",
-        "requested_at_ms": timestamp_ms,
-        "requested_at_iso": timestamp_iso,
-        "sent_at_ms": None,
-        "sent_at_iso": None,
-        "confirmed_at_ms": None,
-        "confirmed_at_iso": None,
-        "failed_at_ms": None,
-        "failed_at_iso": None,
-        "timeout_at_ms": None,
-        "timeout_at_iso": None,
-        "result": {
-            "success": None,
-            "actual_state": None,
-            "error_code": None,
-            "user_message": None,
-            "raw_error": None,
-        },
-        "retry_count": 0,
-        "max_retries": 1,
-    }
+    command_record = build_command_record(
+        home_id,
+        device_id,
+        device_name,
+        command,
+        target_state,
+        current_state,
+        request,
+        control_method="tuya_cloud",
+    )
+    command_id = str(command_record["command_id"])
+    timestamp_ms = int(command_record["requested_at_ms"])
+    timestamp_iso = str(command_record["requested_at_iso"])
 
     safe_set(f"/homes/{home_id}/commands/pending/{command_id}", command_record)
     safe_set(f"/homes/{home_id}/commands/history/{command_id}", command_record)

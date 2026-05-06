@@ -22,7 +22,7 @@ SMART_ENERGY_API_URL = os.environ.get(
     "https://smart-energy-api-qs7uzdqawq-as.a.run.app",
 ).rstrip("/")
 PI_DASHBOARD_TOKEN = os.environ.get("PI_DASHBOARD_TOKEN", "")
-ALLOWED_DEVICES = {"breaker_01", "breaker_02"}
+ALLOWED_DEVICES = {"breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"}
 ALLOWED_ACTIONS = {"turn_on", "turn_off"}
 SENSOR_STALE_AFTER_MS = 2 * 60 * 1000
 DEVICE_STALE_AFTER_MS = 45 * 1000
@@ -171,6 +171,8 @@ def format_live_room(esp32: dict[str, Any]) -> dict[str, Any]:
 def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]:
     status = as_dict(device.get("status"))
     metering = as_dict(device.get("metering"))
+    control_method = str(device.get("control_method") or ("tuya_cloud" if device_id.startswith("breaker_") else "")).lower()
+    is_home_assistant_device = control_method == "home_assistant"
     switch = normalize_bool(status.get("switch"))
     relay_status = status.get("relay_status")
     state = (
@@ -183,32 +185,47 @@ def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]
     if pending_target_state not in {"on", "off"}:
         pending_target_state = None
     display_state = pending_target_state if command_in_progress and pending_target_state else state
-    last_seen_ms = status.get("lastSeenMs")
+    last_seen_ms = status.get("lastSeenMs") or status.get("last_seen_ms") or device.get("updated_at_ms")
     is_stale = not isinstance(last_seen_ms, (int, float)) or (
         int(time.time() * 1000) - int(last_seen_ms) > DEVICE_STALE_AFTER_MS
     )
     online = normalize_bool(status.get("online"))
+    if is_home_assistant_device:
+        online = normalize_bool(device.get("local_online"))
+        if online is None:
+            online = normalize_bool(device.get("online"))
     is_breaker = str(device.get("type", "")).lower() in {"smart_breaker", "breaker"} or device_id.startswith("breaker_")
     if online is None:
         online = not is_stale
-    elif is_stale and not is_breaker:
+    elif is_stale and not is_breaker and not is_home_assistant_device:
         online = False
+    if is_home_assistant_device:
+        is_stale = False
     if not online:
-        display_state = "off"
-    power_w = metering.get("power_W", 0)
-    if not online:
+        display_state = "unknown" if is_home_assistant_device else "off"
+    energy_supported = normalize_bool(device.get("energy_supported"))
+    if energy_supported is None:
+        energy_supported = not is_home_assistant_device
+    power_w = None if energy_supported is False else metering.get("power_W", device.get("power_w", 0))
+    if not online and energy_supported is not False:
         power_w = 0
 
     return {
         "device_id": device_id,
         "name": device.get("name", device_id),
         "type": device.get("type", "unknown"),
+        "branch": device.get("branch"),
+        "control_method": control_method or None,
+        "ha_entity_id": device.get("ha_entity_id"),
         "online": bool(online),
+        "local_online": bool(normalize_bool(device.get("local_online")) if device.get("local_online") is not None else online),
+        "cloud_online": bool(normalize_bool(device.get("cloud_online")) if device.get("cloud_online") is not None else not is_home_assistant_device),
         "stale": is_stale,
         "controllable": normalize_bool(device.get("controllable")) is not False,
         "state": state,
         "display_state": display_state,
         "power_w": power_w,
+        "energy_supported": bool(energy_supported),
         "today_kwh": metering.get("energy_kWh", 0),
         "today_cost_bhd": metering.get("cost_BHD", 0),
         "last_seen_ms": last_seen_ms,
@@ -232,7 +249,7 @@ def local_firebase_dashboard(message: str) -> dict[str, Any]:
     devices = {
         device_id: format_live_device(device_id, as_dict(device))
         for device_id, device in live_devices.items()
-        if device_id.startswith("breaker_") or device_id == "esp32_01"
+        if device_id.startswith("breaker_") or device_id.startswith("matter_") or device_id == "esp32_01"
     }
     safety = as_dict(home.get("safety"))
     alerts = active_only(object_to_list(as_dict(home.get("alerts")).get("active")))
@@ -330,7 +347,7 @@ def latest():
         if live_devices:
             formatted_devices = as_dict(data.get("devices")).copy()
             for device_id, device in live_devices.items():
-                if device_id.startswith("breaker_"):
+                if device_id.startswith("breaker_") or device_id.startswith("matter_"):
                     formatted_devices[device_id] = format_live_device(
                         device_id,
                         as_dict(device),

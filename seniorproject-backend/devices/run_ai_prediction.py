@@ -256,11 +256,11 @@ def make_control_suggestion(result: dict[str, Any], payload: dict[str, Any]) -> 
         and payload.get("ac_avg_power_W", 0) > 0
     ):
         return {
-            "device_id": "breaker_02",
+            "device_id": "matter_ac_switch",
             "action": "turn_off",
             "priority": "high",
             "requires_user_approval": True,
-            "reason": "AC power is active while occupancy appears low.",
+            "reason": "AC Switch is active while occupancy appears low.",
         }
 
     if (
@@ -269,11 +269,11 @@ def make_control_suggestion(result: dict[str, Any], payload: dict[str, Any]) -> 
         and payload.get("switch_avg_power_W", 0) > 0
     ):
         return {
-            "device_id": "breaker_01",
+            "device_id": "matter_socket_switch",
             "action": "turn_off",
             "priority": "medium",
             "requires_user_approval": True,
-            "reason": "Switch Breaker is active while the room appears empty.",
+            "reason": "Socket Switch is active while the room appears empty.",
         }
 
     return None
@@ -281,6 +281,15 @@ def make_control_suggestion(result: dict[str, Any], payload: dict[str, Any]) -> 
 
 def command_to_target_state(command: str) -> str:
     return "on" if command == "turn_on" else "off"
+
+
+def device_display_name(device_id: str) -> str:
+    return {
+        "breaker_01": "Switch Breaker",
+        "breaker_02": "AC Breaker",
+        "matter_socket_switch": "Socket Switch",
+        "matter_ac_switch": "AC Switch",
+    }.get(device_id, device_id)
 
 
 def read_control_mode(home_id: str) -> str:
@@ -309,6 +318,26 @@ def default_automation(device_id: str) -> dict[str, Any]:
             "cooldown_ms": 5 * 60 * 1000,
         }
     if device_id == "breaker_02":
+        return {
+            "manual_allowed": True,
+            "assist_allowed": True,
+            "auto_allowed": True,
+            "auto_actions": ["turn_on", "turn_off"],
+            "requires_confirmation": False,
+            "comfort_min_temp": 22,
+            "comfort_max_temp": 25,
+            "cooldown_ms": 10 * 60 * 1000,
+        }
+    if device_id == "matter_socket_switch":
+        return {
+            "manual_allowed": True,
+            "assist_allowed": True,
+            "auto_allowed": True,
+            "auto_actions": ["turn_off"],
+            "requires_confirmation": False,
+            "cooldown_ms": 5 * 60 * 1000,
+        }
+    if device_id == "matter_ac_switch":
         return {
             "manual_allowed": True,
             "assist_allowed": True,
@@ -358,9 +387,7 @@ def create_action_suggestion(home_id: str, suggestion: dict[str, Any]) -> None:
             "suggestion_id": suggestion_id,
             "home_id": home_id,
             "device_id": suggestion["device_id"],
-            "device_name": "AC Breaker"
-            if suggestion["device_id"] == "breaker_02"
-            else "Switch Breaker",
+            "device_name": device_display_name(suggestion["device_id"]),
             "suggested_command": suggestion["action"],
             "target_state": command_to_target_state(suggestion["action"]),
             "reason": suggestion["reason"],
@@ -383,14 +410,19 @@ def maybe_create_auto_command(home_id: str, suggestion: dict[str, Any]) -> bool:
         return False
     if automation.get("requires_confirmation") is True:
         return False
-    if device_id == "breaker_01" and action != "turn_off":
+    if device_id in {"breaker_01", "matter_socket_switch"} and action != "turn_off":
         return False
 
     device = db.reference(f"/homes/{home_id}/devices/{device_id}").get()
     if not isinstance(device, dict):
         return False
     status = device.get("status") if isinstance(device.get("status"), dict) else {}
-    if status.get("online") is False or device.get("command_in_progress") is True:
+    local_online = device.get("local_online")
+    if (
+        status.get("online") is False
+        or local_online is False
+        or device.get("command_in_progress") is True
+    ):
         return False
 
     current_state = db.reference(f"/homes/{home_id}/backend/current_state").get()
@@ -412,7 +444,7 @@ def maybe_create_auto_command(home_id: str, suggestion: dict[str, Any]) -> bool:
 
     timestamp_ms = now_ms()
     command_id = f"cmd_{timestamp_ms}"
-    device_name = "AC Breaker" if device_id == "breaker_02" else "Switch Breaker"
+    device_name = device_display_name(device_id)
     command_record = {
         "command_id": command_id,
         "home_id": home_id,
@@ -421,7 +453,9 @@ def maybe_create_auto_command(home_id: str, suggestion: dict[str, Any]) -> bool:
         "command": action,
         "action": action,
         "target_state": command_to_target_state(action),
-        "previous_state": "on" if status.get("switch") is True else "off",
+        "previous_state": str(device.get("state") or ("on" if status.get("switch") is True else "off")).lower(),
+        "control_method": str(device.get("control_method") or ("tuya_cloud" if device_id.startswith("breaker_") else "")),
+        "ha_entity_id": device.get("ha_entity_id"),
         "requested_by": "ai",
         "reason": suggestion["reason"],
         "status": "pending",

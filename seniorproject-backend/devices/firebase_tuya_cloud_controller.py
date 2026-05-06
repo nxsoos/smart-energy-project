@@ -14,6 +14,11 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from timestamp_utils import TIMEZONE, ms_to_iso, now_ms
+from home_assistant_controller import (
+    HomeAssistantError,
+    execute_home_assistant_command,
+    get_entity_state,
+)
 
 # Raspberry Pi hub role:
 # This is the default production script to run from main.py. It watches Firebase
@@ -34,6 +39,7 @@ DATABASE_URL = (
 HOME_ID = "home_001"
 POLL_INTERVAL_SECONDS = 0.2
 COMMAND_MAX_AGE_MS = 2 * 60 * 1000
+HA_STATE_SYNC_INTERVAL_SECONDS = 30
 
 
 # ============================================================
@@ -68,6 +74,15 @@ DEVICES = {
         "fallback_codes": ["switch_1"],
     },
 }
+
+KNOWN_DEVICE_IDS = {
+    "breaker_01",
+    "breaker_02",
+    "matter_socket_switch",
+    "matter_ac_switch",
+}
+
+last_ha_state_sync_ms = 0
 
 
 # ============================================================
@@ -190,7 +205,9 @@ def action_for_command(command: Dict[str, Any]) -> str:
 
 
 def command_message(device_id: str, state: str) -> str:
-    name = DEVICES.get(device_id, {}).get("name", device_id)
+    device = get_device_ref(device_id).get()
+    name = device.get("name") if isinstance(device, dict) else None
+    name = name or DEVICES.get(device_id, {}).get("name", device_id)
     return f"{name} turned {state} successfully."
 
 
@@ -205,6 +222,26 @@ def friendly_error(raw_error: Any, fallback_code: str = "COMMAND_FAILED") -> Dic
         return {
             "error_code": "COMMAND_TIMEOUT",
             "user_message": "Device did not respond in time.",
+        }
+    if "home_assistant_unreachable" in text or "local controller is unavailable" in text:
+        return {
+            "error_code": "HOME_ASSISTANT_UNREACHABLE",
+            "user_message": "Local controller is unavailable.",
+        }
+    if "ha_entity_not_found" in text:
+        return {
+            "error_code": "HA_ENTITY_NOT_FOUND",
+            "user_message": "Matter switch was not found in Home Assistant.",
+        }
+    if "ha_state_unknown" in text:
+        return {
+            "error_code": "HA_STATE_UNKNOWN",
+            "user_message": "Matter switch state is unknown.",
+        }
+    if "ha_command_failed" in text:
+        return {
+            "error_code": "HA_COMMAND_FAILED",
+            "user_message": "Matter switch command failed. Please try again.",
         }
     if "permission" in text or "auth" in text or "sign" in text or "token" in text:
         return {
@@ -466,22 +503,38 @@ def mark_command_done(
 
     write_command_state(device_id, command, updates, remove_pending=True)
 
-    get_device_ref(device_id).update(
-        {
-            "state": state,
-            "command_in_progress": False,
-            "pending_command_id": None,
-            "pending_target_state": None,
-            "last_requested_state": state,
-            "last_command_status": "confirmed",
-            "last_command_message": message,
-            "last_command": {
-                "status": "confirmed",
-                "user_message": message,
-                "error_code": None,
-            },
-        }
-    )
+    device = get_device_ref(device_id).get()
+    control_method = ""
+    if isinstance(device, dict):
+        control_method = str(device.get("control_method") or "").lower()
+
+    device_updates = {
+        "state": state,
+        "display_state": state,
+        "command_in_progress": False,
+        "pending_command_id": None,
+        "pending_target_state": None,
+        "last_requested_state": state,
+        "last_command_status": "confirmed",
+        "last_command_message": message,
+        "last_command": {
+            "status": "confirmed",
+            "user_message": message,
+            "error_code": None,
+        },
+        "updated_at_ms": confirmed_at,
+        "updated_at_iso": confirmed_at_iso,
+    }
+    if control_method == "home_assistant":
+        device_updates.update(
+            {
+                "online": True,
+                "local_online": True,
+                "cloud_online": False,
+            }
+        )
+
+    get_device_ref(device_id).update(device_updates)
 
     get_device_status_ref(device_id).update(
         {
@@ -553,6 +606,20 @@ def mark_command_failed(
         device_updates["state"] = state_update
     if mapped["error_code"] == "DEVICE_OFFLINE":
         device_updates["state"] = "off"
+    if mapped["error_code"] in {
+        "HOME_ASSISTANT_UNREACHABLE",
+        "HA_ENTITY_NOT_FOUND",
+        "HA_STATE_UNKNOWN",
+    }:
+        device_updates.update(
+            {
+                "state": "unknown",
+                "display_state": "unknown",
+                "online": False,
+                "local_online": False,
+                "cloud_online": False,
+            }
+        )
 
     get_device_ref(device_id).update(device_updates)
 
@@ -633,6 +700,67 @@ def clear_stuck_command_state(device_id: str, command: Dict[str, Any]) -> None:
         )
 
 
+def sync_home_assistant_device_states() -> None:
+    global last_ha_state_sync_ms
+    current_ms = now_ms()
+    if current_ms - last_ha_state_sync_ms < HA_STATE_SYNC_INTERVAL_SECONDS * 1000:
+        return
+    last_ha_state_sync_ms = current_ms
+
+    devices = firebase_ref(f"/homes/{HOME_ID}/devices").get()
+    if not isinstance(devices, dict):
+        return
+
+    for device_id, raw_device in devices.items():
+        if not isinstance(raw_device, dict):
+            continue
+        if str(raw_device.get("control_method") or "").lower() != "home_assistant":
+            continue
+        entity_id = str(raw_device.get("ha_entity_id") or "").strip()
+        timestamp_ms = now_ms()
+        timestamp_iso = ms_to_iso(timestamp_ms)
+        if not entity_id:
+            get_device_ref(device_id).update(
+                {
+                    "state": "unknown",
+                    "display_state": "unknown",
+                    "online": False,
+                    "local_online": False,
+                    "cloud_online": False,
+                    "updated_at_ms": timestamp_ms,
+                    "updated_at_iso": timestamp_iso,
+                }
+            )
+            continue
+        try:
+            state = get_entity_state(entity_id)
+            get_device_ref(device_id).update(
+                {
+                    "state": state,
+                    "display_state": state,
+                    "online": True,
+                    "local_online": True,
+                    "cloud_online": False,
+                    "updated_at_ms": timestamp_ms,
+                    "updated_at_iso": timestamp_iso,
+                }
+            )
+        except HomeAssistantError as error:
+            print(f"[HA SYNC] {device_id} {entity_id}: {error.code} {error.user_message}")
+            get_device_ref(device_id).update(
+                {
+                    "state": "unknown",
+                    "display_state": "unknown",
+                    "online": False,
+                    "local_online": False,
+                    "cloud_online": False,
+                    "last_command_message": error.user_message,
+                    "updated_at_ms": timestamp_ms,
+                    "updated_at_iso": timestamp_iso,
+                }
+            )
+
+
 # ============================================================
 # Main command processor
 # ============================================================
@@ -674,6 +802,49 @@ def process_device_command(cloud, device_id: str, command: Dict[str, Any]) -> No
 
     try:
         relay_on = action == "turn_on"
+        current_device = get_device_ref(device_id).get()
+        if not isinstance(current_device, dict):
+            raise RuntimeError(f"Unknown device_id: {device_id}")
+        control_method = str(
+            current_device.get("control_method")
+            or ("tuya_cloud" if device_id in DEVICES else "")
+        ).lower()
+
+        if control_method == "home_assistant":
+            entity_id = str(current_device.get("ha_entity_id") or "").strip()
+            if not entity_id:
+                raise HomeAssistantError(
+                    "HA_ENTITY_NOT_FOUND",
+                    "Matter switch was not found in Home Assistant.",
+                    "Missing ha_entity_id.",
+                )
+            target_state = target_state_for_action(action)
+            try:
+                current_state = get_entity_state(entity_id)
+                if current_state == target_state:
+                    mark_command_done(device_id, command, relay_on)
+                    print(f"[SUCCESS] {device_id} already {target_state}")
+                    return
+            except HomeAssistantError:
+                raise
+
+            command = mark_command_sent(device_id, command)
+            execute_home_assistant_command(entity_id, action)
+            time.sleep(1.5)
+            actual_state = get_entity_state(entity_id)
+            if actual_state != target_state:
+                raise HomeAssistantError(
+                    "HA_COMMAND_FAILED",
+                    "Matter switch command failed. Please try again.",
+                    f"Expected {target_state}, got {actual_state}.",
+                )
+            mark_command_done(device_id, command, relay_on)
+            print(f"[SUCCESS] {device_id} {action} completed via Home Assistant")
+            return
+
+        if control_method != "tuya_cloud":
+            raise RuntimeError(f"Unsupported control_method: {control_method}")
+
         device_config = DEVICES[device_id]
         ensure_tuya_device_powered(cloud, device_config["tuya_device_id"])
 
@@ -693,7 +864,10 @@ def process_device_command(cloud, device_id: str, command: Dict[str, Any]) -> No
             print(f"[FAILED] {device_id} {action}")
 
     except Exception as error:
-        error_message = str(error)
+        if isinstance(error, HomeAssistantError):
+            error_message = f"{error.code}: {error.user_message}"
+        else:
+            error_message = str(error)
         print(f"[ERROR] {device_id}: {error_message}")
         traceback.print_exc()
 
@@ -727,7 +901,7 @@ def process_pending_commands(cloud) -> None:
         return
 
     # Backward compatibility: older clients wrote only /commands/{device_id}/latest.
-    for device_id in DEVICES.keys():
+    for device_id in KNOWN_DEVICE_IDS:
         command = get_command_ref(device_id).get()
         process_device_command(cloud, device_id, command)
 
@@ -748,6 +922,7 @@ def run_controller() -> None:
 
     while True:
         process_pending_commands(cloud)
+        sync_home_assistant_device_states()
         time.sleep(POLL_INTERVAL_SECONDS)
 
 

@@ -66,7 +66,7 @@
       </section>
 
       <section class="section-header">
-        <h2>Breaker Control</h2>
+        <h2>Device Control</h2>
         <p id="commandMessage">Ready</p>
       </section>
 
@@ -92,6 +92,30 @@
           <div class="button-row">
             <button class="btn btn-on" data-device-id="breaker_02" data-action="turn_on">ON</button>
             <button class="btn btn-off" data-device-id="breaker_02" data-action="turn_off">OFF</button>
+          </div>
+        </article>
+
+        <article class="card breaker" data-device-id="matter_socket_switch">
+          <div>
+            <h3>Socket Switch</h3>
+            <p>matter_socket_switch · Matter</p>
+            <span id="matter_socket_switch_status" class="breaker-status">Unknown</span>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-on" data-device-id="matter_socket_switch" data-action="turn_on">ON</button>
+            <button class="btn btn-off" data-device-id="matter_socket_switch" data-action="turn_off">OFF</button>
+          </div>
+        </article>
+
+        <article class="card breaker" data-device-id="matter_ac_switch">
+          <div>
+            <h3>AC Switch</h3>
+            <p>matter_ac_switch · Matter</p>
+            <span id="matter_ac_switch_status" class="breaker-status">Unknown</span>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-on" data-device-id="matter_ac_switch" data-action="turn_on">ON</button>
+            <button class="btn btn-off" data-device-id="matter_ac_switch" data-action="turn_off">OFF</button>
           </div>
         </article>
       </section>

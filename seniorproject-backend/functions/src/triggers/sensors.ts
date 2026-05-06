@@ -43,10 +43,23 @@ function defaultDeviceSafety(deviceId: string): Record<string, boolean> {
   if (deviceId === "breaker_01") {
     return { critical_device: false, emergency_shutdown_allowed: true, auto_shutdown_on_smoke: true };
   }
-  if (deviceId === "breaker_02") {
+  if (
+    deviceId === "breaker_02" ||
+    deviceId === "matter_socket_switch" ||
+    deviceId === "matter_ac_switch"
+  ) {
     return { critical_device: false, emergency_shutdown_allowed: true, auto_shutdown_on_smoke: false };
   }
   return { critical_device: true, emergency_shutdown_allowed: false, auto_shutdown_on_smoke: false };
+}
+
+function deviceDisplayName(deviceId: string): string {
+  return {
+    breaker_01: "Switch Breaker",
+    breaker_02: "AC Breaker",
+    matter_socket_switch: "Socket Switch",
+    matter_ac_switch: "AC Switch",
+  }[deviceId] ?? deviceId;
 }
 
 async function writeSafetyEvent(
@@ -193,6 +206,9 @@ async function createEmergencyCommand(
   timestampMs: number
 ): Promise<string> {
   const commandId = `cmd_${timestampMs}_${deviceId}`;
+  const device = asRecord(
+    (await admin.database().ref(`/homes/${homeId}/devices/${deviceId}`).get()).val()
+  );
   const commandRecord = {
     ...nowTimestamp(timestampMs),
     command_id: commandId,
@@ -207,6 +223,8 @@ async function createEmergencyCommand(
     source: "smoke_emergency",
     emergency: true,
     alert_id: SMOKE_ALERT_ID,
+    control_method: String(device.control_method ?? (deviceId.startsWith("breaker_") ? "tuya_cloud" : "")),
+    ha_entity_id: device.ha_entity_id ?? null,
     status: "pending",
     requested_at_ms: timestampMs,
     requested_at_iso: msToIso(timestampMs),
@@ -337,8 +355,8 @@ async function confirmSmokeEmergency(
       ),
       createEmergencySuggestion(
         homeId,
-        "breaker_02",
-        "AC Breaker",
+        "matter_ac_switch",
+        "AC Switch",
         "Smoke or gas was detected. Turning off AC/fan simulation may help prevent spreading smoke or gas.",
         timestampMs
       )
@@ -363,15 +381,17 @@ async function confirmSmokeEmergency(
       continue;
     }
     const status = asRecord(device.status);
-    const online = normalizeBool(status.online);
-    const isOn = normalizeBool(status.switch) || String(status.state ?? "").toLowerCase() === "on";
+    const online = normalizeBool(device.local_online) || normalizeBool(status.online);
+    const isOn =
+      normalizeBool(status.switch) ||
+      String(device.state ?? status.state ?? "").toLowerCase() === "on";
     if (online === false || !isOn) {
       continue;
     }
     const commandId = await createEmergencyCommand(
       homeId,
       deviceId,
-      String(device.name ?? (deviceId === "breaker_01" ? "Switch Breaker" : "AC Breaker")),
+      String(device.name ?? deviceDisplayName(deviceId)),
       timestampMs + Object.keys(devices).indexOf(deviceId)
     );
     await writeSafetyEvent(homeId, "emergency_shutdown_command_created", `Auto Mode created ${commandId}.`, [
@@ -882,7 +902,7 @@ export const checkPendingConditions = onSchedule(
               ...nowTimestamp(now),
               waste_risk: "medium",
               recommendation:
-                "Turn off Switch Breaker if the room is actually empty.",
+                "Turn off Socket Switch if the room is actually empty.",
               last_alert_type: "energy_waste",
               last_alert_at: now,
               last_alert_at_ms: now,
@@ -897,20 +917,20 @@ export const checkPendingConditions = onSchedule(
                   type: "energy_saving",
                   priority: "medium",
                   title: "Possible energy waste",
-                  message: "The room appears empty and Switch Breaker is still on.",
+                  message: "The room appears empty and Socket Switch is still on.",
                   source: "backend_analysis",
                   related_alert_key: "light_on_no_motion",
-                  related_device_id: "breaker_01",
+                  related_device_id: "matter_socket_switch",
                 },
                 now
               );
             }
 
             await handleSuggestedAction(homeId, {
-              deviceId: "breaker_01",
-              deviceName: "Switch Breaker",
+              deviceId: "matter_socket_switch",
+              deviceName: "Socket Switch",
               command: "turn_off",
-              reason: "Light is on while the room appears empty.",
+              reason: "Socket Switch is on while the room appears empty.",
               source: "backend_analysis",
             });
 
@@ -986,8 +1006,8 @@ export const checkPendingConditions = onSchedule(
             }
 
             await handleSuggestedAction(homeId, {
-              deviceId: "breaker_02",
-              deviceName: "AC Breaker",
+              deviceId: "matter_ac_switch",
+              deviceName: "AC Switch",
               command: "turn_on",
               reason: "Room temperature is high and cooling may improve comfort.",
               source: "backend_analysis",

@@ -388,16 +388,12 @@ class FirebaseRealtimeService {
     return SensorData(
       timestamp: _asDateTime(
         _pick(sensors, [
-          'timestamp_ms',
-          'timestamp_iso',
-          'readable_time',
-          'timestamp',
-        ]) ??
-            _pick(status, [
-          'lastSeenMs',
-          'last_seen_ms',
-          'readableTime',
-        ]),
+              'timestamp_ms',
+              'timestamp_iso',
+              'readable_time',
+              'timestamp',
+            ]) ??
+            _pick(status, ['lastSeenMs', 'last_seen_ms', 'readableTime']),
       ),
       temperature: _asDouble(
         _pick(source, ['temperature', 'latest_temperature']),
@@ -493,8 +489,9 @@ class FirebaseRealtimeService {
         .map((entry) => _parseApiDevice(entry.key, _asMap(entry.value)))
         .where(
           (device) =>
-              device.type != DeviceType.socket ||
-              device.id.startsWith('breaker_'),
+              device.controllable ||
+              device.id.startsWith('breaker_') ||
+              device.id.startsWith('matter_'),
         )
         .toList();
 
@@ -589,9 +586,9 @@ class FirebaseRealtimeService {
       settingsSummary: _asMap(data['settings_summary']),
       occupancy: _asMap(data['occupancy']),
       safety: _asMap(data['safety']),
-      criticalAlerts: _asList(data['critical_alerts'])
-          .map((item) => _asMap(item))
-          .toList(),
+      criticalAlerts: _asList(
+        data['critical_alerts'],
+      ).map((item) => _asMap(item)).toList(),
       nextSchedule: _parseOptionalSchedule(_asMap(data['next_schedule'])),
       scenarioId: null,
       scenarioName: null,
@@ -608,8 +605,17 @@ class FirebaseRealtimeService {
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final lastCommand = _asMap(data['last_command']);
     final online = _asBool(_pick(data, ['online']), fallback: true);
+    final localOnline = _asBool(
+      _pick(data, ['local_online', 'localOnline']),
+      fallback: online,
+    );
+    final energySupported = _asBool(
+      _pick(data, ['energy_supported', 'energySupported']),
+      fallback: true,
+    );
     final visualIsOn =
         online &&
+        localOnline &&
         (displayState == 'on' || _asBool(_pick(data, ['is_on', 'switch'])));
     return Device(
       id: _asString(_pick(data, ['device_id', 'id']), fallback: deviceId),
@@ -619,10 +625,22 @@ class FirebaseRealtimeService {
       currentPower: online
           ? _asDouble(_pick(data, ['power_w', 'currentPower']))
           : 0.0,
-      branch: _branchFromDeviceId(deviceId),
+      branch: _asString(
+        _pick(data, ['branch', 'zone']),
+        fallback: _branchFromDeviceId(deviceId),
+      ),
       online: online,
+      localOnline: localOnline,
+      cloudOnline: _asBool(
+        _pick(data, ['cloud_online', 'cloudOnline']),
+        fallback: true,
+      ),
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: _asBool(_pick(data, ['command_in_progress'])),
+      energySupported: energySupported,
+      controlMethod: _asNullableString(
+        _pick(data, ['control_method', 'controlMethod']),
+      ),
       pendingTargetState: _asNullableString(
         _pick(data, ['pending_target_state']),
       ),
@@ -637,8 +655,11 @@ class FirebaseRealtimeService {
     if (deviceId == 'breaker_01') {
       return DeviceType.light;
     }
-    if (deviceId == 'breaker_02') {
+    if (deviceId == 'breaker_02' || deviceId == 'matter_ac_switch') {
       return DeviceType.airConditioner;
+    }
+    if (deviceId == 'matter_socket_switch') {
+      return DeviceType.socket;
     }
     final text = '$deviceId $name $rawType'.toLowerCase();
     if (text.contains('ac') || text.contains('air')) {
@@ -820,8 +841,7 @@ class FirebaseRealtimeService {
             (item) =>
                 _asString(_pick(item, ['severity', 'level'])).toLowerCase() ==
                     'critical' ||
-                _asString(_pick(item, ['category'])).toLowerCase() ==
-                    'safety',
+                _asString(_pick(item, ['category'])).toLowerCase() == 'safety',
           )
           .toList(),
       nextSchedule: null,
@@ -1015,10 +1035,7 @@ class FirebaseRealtimeService {
     required String uid,
     required String role,
   }) async {
-    await _dio.put(
-      '/api/home/$homeId/members/$uid/role',
-      data: {'role': role},
-    );
+    await _dio.put('/api/home/$homeId/members/$uid/role', data: {'role': role});
   }
 
   Future<void> removeMember({
@@ -1037,9 +1054,7 @@ class FirebaseRealtimeService {
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>> markSmokeSafe({
-    required String homeId,
-  }) async {
+  Future<Map<String, dynamic>> markSmokeSafe({required String homeId}) async {
     final response = await _dio.post(
       '/api/home/$homeId/safety/smoke/actions/mark-safe',
     );
@@ -1160,7 +1175,8 @@ class FirebaseRealtimeService {
       final sameCommand =
           _asString(_pick(item, ['suggested_command', 'command'])) == command;
       final sameReason = _asString(_pick(item, ['reason'])) == reason;
-      if (entry.key == suggestionId || (sameDevice && sameCommand && sameReason)) {
+      if (entry.key == suggestionId ||
+          (sameDevice && sameCommand && sameReason)) {
         await activeRef.child(entry.key).remove();
       }
     }
@@ -1180,7 +1196,7 @@ class FirebaseRealtimeService {
       );
     }
 
-    if (deviceId != 'breaker_01' && deviceId != 'breaker_02') {
+    if (!_isCommandEnabledDeviceId(deviceId)) {
       throw ArgumentError.value(deviceId, 'deviceId', 'Unsupported device ID');
     }
 
@@ -1219,6 +1235,10 @@ class FirebaseRealtimeService {
           fallback: 'Could not send command. Please try again.',
         );
         throw Exception(message);
+      }
+
+      if (deviceId.startsWith('matter_')) {
+        throw Exception('Local controller command requires the backend API.');
       }
 
       final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -1321,8 +1341,20 @@ class FirebaseRealtimeService {
     final rawType = _pick(data, ['type', 'deviceType'])?.toString();
     final name =
         _pick(data, ['name', 'label', 'deviceName'])?.toString() ?? deviceId;
-    final online = _asBool(_pick(status, ['online']), fallback: true);
-    final visualIsOn = online && (pendingSwitchState ?? actualSwitchState);
+    final online = _asBool(
+      _pick(status, ['online']) ?? _pick(data, ['online']),
+      fallback: true,
+    );
+    final localOnline = _asBool(
+      _pick(data, ['local_online', 'localOnline']),
+      fallback: online,
+    );
+    final energySupported = _asBool(
+      _pick(data, ['energy_supported', 'energySupported']),
+      fallback: true,
+    );
+    final visualIsOn =
+        online && localOnline && (pendingSwitchState ?? actualSwitchState);
     final rawPower = _asDouble(
       _pick(data, ['currentPower', 'power', 'wattage']) ??
           _pick(metering, ['power_W', 'power_w', 'power']),
@@ -1338,8 +1370,17 @@ class FirebaseRealtimeService {
           _pick(data, ['branch', 'zone'])?.toString() ??
           _branchFromDeviceId(deviceId),
       online: online,
+      localOnline: localOnline,
+      cloudOnline: _asBool(
+        _pick(data, ['cloud_online', 'cloudOnline']),
+        fallback: true,
+      ),
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: commandInProgress,
+      energySupported: energySupported,
+      controlMethod: _asNullableString(
+        _pick(data, ['control_method', 'controlMethod']),
+      ),
       pendingTargetState: pendingTargetState,
       lastCommandMessage: _asNullableString(
         _pick(data, ['last_command_message']),
@@ -1365,8 +1406,10 @@ class FirebaseRealtimeService {
     ).toLowerCase();
     final hasActiveRecommendation =
         recommendation.isNotEmpty &&
-        _asString(_pick(recommendation, ['status']), fallback: 'active')
-                .toLowerCase() ==
+        _asString(
+              _pick(recommendation, ['status']),
+              fallback: 'active',
+            ).toLowerCase() ==
             'active';
     final needsData =
         recommendationType.contains('check_') ||
@@ -1595,7 +1638,10 @@ class FirebaseRealtimeService {
       ),
       statusCode: _asString(
         _pick(data, ['ai_status_code', 'status_code', 'statusCode']),
-        fallback: _asString(_pick(data, ['prediction_status']), fallback: 'watching'),
+        fallback: _asString(
+          _pick(data, ['prediction_status']),
+          fallback: 'watching',
+        ),
       ),
       statusLabel: _asString(
         _pick(data, ['ai_status_label', 'status_label', 'statusLabel']),
@@ -1971,8 +2017,20 @@ class FirebaseRealtimeService {
         _pick(data, ['currentPower', 'power', 'wattage']) ??
             _pick(metering, ['power_W', 'power_w', 'power']),
       );
-      final online = _asBool(_pick(status, ['online']), fallback: true);
-      final visualIsOn = online && (desiredSwitchState ?? actualSwitchState);
+      final online = _asBool(
+        _pick(status, ['online']) ?? _pick(data, ['online']),
+        fallback: true,
+      );
+      final localOnline = _asBool(
+        _pick(data, ['local_online', 'localOnline']),
+        fallback: online,
+      );
+      final energySupported = _asBool(
+        _pick(data, ['energy_supported', 'energySupported']),
+        fallback: true,
+      );
+      final visualIsOn =
+          online && localOnline && (desiredSwitchState ?? actualSwitchState);
 
       devices.add(
         Device(
@@ -1992,8 +2050,17 @@ class FirebaseRealtimeService {
               _pick(data, ['branch', 'zone'])?.toString() ??
               _branchFromDeviceId(entry.key),
           online: online,
+          localOnline: localOnline,
+          cloudOnline: _asBool(
+            _pick(data, ['cloud_online', 'cloudOnline']),
+            fallback: true,
+          ),
           controllable: _asBool(_pick(data, ['controllable']), fallback: true),
           commandInProgress: commandInProgress,
+          energySupported: energySupported,
+          controlMethod: _asNullableString(
+            _pick(data, ['control_method', 'controlMethod']),
+          ),
           pendingTargetState: pendingTargetState,
           lastCommandMessage:
               _asNullableString(_pick(data, ['last_command_message'])) ??
@@ -2037,7 +2104,9 @@ class FirebaseRealtimeService {
 
     return normalizedType == 'smart_breaker' ||
         normalizedType == 'breaker' ||
-        deviceId.toLowerCase().startsWith('breaker_');
+        normalizedType == 'matter_switch' ||
+        deviceId.toLowerCase().startsWith('breaker_') ||
+        deviceId.toLowerCase().startsWith('matter_');
   }
 
   Map<String, dynamic> _collectMeteringSummary(
@@ -2117,6 +2186,13 @@ class FirebaseRealtimeService {
       return 'Branch 3';
     }
     return 'Main';
+  }
+
+  bool _isCommandEnabledDeviceId(String deviceId) {
+    return deviceId == 'breaker_01' ||
+        deviceId == 'breaker_02' ||
+        deviceId == 'matter_socket_switch' ||
+        deviceId == 'matter_ac_switch';
   }
 
   dynamic _pick(Map<String, dynamic> source, List<String> keys) {
@@ -2283,9 +2359,16 @@ class FirebaseRealtimeService {
       ...data,
       'id': id,
       'severity': _pick(data, ['severity', 'level']) ?? 'medium',
-      'timestamp': _pick(data, ['timestamp_ms', 'timestamp', 'created_at_ms', 'createdAt', 'created_at']),
+      'timestamp': _pick(data, [
+        'timestamp_ms',
+        'timestamp',
+        'created_at_ms',
+        'createdAt',
+        'created_at',
+      ]),
       'isActive': _pick(data, ['isActive', 'active']) ?? true,
-      'type': _pick(data, ['category', 'type', 'alert_type']) ?? 'sensorfailure',
+      'type':
+          _pick(data, ['category', 'type', 'alert_type']) ?? 'sensorfailure',
     };
 
     return Alert.fromJson(payload);

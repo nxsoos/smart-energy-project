@@ -48,9 +48,15 @@ class DeviceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = _getDeviceColor();
     final controlsDisabled =
-        isCommandPending || !device.online || !device.controllable;
-    final switchValue = device.online && device.isOn;
-    final visibleCommandError = device.online ? commandError : null;
+        isCommandPending ||
+        !device.online ||
+        !device.localOnline ||
+        !device.controllable;
+    final switchValue = device.online && device.localOnline && device.isOn;
+    final visibleCommandError = device.online && device.localOnline
+        ? commandError
+        : null;
+    final isLocalControl = device.controlMethod == 'home_assistant';
 
     return Card(
       elevation: 2,
@@ -103,36 +109,62 @@ class DeviceCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: switchValue
-                      ? color.withValues(alpha: 0.1)
-                      : Colors.grey[100],
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.bolt,
-                      size: 16,
-                      color: switchValue ? color : Colors.grey,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      formatPower(device.currentPower),
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: switchValue ? color : Colors.grey,
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (device.energySupported)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: switchValue
+                            ? color.withValues(alpha: 0.1)
+                            : Colors.grey[100],
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.bolt,
+                            size: 16,
+                            color: switchValue ? color : Colors.grey,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            formatPower(device.currentPower),
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: switchValue ? color : Colors.grey,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
+                  if (isLocalControl)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.teal.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Text(
+                        'Local control',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.teal,
+                        ),
+                      ),
+                    ),
+                ],
               ),
               if (isCommandPending || device.commandInProgress) ...[
                 const SizedBox(height: 10),
@@ -141,10 +173,14 @@ class DeviceCard extends StatelessWidget {
                   child: const LinearProgressIndicator(minHeight: 3),
                 ),
               ],
-              if (!device.online || !device.controllable) ...[
+              if (!device.online ||
+                  !device.localOnline ||
+                  !device.controllable) ...[
                 const SizedBox(height: 10),
                 Text(
-                  !device.online ? 'Offline' : 'Control disabled',
+                  (!device.online || !device.localOnline)
+                      ? 'Offline'
+                      : 'Control disabled',
                   style: const TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 12,

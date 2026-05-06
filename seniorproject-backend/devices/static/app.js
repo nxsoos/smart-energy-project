@@ -281,13 +281,18 @@ function breakerStatus(device) {
 }
 
 function updateBreakers(devices) {
-  for (const id of ["breaker_01", "breaker_02"]) {
+  for (const id of ["breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"]) {
     const device = devices[id] || {};
     const element = document.getElementById(`${id}_status`);
     const card = document.querySelector(`.breaker[data-device-id="${id}"]`);
     const buttons = document.querySelectorAll(`button[data-device-id="${id}"]`);
+    if (!element || !card) {
+      continue;
+    }
     const inProgress = nested(device, ["command_in_progress"], false) === true;
-    const online = nested(device, ["online"], false) === true;
+    const localControl = nested(device, ["control_method"], "") === "home_assistant";
+    const online = nested(device, ["online"], false) === true &&
+      (!localControl || nested(device, ["local_online"], false) === true);
     const controllable = nested(device, ["controllable"], true) !== false;
     const pendingTarget = nested(device, ["pending_target_state"], null);
     const lastCommand = nested(device, ["last_command.user_message", "last_command_message"], "");
@@ -301,9 +306,11 @@ function updateBreakers(devices) {
       button.disabled = inProgress || !online || !controllable;
     });
     if (!online) {
-      element.textContent = "Offline";
+      element.textContent = localControl ? "Local offline" : "Offline";
     } else if (!controllable) {
       element.textContent = "Disabled";
+    } else if (localControl && !inProgress) {
+      element.title = "Local control";
     } else if (!inProgress && lastCommand) {
       element.title = lastCommand;
     }

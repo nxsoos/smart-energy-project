@@ -344,8 +344,11 @@ class _HomeScreenState extends State<HomeScreen> {
     _currentTariff = ElectricityPricing.costPerKWh;
   }
 
-  bool _isControllableBreaker(String deviceId) {
-    return deviceId == 'breaker_01' || deviceId == 'breaker_02';
+  bool _isCommandEnabledDevice(String deviceId) {
+    return deviceId == 'breaker_01' ||
+        deviceId == 'breaker_02' ||
+        deviceId == 'matter_socket_switch' ||
+        deviceId == 'matter_ac_switch';
   }
 
   Future<void> _toggleDevice(Device device, bool value) async {
@@ -367,17 +370,21 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    if (!_isControllableBreaker(device.id)) {
+    if (!_isCommandEnabledDevice(device.id)) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${device.name} is not command-enabled.')),
       );
       return;
     }
 
-    if (!device.online || !device.controllable) {
+    if (!device.online || !device.localOnline || !device.controllable) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Device is offline. Check power or Wi-Fi connection.'),
+        SnackBar(
+          content: Text(
+            device.controlMethod == 'home_assistant'
+                ? 'Local controller is unavailable.'
+                : 'Device is offline. Check power or Wi-Fi connection.',
+          ),
         ),
       );
       return;
@@ -463,7 +470,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final activeDeviceIds = devices
         .map((device) => device.id)
-        .where(_isControllableBreaker)
+        .where(_isCommandEnabledDevice)
         .toSet();
 
     for (final deviceId in _commandStatusSubscriptions.keys.toList()) {
@@ -563,18 +570,27 @@ class _HomeScreenState extends State<HomeScreen> {
         (index != -1 && _devices[index].commandInProgress)) {
       if (index != -1) {
         setState(() {
-          if (!updatedDevice.online) {
+          if (!updatedDevice.online || !updatedDevice.localOnline) {
             _pendingDeviceCommands.remove(updatedDevice.id);
             _deviceCommandErrors.remove(updatedDevice.id);
           }
           _devices[index] = _devices[index].copyWith(
             type: _stableDeviceType(updatedDevice.id, _devices[index].type),
-            isOn: updatedDevice.online && updatedDevice.isOn,
+            isOn:
+                updatedDevice.online &&
+                updatedDevice.localOnline &&
+                updatedDevice.isOn,
             online: updatedDevice.online,
+            localOnline: updatedDevice.localOnline,
+            cloudOnline: updatedDevice.cloudOnline,
             controllable: updatedDevice.controllable,
             currentPower: updatedDevice.currentPower,
             commandInProgress:
-                updatedDevice.online && updatedDevice.commandInProgress,
+                updatedDevice.online &&
+                updatedDevice.localOnline &&
+                updatedDevice.commandInProgress,
+            energySupported: updatedDevice.energySupported,
+            controlMethod: updatedDevice.controlMethod,
             lastCommandMessage: updatedDevice.lastCommandMessage,
           );
         });
@@ -756,8 +772,12 @@ class _HomeScreenState extends State<HomeScreen> {
         isOn: current.isOn,
         currentPower: current.currentPower,
         online: current.online,
+        localOnline: current.localOnline,
+        cloudOnline: current.cloudOnline,
         controllable: current.controllable,
         commandInProgress: current.commandInProgress,
+        energySupported: current.energySupported,
+        controlMethod: current.controlMethod,
         pendingTargetState: current.pendingTargetState,
         lastCommandMessage: current.lastCommandMessage,
       );
@@ -768,8 +788,11 @@ class _HomeScreenState extends State<HomeScreen> {
     if (deviceId == 'breaker_01') {
       return DeviceType.light;
     }
-    if (deviceId == 'breaker_02') {
+    if (deviceId == 'breaker_02' || deviceId == 'matter_ac_switch') {
       return DeviceType.airConditioner;
+    }
+    if (deviceId == 'matter_socket_switch') {
+      return DeviceType.socket;
     }
     return fallback;
   }
@@ -4097,7 +4120,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final controllableDevices = _devices.where(
-      (device) => _isControllableBreaker(device.id),
+      (device) => _isCommandEnabledDevice(device.id),
     );
 
     for (final device in controllableDevices) {

@@ -9,8 +9,12 @@ class Device {
   final double currentPower; // Watts
   final String branch; // Branch 1, 2, or 3
   final bool online;
+  final bool localOnline;
+  final bool cloudOnline;
   final bool controllable;
   final bool commandInProgress;
+  final bool energySupported;
+  final String? controlMethod;
   final String? pendingTargetState;
   final String? lastCommandMessage;
 
@@ -22,8 +26,12 @@ class Device {
     required this.currentPower,
     required this.branch,
     this.online = true,
+    this.localOnline = true,
+    this.cloudOnline = true,
     this.controllable = true,
     this.commandInProgress = false,
+    this.energySupported = true,
+    this.controlMethod,
     this.pendingTargetState,
     this.lastCommandMessage,
   });
@@ -34,11 +42,15 @@ class Device {
       name: json['name'] as String,
       type: _parseDeviceType(json['type'] as String),
       isOn: json['isOn'] as bool,
-      currentPower: (json['currentPower'] as num).toDouble(),
+      currentPower: (json['currentPower'] as num?)?.toDouble() ?? 0,
       branch: json['branch'] as String,
       online: json['online'] as bool? ?? true,
+      localOnline: json['localOnline'] as bool? ?? true,
+      cloudOnline: json['cloudOnline'] as bool? ?? true,
       controllable: json['controllable'] as bool? ?? true,
       commandInProgress: json['commandInProgress'] as bool? ?? false,
+      energySupported: json['energySupported'] as bool? ?? true,
+      controlMethod: json['controlMethod'] as String?,
       pendingTargetState: json['pendingTargetState'] as String?,
       lastCommandMessage: json['lastCommandMessage'] as String?,
     );
@@ -53,8 +65,12 @@ class Device {
       'currentPower': currentPower,
       'branch': branch,
       'online': online,
+      'localOnline': localOnline,
+      'cloudOnline': cloudOnline,
       'controllable': controllable,
       'commandInProgress': commandInProgress,
+      'energySupported': energySupported,
+      'controlMethod': controlMethod,
       'pendingTargetState': pendingTargetState,
       'lastCommandMessage': lastCommandMessage,
     };
@@ -68,8 +84,12 @@ class Device {
     double? currentPower,
     String? branch,
     bool? online,
+    bool? localOnline,
+    bool? cloudOnline,
     bool? controllable,
     bool? commandInProgress,
+    bool? energySupported,
+    String? controlMethod,
     String? pendingTargetState,
     String? lastCommandMessage,
   }) {
@@ -81,8 +101,12 @@ class Device {
       currentPower: currentPower ?? this.currentPower,
       branch: branch ?? this.branch,
       online: online ?? this.online,
+      localOnline: localOnline ?? this.localOnline,
+      cloudOnline: cloudOnline ?? this.cloudOnline,
       controllable: controllable ?? this.controllable,
       commandInProgress: commandInProgress ?? this.commandInProgress,
+      energySupported: energySupported ?? this.energySupported,
+      controlMethod: controlMethod ?? this.controlMethod,
       pendingTargetState: pendingTargetState ?? this.pendingTargetState,
       lastCommandMessage: lastCommandMessage ?? this.lastCommandMessage,
     );
