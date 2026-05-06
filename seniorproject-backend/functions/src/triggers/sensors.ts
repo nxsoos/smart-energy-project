@@ -277,16 +277,24 @@ async function confirmSmokeEmergency(homeId: string, logId: string, timestampMs:
   });
 
   const emergencyTasks = [
-    createNotification(homeId, timestampMs),
-    writeSafetyEvent(homeId, "smoke_confirmed", "Smoke or gas was confirmed in Room 1.", [
-      "critical_alert_created",
-      "emergency_mode_enabled",
-      "notification_created",
-      "popup_required",
-    ], timestampMs),
+    writeSafetyEvent(
+      homeId,
+      "smoke_confirmed",
+      "Smoke or gas was confirmed in Room 1.",
+      existingAlert.exists()
+        ? ["emergency_mode_enabled"]
+        : [
+            "critical_alert_created",
+            "emergency_mode_enabled",
+            "notification_created",
+            "popup_required",
+          ],
+      timestampMs
+    ),
   ];
   if (!existingAlert.exists()) {
     emergencyTasks.push(
+      createNotification(homeId, timestampMs),
       createEmergencySuggestion(
         homeId,
         "breaker_01",

@@ -183,30 +183,35 @@ def create_smoke_emergency(timestamp_ms: int, source_log: str) -> None:
             "updated_at_iso": ms_to_iso(timestamp_ms),
         }
     )
-    notification_id = f"notif_{timestamp_ms}"
-    home_ref(f"notifications/{notification_id}").set(
-        {
-            "timestamp_ms": timestamp_ms,
-            "timestamp_iso": ms_to_iso(timestamp_ms),
-            "timezone": TIMEZONE,
-            "notification_id": notification_id,
-            "type": "critical_alert",
-            "alert_type": "smoke_detected",
-            "severity": "critical",
-            "title": "Smoke/Gas Detected",
-            "body": "Smoke or gas was detected in Room 1. Check immediately.",
-            "home_id": HOME_ID,
-            "room_id": "room1",
-            "read": False,
-            "delivered": False,
-            "created_at_ms": timestamp_ms,
-            "created_at_iso": ms_to_iso(timestamp_ms),
-        }
-    )
     if not existing_alert:
+        notification_id = f"notif_{timestamp_ms}"
+        home_ref(f"notifications/{notification_id}").set(
+            {
+                "timestamp_ms": timestamp_ms,
+                "timestamp_iso": ms_to_iso(timestamp_ms),
+                "timezone": TIMEZONE,
+                "notification_id": notification_id,
+                "type": "critical_alert",
+                "alert_type": "smoke_detected",
+                "severity": "critical",
+                "title": "Smoke/Gas Detected",
+                "body": "Smoke or gas was detected in Room 1. Check immediately.",
+                "home_id": HOME_ID,
+                "room_id": "room1",
+                "read": False,
+                "delivered": False,
+                "created_at_ms": timestamp_ms,
+                "created_at_iso": ms_to_iso(timestamp_ms),
+            }
+        )
         create_emergency_suggestion("breaker_01", "Switch Breaker", "Smoke or gas was detected. Turning off this breaker may reduce electrical risk.", timestamp_ms)
         create_emergency_suggestion("breaker_02", "AC Breaker", "Smoke or gas was detected. Turning off AC/fan simulation may help prevent spreading smoke or gas.", timestamp_ms)
-    write_safety_event("smoke_confirmed", "Smoke or gas was confirmed in Room 1.", timestamp_ms, ["critical_alert_created", "emergency_mode_enabled", "notification_created", "popup_required"])
+    write_safety_event(
+        "smoke_confirmed",
+        "Smoke or gas was confirmed in Room 1.",
+        timestamp_ms,
+        ["emergency_mode_enabled"] if existing_alert else ["critical_alert_created", "emergency_mode_enabled", "notification_created", "popup_required"],
+    )
 
 
 def update_smoke_safety(history_payload: dict[str, Any], timestamp_ms: int) -> None:
