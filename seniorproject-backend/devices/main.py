@@ -11,12 +11,26 @@ RESTART_DELAY_SECONDS = 5
 
 
 SCRIPTS = [
-    "firebase_tuya_cloud_controller.py",
     "esp32_sensor_receiver.py",
     "dashboard_server.py",
     "tuya_breakers_to_firebase.py",
-    "schedule_runner.py",
 ]
+
+if os.environ.get("ENABLE_FIREBASE_COMMAND_CONTROLLER", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    SCRIPTS.append("firebase_tuya_cloud_controller.py")
+
+if os.environ.get("ENABLE_CLOUD_SCHEDULE_RUNNER", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    SCRIPTS.append("schedule_runner.py")
 
 
 running_processes: dict[str, subprocess.Popen] = {}

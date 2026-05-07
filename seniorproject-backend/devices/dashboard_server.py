@@ -7,6 +7,8 @@ import firebase_admin
 import requests
 from firebase_admin import credentials, db
 from flask import Flask, jsonify, render_template, request
+from local_command_controller import execute_local_command, sync_home_assistant_device_states
+from local_state_store import home_ref as local_home_ref, home_snapshot
 
 
 SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
@@ -15,6 +17,16 @@ DATABASE_URL = os.environ.get(
     "https://seniorproject-energy-default-rtdb.asia-southeast1."
     "firebasedatabase.app",
 )
+FIREBASE_ENABLED = os.environ.get("FIREBASE_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CLOUD_BACKEND_ENABLED = os.environ.get(
+    "CLOUD_BACKEND_ENABLED",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 HOME_ID = os.environ.get("HOME_ID", "home_001")
 SMART_ENERGY_API_URL = os.environ.get(
@@ -24,6 +36,12 @@ SMART_ENERGY_API_URL = os.environ.get(
 PI_DASHBOARD_TOKEN = os.environ.get("PI_DASHBOARD_TOKEN", "")
 ALLOWED_DEVICES = {"breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"}
 ALLOWED_ACTIONS = {"turn_on", "turn_off"}
+ALLOWED_CONTROL_MODES = {"assist", "auto", "manual"}
+EMERGENCY_SAFE_DEVICE_IDS = [
+    item.strip()
+    for item in os.environ.get("EMERGENCY_SAFE_DEVICE_IDS", "breaker_01,matter_ac_switch").split(",")
+    if item.strip()
+]
 SENSOR_STALE_AFTER_MS = 2 * 60 * 1000
 DEVICE_STALE_AFTER_MS = 45 * 1000
 
@@ -31,6 +49,8 @@ app = Flask(__name__)
 
 
 def initialize_firebase() -> None:
+    if not FIREBASE_ENABLED:
+        return
     if firebase_admin._apps:
         return
 
@@ -48,6 +68,8 @@ def api_headers() -> dict[str, str]:
 
 
 def home_ref(path: str):
+    if not FIREBASE_ENABLED:
+        return local_home_ref(HOME_ID, path)
     return db.reference(f"/homes/{HOME_ID}/{path}")
 
 
@@ -242,7 +264,10 @@ def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]
 
 
 def local_firebase_dashboard(message: str) -> dict[str, Any]:
-    home = as_dict(db.reference(f"/homes/{HOME_ID}").get())
+    if FIREBASE_ENABLED:
+        home = as_dict(db.reference(f"/homes/{HOME_ID}").get())
+    else:
+        home = home_snapshot(HOME_ID)
     esp32 = as_dict(as_dict(home.get("devices")).get("esp32_01"))
     live_devices = as_dict(home.get("devices"))
     room = format_live_room(esp32) if esp32 else {}
@@ -317,6 +342,28 @@ def dismiss_suggestion_locally(suggestion_id: str) -> dict[str, Any]:
     return {"success": True, "message": "Action suggestion dismissed."}
 
 
+def local_control_payload(mode: str) -> dict[str, Any]:
+    labels = {
+        "assist": "Assist",
+        "auto": "Auto",
+        "manual": "Manual",
+    }
+    descriptions = {
+        "assist": "The system suggests actions and asks before controlling devices.",
+        "auto": "The Pi can run approved local automation rules automatically.",
+        "manual": "The system only shows data; users control devices manually.",
+    }
+    timestamp_ms = int(time.time() * 1000)
+    return {
+        "mode": mode,
+        "label": labels[mode],
+        "description": descriptions[mode],
+        "updated_by": "pi_dashboard",
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -325,20 +372,26 @@ def index():
 @app.get("/api/latest")
 def latest():
     try:
-        try:
-            response = requests.get(
-                f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/dashboard",
-                headers=api_headers(),
-                timeout=10,
-            )
-            data = response.json()
-            if not response.ok:
-                message = data.get("detail", "Backend API request failed")
-                print(f"[DASHBOARD FALLBACK] API returned {response.status_code}: {message}", flush=True)
-                data = local_firebase_dashboard(str(message))
-        except Exception as api_error:
-            print(f"[DASHBOARD FALLBACK] API unavailable: {api_error}", flush=True)
-            data = local_firebase_dashboard(str(api_error))
+        if not CLOUD_BACKEND_ENABLED:
+            sync_home_assistant_device_states()
+
+        if CLOUD_BACKEND_ENABLED:
+            try:
+                response = requests.get(
+                    f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/dashboard",
+                    headers=api_headers(),
+                    timeout=10,
+                )
+                data = response.json()
+                if not response.ok:
+                    message = data.get("detail", "Backend API request failed")
+                    print(f"[DASHBOARD FALLBACK] API returned {response.status_code}: {message}", flush=True)
+                    data = local_firebase_dashboard(str(message))
+            except Exception as api_error:
+                print(f"[DASHBOARD FALLBACK] API unavailable: {api_error}", flush=True)
+                data = local_firebase_dashboard(str(api_error))
+        else:
+            data = local_firebase_dashboard("Local Pi mode: cloud backend disabled.")
 
         esp32 = as_dict(home_ref("devices/esp32_01").get())
         live_devices = as_dict(home_ref("devices").get())
@@ -407,6 +460,17 @@ def send_command():
         if action not in ALLOWED_ACTIONS:
             return jsonify({"success": False, "message": "Unsupported action"}), 400
 
+        if not CLOUD_BACKEND_ENABLED:
+            result = execute_local_command(
+                device_id,
+                action,
+                requested_by="user_emergency_action" if data.get("emergency") else "pi_dashboard",
+                source="smoke_emergency" if data.get("emergency") else "pi_dashboard",
+                emergency=bool(data.get("emergency")),
+                alert_id="smoke_detected_room1" if data.get("emergency") else None,
+            )
+            return jsonify(result), 200 if result.get("success") else 500
+
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/devices/{device_id}/command",
             headers=api_headers(),
@@ -443,6 +507,34 @@ def send_command():
 @app.post("/api/safety/smoke/actions/turn-off-safe-devices")
 def turn_off_safe_devices():
     try:
+        if not CLOUD_BACKEND_ENABLED:
+            results = []
+            for device_id in EMERGENCY_SAFE_DEVICE_IDS:
+                if device_id not in ALLOWED_DEVICES:
+                    continue
+                results.append(
+                    execute_local_command(
+                        device_id,
+                        "turn_off",
+                        requested_by="user_emergency_action",
+                        source="smoke_emergency",
+                        emergency=True,
+                        alert_id="smoke_detected_room1",
+                    )
+                )
+            failed = [item for item in results if not item.get("success")]
+            return jsonify(
+                {
+                    "success": not failed,
+                    "message": (
+                        "Emergency local shutdown completed."
+                        if not failed
+                        else "Some emergency shutdown commands failed."
+                    ),
+                    "results": results,
+                }
+            ), 200 if not failed else 500
+
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/turn-off-safe-devices",
             headers=api_headers(),
@@ -456,6 +548,31 @@ def turn_off_safe_devices():
 @app.post("/api/safety/smoke/actions/mark-safe")
 def mark_smoke_safe():
     try:
+        if not CLOUD_BACKEND_ENABLED:
+            timestamp_ms = int(time.time() * 1000)
+            timestamp_iso = datetime.now(timezone.utc).isoformat()
+            home_ref("safety/emergency_mode").set(
+                {
+                    "active": False,
+                    "reason": None,
+                    "message": "Smoke emergency was marked safe from the Pi dashboard.",
+                    "updated_at_ms": timestamp_ms,
+                    "updated_at_iso": timestamp_iso,
+                    "updated_by": "pi_dashboard",
+                }
+            )
+            home_ref("safety/smoke_state").update(
+                {
+                    "status": "clear",
+                    "last_clear_at_ms": timestamp_ms,
+                    "last_clear_at_iso": timestamp_iso,
+                    "updated_at_ms": timestamp_ms,
+                    "updated_at_iso": timestamp_iso,
+                }
+            )
+            home_ref("alerts/active/smoke_detected_room1").delete()
+            return jsonify({"success": True, "message": "Smoke emergency marked safe locally."})
+
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/mark-safe",
             headers=api_headers(),
@@ -474,6 +591,20 @@ def update_control_mode():
             return jsonify({"success": False, "message": "JSON body is required"}), 400
 
         mode = str(data.get("mode", "")).strip().lower()
+        if mode not in ALLOWED_CONTROL_MODES:
+            return jsonify({"success": False, "message": "Unsupported control mode"}), 400
+
+        if not CLOUD_BACKEND_ENABLED:
+            payload = local_control_payload(mode)
+            home_ref("control").set(payload)
+            return jsonify(
+                {
+                    "success": True,
+                    "message": f"Control mode changed to {payload['label']}.",
+                    "control": payload,
+                }
+            )
+
         response = requests.put(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/control/mode",
             headers=api_headers(),

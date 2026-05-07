@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import logging
 import sys
@@ -11,6 +12,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from timestamp_utils import TIMEZONE, ms_to_iso, now_ms
+from local_state_store import add_history, home_ref as local_home_ref
 
 # Raspberry Pi hub role:
 # This optional telemetry poller reads Tuya breaker metering/status data and
@@ -31,6 +33,17 @@ FIREBASE_DB_URL = "https://seniorproject-energy-default-rtdb.asia-southeast1.fir
 HOME_ID = "home_001"
 POLL_INTERVAL_SECONDS = 5
 OFFLINE_AFTER_FAILURES = 2
+FIREBASE_ENABLED = os.environ.get("FIREBASE_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LOCAL_RAW_HISTORY_ENABLED = os.environ.get(
+    "LOCAL_RAW_HISTORY_ENABLED",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_HISTORY_MAX_RECORDS = int(os.environ.get("LOCAL_HISTORY_MAX_RECORDS", "5000"))
 
 # =========================================================
 # BREAKERS CONFIG
@@ -181,6 +194,9 @@ def build_history_payload(data):
 
 def write_device_latest(firebase_key, breaker_name, device_id, data):
     payload = build_device_payload(breaker_name, device_id, data)
+    if not FIREBASE_ENABLED:
+        local_home_ref(HOME_ID, f"devices/{firebase_key}").update(payload)
+        return
     url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/devices/{firebase_key}.json"
     r = requests.patch(url, json=payload, timeout=15)
     r.raise_for_status()
@@ -188,6 +204,17 @@ def write_device_latest(firebase_key, breaker_name, device_id, data):
 def write_device_history(firebase_key, data):
     payload = build_history_payload(data)
     key = f"breaker_{data['timestamp_ms']}"
+    if not FIREBASE_ENABLED:
+        if LOCAL_RAW_HISTORY_ENABLED:
+            local_home_ref(HOME_ID, f"history/{firebase_key}/{key}").set(payload)
+        else:
+            add_history(
+                firebase_key,
+                key,
+                payload,
+                max_records=LOCAL_HISTORY_MAX_RECORDS,
+            )
+        return
     url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/history/{firebase_key}/{key}.json"
     r = requests.put(url, json=payload, timeout=15)
     r.raise_for_status()
@@ -217,6 +244,9 @@ def write_device_offline(firebase_key, breaker_name, device_id, error):
         },
         "state": "off",
     }
+    if not FIREBASE_ENABLED:
+        local_home_ref(HOME_ID, f"devices/{firebase_key}").update(payload)
+        return
     url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/devices/{firebase_key}.json"
     r = requests.patch(url, json=payload, timeout=15)
     r.raise_for_status()
@@ -230,6 +260,9 @@ def write_poll_error(firebase_key, error):
             "last_poll_error_at_iso": ms_to_iso(timestamp),
         }
     }
+    if not FIREBASE_ENABLED:
+        local_home_ref(HOME_ID, f"devices/{firebase_key}").update(payload)
+        return
     url = f"{FIREBASE_DB_URL}/homes/{HOME_ID}/devices/{firebase_key}.json"
     r = requests.patch(url, json=payload, timeout=15)
     r.raise_for_status()

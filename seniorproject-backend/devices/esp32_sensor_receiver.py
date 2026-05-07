@@ -9,6 +9,7 @@ from typing import Any
 import firebase_admin
 from firebase_admin import credentials, db
 from flask import Flask, jsonify, request
+from local_state_store import add_history, home_ref as local_home_ref
 
 
 SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
@@ -17,6 +18,17 @@ DATABASE_URL = os.environ.get(
     "https://seniorproject-energy-default-rtdb.asia-southeast1."
     "firebasedatabase.app"
 )
+FIREBASE_ENABLED = os.environ.get("FIREBASE_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LOCAL_RAW_HISTORY_ENABLED = os.environ.get(
+    "LOCAL_RAW_HISTORY_ENABLED",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_HISTORY_MAX_RECORDS = int(os.environ.get("LOCAL_HISTORY_MAX_RECORDS", "5000"))
 
 HOME_ID = "home_001"
 SOURCE = "raspberry_pi_hub"
@@ -53,6 +65,8 @@ def request_has_valid_device_key() -> bool:
 
 
 def initialize_firebase() -> None:
+    if not FIREBASE_ENABLED:
+        return
     if firebase_admin._apps:
         return
 
@@ -66,6 +80,8 @@ def initialize_firebase() -> None:
 
 
 def home_ref(path: str):
+    if not FIREBASE_ENABLED:
+        return local_home_ref(HOME_ID, path)
     return db.reference(f"/homes/{HOME_ID}/{path}")
 
 
@@ -347,7 +363,7 @@ def build_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def save_to_firebase(payload: dict[str, Any]) -> None:
+def save_sensor_payload(payload: dict[str, Any]) -> None:
     history_key = payload["timestamp_key"]
     history_payload = build_history_payload(payload)
     timestamp_ms = int(payload["timestamp_ms"])
@@ -376,16 +392,32 @@ def save_to_firebase(payload: dict[str, Any]) -> None:
         settings,
         timestamp_ms,
     ):
-        home_ref(f"history/occupancy_logs/occ_{timestamp_ms}").set(occupancy)
+        if FIREBASE_ENABLED or LOCAL_RAW_HISTORY_ENABLED:
+            home_ref(f"history/occupancy_logs/occ_{timestamp_ms}").set(occupancy)
+        else:
+            add_history(
+                "occupancy_logs",
+                f"occ_{timestamp_ms}",
+                occupancy,
+                max_records=LOCAL_HISTORY_MAX_RECORDS,
+            )
         home_ref("occupancy/room1_latest_history").set(occupancy)
-    home_ref(f"history/sensor_logs/{history_key}").set(history_payload)
+    if FIREBASE_ENABLED or LOCAL_RAW_HISTORY_ENABLED:
+        home_ref(f"history/sensor_logs/{history_key}").set(history_payload)
+    else:
+        add_history(
+            "sensor_logs",
+            history_key,
+            history_payload,
+            max_records=LOCAL_HISTORY_MAX_RECORDS,
+        )
 
 
-def save_to_firebase_background(payload: dict[str, Any]) -> None:
+def save_sensor_payload_background(payload: dict[str, Any]) -> None:
     try:
-        save_to_firebase(payload)
+        save_sensor_payload(payload)
         print(
-            f"[ESP32 RECEIVER] Saved to Firebase: {payload.get('timestamp_key')}",
+            f"[ESP32 RECEIVER] Saved locally: {payload.get('timestamp_key')}",
             flush=True,
         )
     except Exception as error:
@@ -436,7 +468,7 @@ def receive_room1_sensors():
 
         payload = build_payload(data)
         threading.Thread(
-            target=save_to_firebase_background,
+            target=save_sensor_payload_background,
             args=(payload,),
             daemon=True,
         ).start()
