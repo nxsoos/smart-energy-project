@@ -1,5 +1,6 @@
+// ignore_for_file: unused_element, unused_element_parameter
+
 import 'package:dio/dio.dart';
-import 'package:firebase_database/firebase_database.dart';
 
 import '../models/alert.dart';
 import '../models/ai_insights.dart';
@@ -283,13 +284,6 @@ class FirebaseRealtimeService {
           connectTimeout: const Duration(seconds: 30),
           receiveTimeout: const Duration(seconds: 30),
         ),
-      ),
-      _firebaseDio = Dio(
-        BaseOptions(
-          baseUrl: NetworkConfig.firebaseRealtimeDatabaseUrl,
-          connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 10),
-        ),
       ) {
     _dio.interceptors.add(
       InterceptorsWrapper(
@@ -319,73 +313,21 @@ class FirebaseRealtimeService {
         },
       ),
     );
-    _firebaseDio.interceptors.add(
-      InterceptorsWrapper(
-        onRequest: (options, handler) async {
-          final token = await AuthService().getIdToken();
-          if (token != null && token.isNotEmpty) {
-            options.queryParameters = {
-              ...options.queryParameters,
-              'auth': token,
-            };
-          }
-          handler.next(options);
-        },
-      ),
-    );
   }
 
   final Dio _dio;
-  final Dio _firebaseDio;
-  int _lastCommandTimestampMs = 0;
 
   bool get usesLocalPiApi => NetworkConfig.useLocalPiApi;
-
-  DatabaseReference _firebaseRef(String path) {
-    final database = FirebaseDatabase.instanceFor(
-      app: FirebaseDatabase.instance.app,
-      databaseURL: NetworkConfig.firebaseRealtimeDatabaseUrl,
-    );
-
-    return database.ref(path);
-  }
 
   Stream<Alert> watchAlerts({
     required String homeId,
     required int sinceTimestampMs,
   }) {
-    if (usesLocalPiApi) {
-      return const Stream<Alert>.empty();
-    }
-    final alertsRef = _firebaseRef('homes/$homeId/backend/alerts');
-
-    final alertsQuery = alertsRef
-        .orderByChild('timestamp')
-        .startAt(sinceTimestampMs);
-
-    return alertsQuery.onChildAdded.map((event) {
-      final raw = event.snapshot.value;
-      final data = _asMap(raw);
-      return _alertFromBackend(
-        event.snapshot.key ?? DateTime.now().millisecondsSinceEpoch.toString(),
-        data,
-      );
-    });
+    return const Stream<Alert>.empty();
   }
 
   Stream<SensorData> watchLiveSensorData({required String homeId}) {
-    if (usesLocalPiApi) {
-      return const Stream<SensorData>.empty();
-    }
-    final sensorRef = _firebaseRef('homes/$homeId/devices/esp32_01');
-
-    return sensorRef.onValue.map((event) {
-      final raw = _asMap(event.snapshot.value);
-      if (raw.isEmpty) {
-        throw StateError('No live sensor data found for $homeId.');
-      }
-      return _parseLiveSensorDevice(raw);
-    });
+    return const Stream<SensorData>.empty();
   }
 
   SensorData _parseLiveSensorDevice(Map<String, dynamic> raw) {
@@ -456,11 +398,7 @@ class FirebaseRealtimeService {
     }
 
     if (scenarioId != null) {
-      return _fetchDashboardDataFromFirebase(
-        homeId: homeId,
-        scenarioId: scenarioId,
-        cancelToken: cancelToken,
-      );
+      throw Exception('Demo scenarios are not available in local Pi mode.');
     }
 
     final response = await _dio.get(
@@ -638,7 +576,7 @@ class FirebaseRealtimeService {
       type: _parseApiDeviceType(deviceId, name, rawType),
       isOn: visualIsOn,
       currentPower: online
-          ? _asDouble(_pick(data, ['power_w', 'currentPower']))
+          ? _asDouble(_pick(data, ['power_w', 'currentPower', 'power_W']))
           : 0.0,
       branch: _asString(
         _pick(data, ['branch', 'zone']),
@@ -653,6 +591,11 @@ class FirebaseRealtimeService {
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: _asBool(_pick(data, ['command_in_progress'])),
       energySupported: energySupported,
+      voltage: _asDouble(_pick(data, ['voltage_v', 'voltage_V'])),
+      current: _asDouble(_pick(data, ['current_a', 'current_A'])),
+      energyToday: _asDouble(
+        _pick(data, ['energy_kwh', 'energy_kWh', 'today_kwh']),
+      ),
       controlMethod: _asNullableString(
         _pick(data, ['control_method', 'controlMethod']),
       ),
@@ -753,176 +696,13 @@ class FirebaseRealtimeService {
     String? scenarioId,
     CancelToken? cancelToken,
   }) async {
-    final response = await _firebaseDio.get(
-      '/homes/$homeId.json',
-      cancelToken: cancelToken,
-    );
-    final home = _asMap(response.data);
-
-    if (home.isEmpty) {
-      throw Exception('No data found for $homeId.');
-    }
-
-    final selectedScenario = scenarioId == null
-        ? const <String, dynamic>{}
-        : _asMap(_asMap(home['demo_scenarios'])[scenarioId]);
-    final sourceHome = selectedScenario.isEmpty ? home : selectedScenario;
-    final sourceBackend = _asMap(sourceHome['backend']);
-    final rootBackend = _asMap(home['backend']);
-    final rootAiMetadata = _asMap(_asMap(rootBackend['ai'])['test_metadata']);
-    final metadata = {
-      ...rootAiMetadata,
-      ..._asMap(_asMap(sourceBackend['ai'])['test_metadata']),
-      ..._asMap(sourceHome['scenario']),
-    };
-
-    final devices = _asMap(sourceHome['devices']);
-    final history = _asMap(sourceHome['history']);
-    final sensors = _asMap(sourceHome['sensors']);
-    final commands = _asMap(sourceHome['commands']);
-    final backend = _asMap(sourceHome['backend']);
-    final backendAi = _asMap(backend['ai']);
-    final backendDashboard = _asMap(backend['dashboard']);
-    final dashboardEnergy = {
-      ...sourceHome,
-      ..._asMap(backendDashboard['energy']),
-    };
-    final dashboardEnvironment = {
-      ...sourceHome,
-      ..._asMap(backendDashboard['environment']),
-    };
-    final backendEnergy = _asMap(backend['energy']);
-    final backendCurrentTotal = _asMap(backendEnergy['current_total']);
-    final recommendations = _asMap(backend['recommendations']);
-    final activeAlerts = _asMap(backend['active_alerts']);
-    final actionSuggestions = _asMap(sourceHome['action_suggestions']);
-    final activeSuggestions = _asMap(actionSuggestions['active']);
-    final automationLogs = _asMap(sourceHome['automation_logs']);
-
-    final commandStates = _parseDeviceCommandStates(commands);
-    final parsedDevices = _parseDevices(devices, commandStates);
-    final meteringSummary = _collectMeteringSummary(devices);
-
-    return DashboardData(
-      reading: _parseReading(
-        history,
-        dashboardEnergy,
-        backendCurrentTotal,
-        parsedDevices,
-        meteringSummary,
-      ),
-      sensors: _parseSensors(sensors, devices, dashboardEnvironment),
-      devices: parsedDevices,
-      alerts: const [],
-      tariffBhdPerKwh: _asDouble(
-        _pick(dashboardEnergy, [
-              'tariff_BHD_per_kWh',
-              'tariffBhdPerKwh',
-              'tariff',
-            ]) ??
-            _pick(backendCurrentTotal, [
-              'tariff_BHD_per_kWh',
-              'tariffBhdPerKwh',
-              'tariff',
-            ]) ??
-            _pick(home, ['tariff_BHD_per_kWh', 'tariffBhdPerKwh', 'tariff']),
-        fallback: ElectricityPricing.costPerKWh,
-      ),
-      pendingDeviceCommands: commandStates.entries
-          .where((entry) => entry.value.isPending)
-          .map((entry) => entry.key)
-          .toSet(),
-      deviceCommandErrors: const {},
-      aiDashboard: _parseAiDashboard(_asMap(backendDashboard['ai'])),
-      aiDailySummary: _parseAiDailySummary(_asMap(backendAi['daily_summary'])),
-      aiRecommendation: _parseAiRecommendation(
-        _asMap(recommendations['ai_energy_insight']),
-      ),
-      aiAlert: _parseAiAlert(_asMap(activeAlerts['ai_abnormal_usage'])),
-      control: _parseControl(_asMap(sourceHome['control'])),
-      actionSuggestions: _asList(
-        activeSuggestions,
-      ).map(_parseActionSuggestion).toList(),
-      automationLogs: _asList(automationLogs).map(_parseAutomationLog).toList()
-        ..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
-      settingsSummary: _asMap(sourceHome['settings_summary']),
-      occupancy: _asMap(sourceHome['occupancy'])['room1'] is Map
-          ? _asMap(_asMap(sourceHome['occupancy'])['room1'])
-          : const {},
-      safety: _asMap(sourceHome['safety']),
-      criticalAlerts: _asList(_asMap(sourceHome['alerts'])['active'])
-          .map((item) => _asMap(item))
-          .where(
-            (item) =>
-                _asString(_pick(item, ['severity', 'level'])).toLowerCase() ==
-                    'critical' ||
-                _asString(_pick(item, ['category'])).toLowerCase() == 'safety',
-          )
-          .toList(),
-      nextSchedule: null,
-      scenarioId: _asNullableString(
-        _pick(metadata, ['scenario_id', 'active_scenario', 'scenario_name']),
-      ),
-      scenarioName: _asNullableString(
-        _pick(metadata, ['scenario_name', 'name', 'active_scenario']),
-      ),
-      scenarioDescription: _asNullableString(
-        _pick(metadata, ['scenario_description', 'description', 'notes']),
-      ),
-      deviceControlEnabled: _asBool(
-        _pick(sourceHome, ['device_control_enabled', 'deviceControlEnabled']) ??
-            _pick(metadata, ['device_control_enabled', 'deviceControlEnabled']),
-        fallback: homeId != 'home_test',
-      ),
-    );
+    throw Exception('Firebase Realtime Database fallback is disabled.');
   }
 
   Future<List<DemoScenario>> fetchDemoScenarios({
     CancelToken? cancelToken,
   }) async {
-    final response = await _firebaseDio.get(
-      '/homes/home_test.json',
-      cancelToken: cancelToken,
-    );
-    final home = _asMap(response.data);
-    final scenarios = _asMap(home['demo_scenarios']);
-
-    if (scenarios.isNotEmpty) {
-      return scenarios.entries.map((entry) {
-        final data = _asMap(entry.value);
-        final scenarioAiMetadata = _asMap(
-          _asMap(_asMap(data['backend'])['ai'])['test_metadata'],
-        );
-        final metadata = {..._asMap(data['scenario']), ...scenarioAiMetadata};
-        return DemoScenario(
-          id: entry.key,
-          name:
-              _asNullableString(
-                _pick(metadata, ['scenario_name', 'name', 'active_scenario']),
-              ) ??
-              _prettyScenarioName(entry.key),
-          description:
-              _asNullableString(
-                _pick(metadata, ['scenario_description', 'description']),
-              ) ??
-              'Demo scenario data.',
-        );
-      }).toList()..sort((a, b) => a.name.compareTo(b.name));
-    }
-
-    final metadata = _asMap(_asMap(home['backend'])['ai'])['test_metadata'];
-    final activeScenario =
-        _asNullableString(_pick(metadata, ['active_scenario'])) ??
-        'current_home_test';
-    return [
-      DemoScenario(
-        id: activeScenario,
-        name: _prettyScenarioName(activeScenario),
-        description:
-            _asNullableString(_pick(metadata, ['notes'])) ??
-            'Current Home Test scenario.',
-      ),
-    ];
+    return const <DemoScenario>[];
   }
 
   Future<List<ControlModeOption>> fetchControlModes({
@@ -1271,49 +1051,7 @@ class FirebaseRealtimeService {
     required String homeId,
     required String suggestionId,
   }) async {
-    final timestampMs = DateTime.now().millisecondsSinceEpoch;
-    final activeRef = _firebaseRef('homes/$homeId/action_suggestions/active');
-    final suggestionRef = activeRef.child(suggestionId);
-    final suggestionSnap = await suggestionRef.get();
-    final suggestion = _asMap(suggestionSnap.value);
-    if (suggestion.isEmpty) {
-      return;
-    }
-
-    final dismissed = {
-      ...suggestion,
-      'status': 'dismissed',
-      'timestamp_ms': timestampMs,
-      'timestamp_iso': DateTime.fromMillisecondsSinceEpoch(
-        timestampMs,
-      ).toIso8601String(),
-      'dismissed_at_ms': timestampMs,
-      'dismissed_at_iso': DateTime.fromMillisecondsSinceEpoch(
-        timestampMs,
-      ).toIso8601String(),
-    };
-    await _firebaseRef(
-      'homes/$homeId/action_suggestions/history/$suggestionId',
-    ).set(dismissed);
-
-    final activeSnap = await activeRef.get();
-    final active = _asMap(activeSnap.value);
-    final deviceId = _asString(_pick(suggestion, ['device_id']));
-    final command = _asString(
-      _pick(suggestion, ['suggested_command', 'command']),
-    );
-    final reason = _asString(_pick(suggestion, ['reason']));
-    for (final entry in active.entries) {
-      final item = _asMap(entry.value);
-      final sameDevice = _asString(_pick(item, ['device_id'])) == deviceId;
-      final sameCommand =
-          _asString(_pick(item, ['suggested_command', 'command'])) == command;
-      final sameReason = _asString(_pick(item, ['reason'])) == reason;
-      if (entry.key == suggestionId ||
-          (sameDevice && sameCommand && sameReason)) {
-        await activeRef.child(entry.key).remove();
-      }
-    }
+    throw Exception('Firebase Realtime Database fallback is disabled.');
   }
 
   Future<DeviceCommandResult> sendDeviceCommand(
@@ -1398,29 +1136,7 @@ class FirebaseRealtimeService {
         throw Exception('Local Pi API command failed.');
       }
 
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      final timestampMs = nowMs <= _lastCommandTimestampMs
-          ? _lastCommandTimestampMs + 1
-          : nowMs;
-      _lastCommandTimestampMs = timestampMs;
-
-      await _firebaseRef('homes/$homeId/commands/$deviceId/latest').set({
-        'command_id': 'cmd_$timestampMs',
-        'device_id': deviceId,
-        'action': action,
-        'command': action,
-        'target_state': action == 'turn_on' ? 'on' : 'off',
-        'status': 'pending',
-        'requested_by': 'mobile_app',
-        'created_at': timestampMs,
-      });
-      return DeviceCommandResult(
-        success: true,
-        noAction: false,
-        status: 'pending',
-        message: 'Command accepted.',
-        commandId: 'cmd_$timestampMs',
-      );
+      throw Exception('Backend API command failed.');
     }
   }
 
@@ -1435,22 +1151,7 @@ class FirebaseRealtimeService {
     String homeId,
     String deviceId,
   ) {
-    if (usesLocalPiApi) {
-      return const Stream<DeviceCommandState>.empty();
-    }
-    final commandRef = _firebaseRef('homes/$homeId/commands/$deviceId/latest');
-
-    return commandRef.onValue.map((event) {
-      final command = _asMap(event.snapshot.value);
-      return DeviceCommandState(
-        status: _asString(_pick(command, ['status'])).toLowerCase(),
-        action: _asString(_pick(command, ['action', 'command'])).toLowerCase(),
-        error: _asNullableString(
-          _pick(command, ['error']) ??
-              _pick(_asMap(command['result']), ['user_message']),
-        ),
-      );
-    });
+    return const Stream<DeviceCommandState>.empty();
   }
 
   Stream<bool?> watchDeviceSwitchStatus(String deviceId) {
@@ -1461,31 +1162,11 @@ class FirebaseRealtimeService {
   }
 
   Stream<bool?> watchDeviceSwitchStatusForHome(String homeId, String deviceId) {
-    if (usesLocalPiApi) {
-      return const Stream<bool?>.empty();
-    }
-    return _firebaseRef(
-      'homes/$homeId/devices/$deviceId/status/switch',
-    ).onValue.map((event) {
-      final value = event.snapshot.value;
-      if (value == null) {
-        return null;
-      }
-      return _asBool(value);
-    });
+    return const Stream<bool?>.empty();
   }
 
   Stream<Device> watchDeviceForHome(String homeId, String deviceId) {
-    if (usesLocalPiApi) {
-      return const Stream<Device>.empty();
-    }
-    return _firebaseRef('homes/$homeId/devices/$deviceId').onValue.map((event) {
-      final raw = _asMap(event.snapshot.value);
-      if (raw.isEmpty) {
-        throw StateError('No device data found for $deviceId.');
-      }
-      return _parseRealtimeDevice(deviceId, raw);
-    });
+    return const Stream<Device>.empty();
   }
 
   Device _parseRealtimeDevice(String deviceId, Map<String, dynamic> data) {
@@ -1544,6 +1225,9 @@ class FirebaseRealtimeService {
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: commandInProgress,
       energySupported: energySupported,
+      voltage: _asDouble(_pick(metering, ['voltage_V', 'voltage'])),
+      current: _asDouble(_pick(metering, ['current_A', 'current'])),
+      energyToday: _asDouble(_pick(metering, ['energy_kWh', 'energy_kwh'])),
       controlMethod: _asNullableString(
         _pick(data, ['control_method', 'controlMethod']),
       ),
@@ -2224,6 +1908,18 @@ class FirebaseRealtimeService {
           controllable: _asBool(_pick(data, ['controllable']), fallback: true),
           commandInProgress: commandInProgress,
           energySupported: energySupported,
+          voltage: _asDouble(
+            _pick(data, ['voltage_v', 'voltage_V']) ??
+                _pick(metering, ['voltage_V', 'voltage']),
+          ),
+          current: _asDouble(
+            _pick(data, ['current_a', 'current_A']) ??
+                _pick(metering, ['current_A', 'current']),
+          ),
+          energyToday: _asDouble(
+            _pick(data, ['energy_kwh', 'energy_kWh', 'today_kwh']) ??
+                _pick(metering, ['energy_kWh', 'energy_kwh']),
+          ),
           controlMethod: _asNullableString(
             _pick(data, ['control_method', 'controlMethod']),
           ),

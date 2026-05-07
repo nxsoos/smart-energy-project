@@ -280,6 +280,13 @@ function breakerStatus(device) {
   return "Unknown";
 }
 
+function setText(id, value) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value;
+  }
+}
+
 function updateBreakers(devices) {
   for (const id of ["breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"]) {
     const device = devices[id] || {};
@@ -297,6 +304,10 @@ function updateBreakers(devices) {
     const pendingTarget = nested(device, ["pending_target_state"], null);
     const lastCommand = nested(device, ["last_command.user_message", "last_command_message"], "");
     const status = breakerStatus(device);
+    const power = nested(device, ["power_w", "metering.power_W"], null);
+    const voltage = nested(device, ["voltage_v", "metering.voltage_V"], null);
+    const current = nested(device, ["current_a", "metering.current_A"], null);
+    const energy = nested(device, ["energy_kwh", "today_kwh", "metering.energy_kWh"], null);
     element.textContent = inProgress && pendingTarget ? `${status} - Processing` : status;
     element.style.background = status === "ON" ? "#dff5eb" : status === "OFF" ? "#ffe5e5" : "#edf2f0";
     element.style.color = status === "ON" ? "#157a4f" : status === "OFF" ? "#c63434" : "#66736d";
@@ -314,6 +325,10 @@ function updateBreakers(devices) {
     } else if (!inProgress && lastCommand) {
       element.title = lastCommand;
     }
+    setText(`${id}_power`, formatNumber(power, " W", 1));
+    setText(`${id}_voltage`, formatNumber(voltage, " V", 1));
+    setText(`${id}_current`, formatNumber(current, " A", 3));
+    setText(`${id}_energy`, formatNumber(energy, " kWh", 3));
   }
 }
 

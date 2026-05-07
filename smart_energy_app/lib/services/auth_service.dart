@@ -1,6 +1,5 @@
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_database/firebase_database.dart';
 
 import '../models/user_permissions.dart';
 import '../utils/constants.dart';
@@ -78,6 +77,10 @@ class AuthService {
     required User user,
     String homeId = NetworkConfig.firebaseHomeId,
   }) async {
+    if (NetworkConfig.useLocalPiApi) {
+      return;
+    }
+
     final permissions = await loadPermissions(homeId: homeId);
     if (permissions.role != 'viewer' ||
         permissions.canControlDevices ||
@@ -85,14 +88,6 @@ class AuthService {
       return;
     }
 
-    final database = FirebaseDatabase.instanceFor(
-      app: FirebaseDatabase.instance.app,
-      databaseURL: NetworkConfig.firebaseRealtimeDatabaseUrl,
-    );
-    final profileSnapshot = await database.ref('users/${user.uid}').get();
-    if (profileSnapshot.exists) {
-      return;
-    }
     await createUserProfile(
       user: user,
       displayName: user.displayName ?? user.email ?? 'User',
@@ -107,18 +102,9 @@ class AuthService {
     if (user == null) {
       return UserPermissions.viewer;
     }
-    final database = FirebaseDatabase.instanceFor(
-      app: FirebaseDatabase.instance.app,
-      databaseURL: NetworkConfig.firebaseRealtimeDatabaseUrl,
-    );
-    final snapshot = await database.ref('users/${user.uid}/homes/$homeId').get();
-    return UserPermissions.fromHomeMap(_asMap(snapshot.value));
-  }
-
-  Map<String, dynamic> _asMap(dynamic value) {
-    if (value is Map) {
-      return value.map((key, val) => MapEntry(key.toString(), val));
+    if (NetworkConfig.useLocalPiApi) {
+      return UserPermissions.admin;
     }
-    return const {};
+    return UserPermissions.viewer;
   }
 }

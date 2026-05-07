@@ -14,6 +14,9 @@ class Device {
   final bool controllable;
   final bool commandInProgress;
   final bool energySupported;
+  final double voltage;
+  final double current;
+  final double energyToday;
   final String? controlMethod;
   final String? pendingTargetState;
   final String? lastCommandMessage;
@@ -31,6 +34,9 @@ class Device {
     this.controllable = true,
     this.commandInProgress = false,
     this.energySupported = true,
+    this.voltage = 0,
+    this.current = 0,
+    this.energyToday = 0,
     this.controlMethod,
     this.pendingTargetState,
     this.lastCommandMessage,
@@ -50,6 +56,9 @@ class Device {
       controllable: json['controllable'] as bool? ?? true,
       commandInProgress: json['commandInProgress'] as bool? ?? false,
       energySupported: json['energySupported'] as bool? ?? true,
+      voltage: (json['voltage'] as num?)?.toDouble() ?? 0,
+      current: (json['current'] as num?)?.toDouble() ?? 0,
+      energyToday: (json['energyToday'] as num?)?.toDouble() ?? 0,
       controlMethod: json['controlMethod'] as String?,
       pendingTargetState: json['pendingTargetState'] as String?,
       lastCommandMessage: json['lastCommandMessage'] as String?,
@@ -70,6 +79,9 @@ class Device {
       'controllable': controllable,
       'commandInProgress': commandInProgress,
       'energySupported': energySupported,
+      'voltage': voltage,
+      'current': current,
+      'energyToday': energyToday,
       'controlMethod': controlMethod,
       'pendingTargetState': pendingTargetState,
       'lastCommandMessage': lastCommandMessage,
@@ -89,6 +101,9 @@ class Device {
     bool? controllable,
     bool? commandInProgress,
     bool? energySupported,
+    double? voltage,
+    double? current,
+    double? energyToday,
     String? controlMethod,
     String? pendingTargetState,
     String? lastCommandMessage,
@@ -106,6 +121,9 @@ class Device {
       controllable: controllable ?? this.controllable,
       commandInProgress: commandInProgress ?? this.commandInProgress,
       energySupported: energySupported ?? this.energySupported,
+      voltage: voltage ?? this.voltage,
+      current: current ?? this.current,
+      energyToday: energyToday ?? this.energyToday,
       controlMethod: controlMethod ?? this.controlMethod,
       pendingTargetState: pendingTargetState ?? this.pendingTargetState,
       lastCommandMessage: lastCommandMessage ?? this.lastCommandMessage,

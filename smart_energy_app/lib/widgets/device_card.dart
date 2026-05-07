@@ -44,6 +44,38 @@ class DeviceCard extends StatelessWidget {
     }
   }
 
+  Widget _metricChip({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color color,
+    bool active = true,
+  }) {
+    final effectiveColor = active ? color : Colors.grey;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: active ? color.withValues(alpha: 0.1) : Colors.grey[100],
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: effectiveColor),
+          const SizedBox(width: 4),
+          Text(
+            label.isEmpty ? value : '$label $value',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: effectiveColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final color = _getDeviceColor();
@@ -114,36 +146,38 @@ class DeviceCard extends StatelessWidget {
                 runSpacing: 8,
                 children: [
                   if (device.energySupported)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: switchValue
-                            ? color.withValues(alpha: 0.1)
-                            : Colors.grey[100],
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.bolt,
-                            size: 16,
-                            color: switchValue ? color : Colors.grey,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            formatPower(device.currentPower),
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: switchValue ? color : Colors.grey,
-                            ),
-                          ),
-                        ],
-                      ),
+                    _metricChip(
+                      icon: Icons.bolt,
+                      label: '',
+                      value: formatPower(device.currentPower),
+                      color: color,
+                      active: switchValue,
+                    ),
+                  if (device.energySupported)
+                    _metricChip(
+                      icon: Icons.electrical_services,
+                      label: 'V',
+                      value: device.voltage > 0
+                          ? device.voltage.toStringAsFixed(1)
+                          : '--',
+                      color: AppColors.primary,
+                      active: device.online,
+                    ),
+                  if (device.energySupported)
+                    _metricChip(
+                      icon: Icons.speed,
+                      label: 'A',
+                      value: device.current.toStringAsFixed(3),
+                      color: AppColors.primary,
+                      active: device.online,
+                    ),
+                  if (device.energySupported)
+                    _metricChip(
+                      icon: Icons.timeline,
+                      label: '',
+                      value: formatEnergy(device.energyToday),
+                      color: AppColors.primary,
+                      active: device.online,
                     ),
                   if (isLocalControl)
                     Container(
