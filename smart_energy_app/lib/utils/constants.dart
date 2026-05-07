@@ -75,6 +75,7 @@ class NetworkConfig {
       AppConfig.firebaseRealtimeDatabaseUrl;
   static const String firebaseHomeId = AppConfig.firebaseHomeId;
   static const String backendApiUrl = AppConfig.backendApiUrl;
+  static const bool useLocalPiApi = AppConfig.useLocalPiApi;
 
   static String get apiBaseUrl => backendApiUrl;
   static String get mqttBrokerUrl => defaultRaspberryPiIP;

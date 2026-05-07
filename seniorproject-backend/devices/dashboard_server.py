@@ -44,6 +44,24 @@ EMERGENCY_SAFE_DEVICE_IDS = [
 ]
 SENSOR_STALE_AFTER_MS = 2 * 60 * 1000
 DEVICE_STALE_AFTER_MS = 45 * 1000
+DEFAULT_SETTINGS = {
+    "cost_per_kwh": 0.029,
+    "comfort_temperature_min": 22,
+    "comfort_temperature_max": 25,
+    "high_temperature_threshold": 28,
+    "light_waste_minutes": 5,
+    "occupancy_empty_minutes": 10,
+    "motion_recent_seconds": 90,
+    "sound_recent_seconds": 120,
+    "sound_activity_threshold": 45,
+    "occupancy_confidence_threshold": 0.65,
+    "device_offline_minutes": 2,
+    "quiet_hours_enabled": True,
+    "ai_recommendations_enabled": False,
+    "auto_control_enabled": False,
+    "notifications_enabled": False,
+    "schedules_enabled": True,
+}
 
 app = Flask(__name__)
 
@@ -348,6 +366,36 @@ def local_control_payload(mode: str) -> dict[str, Any]:
         "auto": "Auto",
         "manual": "Manual",
     }
+
+
+def local_settings() -> dict[str, Any]:
+    return {**DEFAULT_SETTINGS, **as_dict(home_ref("settings").get())}
+
+
+def local_schedule_list() -> list[dict[str, Any]]:
+    schedules = active_only(object_to_list(home_ref("schedules").get()))
+    schedules.sort(key=lambda item: str(item.get("time", "99:99")))
+    return schedules
+
+
+def local_schedule_payload(raw: dict[str, Any], schedule_id: str | None = None) -> dict[str, Any]:
+    timestamp_ms = int(time.time() * 1000)
+    device_id = str(raw.get("device_id", "")).strip()
+    command = str(raw.get("command", raw.get("action", ""))).strip()
+    return {
+        "schedule_id": schedule_id or f"schedule_{timestamp_ms}",
+        "name": str(raw.get("name") or "Local schedule").strip(),
+        "device_id": device_id,
+        "device_name": str(raw.get("device_name") or device_id).strip(),
+        "command": command,
+        "time": str(raw.get("time") or "23:30").strip(),
+        "days": raw.get("days") if isinstance(raw.get("days"), list) else [],
+        "enabled": normalize_bool(raw.get("enabled")) is not False,
+        "status": "active",
+        "created_by": str(raw.get("created_by") or raw.get("updated_by") or "pi_dashboard"),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": datetime.now(timezone.utc).isoformat(),
+    }
     descriptions = {
         "assist": "The system suggests actions and asks before controlling devices.",
         "auto": "The Pi can run approved local automation rules automatically.",
@@ -624,6 +672,32 @@ def decide_action_suggestion(suggestion_id: str, decision: str):
     if decision not in {"approve", "dismiss"}:
         return jsonify({"success": False, "message": "Unsupported decision"}), 400
     try:
+        if not CLOUD_BACKEND_ENABLED:
+            if decision == "dismiss":
+                return jsonify(dismiss_suggestion_locally(suggestion_id))
+
+            suggestion = as_dict(home_ref(f"action_suggestions/active/{suggestion_id}").get())
+            if not suggestion:
+                return jsonify({"success": False, "message": "Action suggestion not found"}), 404
+            result = execute_local_command(
+                str(suggestion.get("device_id", "")),
+                str(suggestion.get("suggested_command", suggestion.get("command", ""))),
+                requested_by="pi_dashboard_action_suggestion",
+                source="assist_mode",
+                emergency=False,
+                alert_id=None,
+            )
+            if result.get("success"):
+                dismissed = dismiss_suggestion_locally(suggestion_id)
+                return jsonify(
+                    {
+                        "success": True,
+                        "message": result.get("message") or dismissed.get("message"),
+                        "command_id": result.get("command_id"),
+                    }
+                )
+            return jsonify(result), 500
+
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/action-suggestions/{suggestion_id}/{decision}",
             headers=api_headers(),
@@ -647,6 +721,16 @@ def decide_action_suggestion(suggestion_id: str, decision: str):
 @app.get("/api/settings")
 def get_settings():
     try:
+        if not CLOUD_BACKEND_ENABLED:
+            return jsonify(
+                {
+                    "success": True,
+                    "home_id": HOME_ID,
+                    "settings": local_settings(),
+                    "options": {},
+                }
+            )
+
         response = requests.get(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
             headers=api_headers(),
@@ -664,6 +748,25 @@ def update_settings():
         if not isinstance(data, dict):
             return jsonify({"success": False, "message": "JSON body is required"}), 400
         data["updated_by"] = "pi_dashboard"
+        if not CLOUD_BACKEND_ENABLED:
+            timestamp_ms = int(time.time() * 1000)
+            merged = {
+                **local_settings(),
+                **data,
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": datetime.now(timezone.utc).isoformat(),
+            }
+            home_ref("settings").set(merged)
+            home_ref("settings_summary").set(
+                {
+                    "control_mode": as_dict(home_ref("control").get()).get("mode", "assist"),
+                    "schedules_enabled": merged.get("schedules_enabled"),
+                    "auto_control_enabled": merged.get("auto_control_enabled"),
+                    "updated_at_ms": timestamp_ms,
+                }
+            )
+            return jsonify({"success": True, "home_id": HOME_ID, "settings": merged})
+
         response = requests.put(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
             headers=api_headers(),
@@ -678,6 +781,17 @@ def update_settings():
 @app.get("/api/schedules")
 def get_schedules():
     try:
+        if not CLOUD_BACKEND_ENABLED:
+            schedules = local_schedule_list()
+            return jsonify(
+                {
+                    "success": True,
+                    "home_id": HOME_ID,
+                    "count": len(schedules),
+                    "schedules": schedules,
+                }
+            )
+
         response = requests.get(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
             headers=api_headers(),
@@ -695,6 +809,15 @@ def create_schedule():
         if not isinstance(data, dict):
             return jsonify({"success": False, "message": "JSON body is required"}), 400
         data["created_by"] = "pi_dashboard"
+        if not CLOUD_BACKEND_ENABLED:
+            schedule = local_schedule_payload(data)
+            if schedule["device_id"] not in ALLOWED_DEVICES:
+                return jsonify({"success": False, "message": "Unsupported device_id"}), 400
+            if schedule["command"] not in ALLOWED_ACTIONS:
+                return jsonify({"success": False, "message": "Unsupported command"}), 400
+            home_ref(f"schedules/{schedule['schedule_id']}").set(schedule)
+            return jsonify({"success": True, "home_id": HOME_ID, "schedule": schedule})
+
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
             headers=api_headers(),
@@ -713,6 +836,25 @@ def update_schedule_enabled(schedule_id: str):
         if not isinstance(data, dict):
             return jsonify({"success": False, "message": "JSON body is required"}), 400
         data["updated_by"] = "pi_dashboard"
+        if not CLOUD_BACKEND_ENABLED:
+            schedule = as_dict(home_ref(f"schedules/{schedule_id}").get())
+            if not schedule:
+                return jsonify({"success": False, "message": "Schedule not found"}), 404
+            updates = {
+                "enabled": normalize_bool(data.get("enabled")) is True,
+                "updated_by": "pi_dashboard",
+                "updated_at_ms": int(time.time() * 1000),
+                "updated_at_iso": datetime.now(timezone.utc).isoformat(),
+            }
+            home_ref(f"schedules/{schedule_id}").update(updates)
+            return jsonify(
+                {
+                    "success": True,
+                    "home_id": HOME_ID,
+                    "schedule": {**schedule, **updates},
+                }
+            )
+
         response = requests.patch(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/enabled",
             headers=api_headers(),
@@ -727,6 +869,29 @@ def update_schedule_enabled(schedule_id: str):
 @app.post("/api/schedules/<schedule_id>/run-now")
 def run_schedule_now(schedule_id: str):
     try:
+        if not CLOUD_BACKEND_ENABLED:
+            schedule = as_dict(home_ref(f"schedules/{schedule_id}").get())
+            if not schedule:
+                return jsonify({"success": False, "message": "Schedule not found"}), 404
+            result = execute_local_command(
+                str(schedule.get("device_id", "")),
+                str(schedule.get("command", "")),
+                requested_by="local_schedule_run_now",
+                source="pi_dashboard_schedule",
+                emergency=False,
+                alert_id=None,
+            )
+            log = {
+                "schedule_id": schedule_id,
+                "status": "completed" if result.get("success") else "failed",
+                "message": result.get("message"),
+                "command_id": result.get("command_id"),
+                "created_at_ms": int(time.time() * 1000),
+                "created_at_iso": datetime.now(timezone.utc).isoformat(),
+            }
+            home_ref(f"schedule_logs/{schedule_id}_{log['created_at_ms']}").set(log)
+            return jsonify({"success": bool(result.get("success")), "home_id": HOME_ID, "log": log})
+
         response = requests.post(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/run-now",
             headers=api_headers(),
@@ -740,6 +905,20 @@ def run_schedule_now(schedule_id: str):
 @app.delete("/api/schedules/<schedule_id>")
 def delete_schedule(schedule_id: str):
     try:
+        if not CLOUD_BACKEND_ENABLED:
+            schedule = as_dict(home_ref(f"schedules/{schedule_id}").get())
+            if not schedule:
+                return jsonify({"success": False, "message": "Schedule not found"}), 404
+            updates = {
+                "status": "deleted",
+                "enabled": False,
+                "deleted_by": request.args.get("deleted_by", "pi_dashboard"),
+                "deleted_at_ms": int(time.time() * 1000),
+                "deleted_at_iso": datetime.now(timezone.utc).isoformat(),
+            }
+            home_ref(f"schedules/{schedule_id}").update(updates)
+            return jsonify({"success": True, "home_id": HOME_ID, "schedule": {**schedule, **updates}})
+
         response = requests.delete(
             f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}",
             headers=api_headers(),

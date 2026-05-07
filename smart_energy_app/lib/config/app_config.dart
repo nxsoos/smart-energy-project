@@ -8,7 +8,12 @@ class AppConfig {
 
   static const String backendApiUrl = String.fromEnvironment(
     'BACKEND_API_URL',
-    defaultValue: 'https://smart-energy-api-qs7uzdqawq-as.a.run.app',
+    defaultValue: 'http://10.220.38.94:5001',
+  );
+
+  static const bool useLocalPiApi = bool.fromEnvironment(
+    'USE_LOCAL_PI_API',
+    defaultValue: true,
   );
 
   static const String aiServiceUrl =

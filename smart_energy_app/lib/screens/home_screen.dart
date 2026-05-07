@@ -121,12 +121,17 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   bool get _isDemoHome => _selectedHomeId == 'home_test';
+  bool get _usesLocalPiApi => _firebaseRealtimeService.usesLocalPiApi;
   _HomeChoice get _selectedHome => _homeChoices.firstWhere(
     (home) => home.id == _selectedHomeId,
     orElse: () => _homeChoices.last,
   );
   String get _dataSourceLabel =>
-      _isDemoHome ? 'Demo scenario data' : 'Live Firebase data';
+      _isDemoHome
+      ? 'Demo scenario data'
+      : _usesLocalPiApi
+      ? 'Local Pi API data'
+      : 'Live backend data';
 
   @override
   void initState() {
@@ -184,7 +189,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startLiveSensorListener() {
     _liveSensorSubscription?.cancel();
-    if (_isDemoHome || !widget.enableRealtimeSync) {
+    if (_isDemoHome || !widget.enableRealtimeSync || _usesLocalPiApi) {
       return;
     }
 
@@ -215,7 +220,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _startAlertsListener() {
     try {
       _alertsSubscription?.cancel();
-      if (_isDemoHome) {
+      if (_isDemoHome || _usesLocalPiApi) {
         return;
       }
       _alertsListenerStartedAtMs = DateTime.now().millisecondsSinceEpoch;
@@ -456,7 +461,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _syncDeviceListeners(List<Device> devices) {
-    if (!_deviceControlEnabled || _isDemoHome) {
+    if (!_deviceControlEnabled || _isDemoHome || _usesLocalPiApi) {
       for (final subscription in _commandStatusSubscriptions.values) {
         subscription.cancel();
       }
@@ -675,7 +680,7 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _currentReading = dashboardData.reading;
         _updateSmokeClearTimer(dashboardData.sensors);
-        if (_isDemoHome || _isSensorFeedStale()) {
+        if (_isDemoHome || _usesLocalPiApi || _isSensorFeedStale()) {
           _sensorData = dashboardData.sensors;
         }
         _devices = mergedDevices;

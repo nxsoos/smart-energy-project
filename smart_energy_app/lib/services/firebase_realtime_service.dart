@@ -339,6 +339,8 @@ class FirebaseRealtimeService {
   final Dio _firebaseDio;
   int _lastCommandTimestampMs = 0;
 
+  bool get usesLocalPiApi => NetworkConfig.useLocalPiApi;
+
   DatabaseReference _firebaseRef(String path) {
     final database = FirebaseDatabase.instanceFor(
       app: FirebaseDatabase.instance.app,
@@ -352,6 +354,9 @@ class FirebaseRealtimeService {
     required String homeId,
     required int sinceTimestampMs,
   }) {
+    if (usesLocalPiApi) {
+      return const Stream<Alert>.empty();
+    }
     final alertsRef = _firebaseRef('homes/$homeId/backend/alerts');
 
     final alertsQuery = alertsRef
@@ -369,6 +374,9 @@ class FirebaseRealtimeService {
   }
 
   Stream<SensorData> watchLiveSensorData({required String homeId}) {
+    if (usesLocalPiApi) {
+      return const Stream<SensorData>.empty();
+    }
     final sensorRef = _firebaseRef('homes/$homeId/devices/esp32_01');
 
     return sensorRef.onValue.map((event) {
@@ -433,6 +441,20 @@ class FirebaseRealtimeService {
     String? scenarioId,
     CancelToken? cancelToken,
   }) async {
+    if (usesLocalPiApi && homeId == NetworkConfig.firebaseHomeId) {
+      final response = await _dio.get('/api/latest', cancelToken: cancelToken);
+      final data = _asMap(response.data);
+      final dashboard = _asMap(data['dashboard']).isNotEmpty
+          ? _asMap(data['dashboard'])
+          : data;
+
+      if (dashboard.isEmpty) {
+        throw Exception('No local dashboard data found for $homeId.');
+      }
+
+      return _parseApiDashboardData(dashboard, homeId: homeId);
+    }
+
     if (scenarioId != null) {
       return _fetchDashboardDataFromFirebase(
         homeId: homeId,
@@ -441,24 +463,17 @@ class FirebaseRealtimeService {
       );
     }
 
-    try {
-      final response = await _dio.get(
-        '/api/home/$homeId/dashboard',
-        cancelToken: cancelToken,
-      );
-      final data = _asMap(response.data);
+    final response = await _dio.get(
+      '/api/home/$homeId/dashboard',
+      cancelToken: cancelToken,
+    );
+    final data = _asMap(response.data);
 
-      if (data.isEmpty) {
-        throw Exception('No data found for $homeId.');
-      }
-
-      return _parseApiDashboardData(data, homeId: homeId);
-    } catch (_) {
-      return _fetchDashboardDataFromFirebase(
-        homeId: homeId,
-        cancelToken: cancelToken,
-      );
+    if (data.isEmpty) {
+      throw Exception('No data found for $homeId.');
     }
+
+    return _parseApiDashboardData(data, homeId: homeId);
   }
 
   DashboardData _parseApiDashboardData(
@@ -914,6 +929,27 @@ class FirebaseRealtimeService {
     required String homeId,
     CancelToken? cancelToken,
   }) async {
+    if (usesLocalPiApi) {
+      return const [
+        ControlModeOption(
+          mode: 'assist',
+          label: 'Assist',
+          description:
+              'The system suggests actions and asks before controlling devices.',
+        ),
+        ControlModeOption(
+          mode: 'auto',
+          label: 'Auto',
+          description: 'The Pi can run approved local automation rules.',
+        ),
+        ControlModeOption(
+          mode: 'manual',
+          label: 'Manual',
+          description: 'The system only shows data; users control devices.',
+        ),
+      ];
+    }
+
     final response = await _dio.get(
       '/api/home/$homeId/control',
       cancelToken: cancelToken,
@@ -938,6 +974,11 @@ class FirebaseRealtimeService {
     required String homeId,
     CancelToken? cancelToken,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.get('/api/settings', cancelToken: cancelToken);
+      return HomeSettings(_asMap(_asMap(response.data)['settings']));
+    }
+
     final response = await _dio.get(
       '/api/home/$homeId/settings',
       cancelToken: cancelToken,
@@ -949,6 +990,11 @@ class FirebaseRealtimeService {
     required String homeId,
     required Map<String, dynamic> values,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.put('/api/settings', data: values);
+      return HomeSettings(_asMap(_asMap(response.data)['settings']));
+    }
+
     final response = await _dio.put('/api/home/$homeId/settings', data: values);
     return HomeSettings(_asMap(_asMap(response.data)['settings']));
   }
@@ -957,6 +1003,13 @@ class FirebaseRealtimeService {
     required String homeId,
     CancelToken? cancelToken,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.get('/api/schedules', cancelToken: cancelToken);
+      return _asList(
+        _asMap(response.data)['schedules'],
+      ).map(_parseSchedule).toList();
+    }
+
     final response = await _dio.get(
       '/api/home/$homeId/schedules',
       cancelToken: cancelToken,
@@ -970,6 +1023,11 @@ class FirebaseRealtimeService {
     required String homeId,
     required Map<String, dynamic> values,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.post('/api/schedules', data: values);
+      return _parseSchedule(_asMap(_asMap(response.data)['schedule']));
+    }
+
     final response = await _dio.post(
       '/api/home/$homeId/schedules',
       data: values,
@@ -982,6 +1040,14 @@ class FirebaseRealtimeService {
     required String scheduleId,
     required bool enabled,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.patch(
+        '/api/schedules/$scheduleId/enabled',
+        data: {'enabled': enabled, 'updated_by': 'flutter_app'},
+      );
+      return _parseSchedule(_asMap(_asMap(response.data)['schedule']));
+    }
+
     final response = await _dio.patch(
       '/api/home/$homeId/schedules/$scheduleId/enabled',
       data: {'enabled': enabled, 'updated_by': 'flutter_app'},
@@ -993,6 +1059,14 @@ class FirebaseRealtimeService {
     required String homeId,
     required String scheduleId,
   }) async {
+    if (usesLocalPiApi) {
+      await _dio.delete(
+        '/api/schedules/$scheduleId',
+        queryParameters: {'deleted_by': 'flutter_app'},
+      );
+      return;
+    }
+
     await _dio.delete(
       '/api/home/$homeId/schedules/$scheduleId',
       queryParameters: {'deleted_by': 'flutter_app'},
@@ -1003,6 +1077,16 @@ class FirebaseRealtimeService {
     required String homeId,
     required String scheduleId,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.post('/api/schedules/$scheduleId/run-now');
+      final data = _asMap(response.data);
+      final log = _asMap(data['log']);
+      return _asString(
+        _pick(log, ['message']) ?? _pick(data, ['message']),
+        fallback: 'Schedule run requested.',
+      );
+    }
+
     final response = await _dio.post(
       '/api/home/$homeId/schedules/$scheduleId/run-now',
     );
@@ -1048,6 +1132,13 @@ class FirebaseRealtimeService {
   Future<Map<String, dynamic>> turnOffSafeDevices({
     required String homeId,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.post(
+        '/api/safety/smoke/actions/turn-off-safe-devices',
+      );
+      return _asMap(response.data);
+    }
+
     final response = await _dio.post(
       '/api/home/$homeId/safety/smoke/actions/turn-off-safe-devices',
     );
@@ -1055,6 +1146,11 @@ class FirebaseRealtimeService {
   }
 
   Future<Map<String, dynamic>> markSmokeSafe({required String homeId}) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.post('/api/safety/smoke/actions/mark-safe');
+      return _asMap(response.data);
+    }
+
     final response = await _dio.post(
       '/api/home/$homeId/safety/smoke/actions/mark-safe',
     );
@@ -1068,6 +1164,10 @@ class FirebaseRealtimeService {
     String platform = 'android',
     String? installationId,
   }) async {
+    if (usesLocalPiApi) {
+      return;
+    }
+
     await _dio.post(
       '/api/home/$homeId/notifications/register-token',
       data: {
@@ -1084,6 +1184,18 @@ class FirebaseRealtimeService {
     required String mode,
     required String updatedBy,
   }) async {
+    if (usesLocalPiApi) {
+      final response = await _dio.put(
+        '/api/control/mode',
+        data: {'mode': mode, 'updated_by': updatedBy},
+      );
+      final data = _asMap(response.data);
+      return _asString(
+        _pick(data, ['message']),
+        fallback: 'Control mode changed to ${_prettyMode(mode)} Mode.',
+      );
+    }
+
     final response = await _dio.put(
       '/api/home/$homeId/control/mode',
       data: {'mode': mode, 'updated_by': updatedBy},
@@ -1100,6 +1212,17 @@ class FirebaseRealtimeService {
     required String suggestionId,
   }) async {
     final encodedSuggestionId = Uri.encodeComponent(suggestionId);
+    if (usesLocalPiApi) {
+      final response = await _dio.post(
+        '/api/action-suggestions/$encodedSuggestionId/approve',
+      );
+      final data = _asMap(response.data);
+      return _asString(
+        _pick(data, ['message']),
+        fallback: 'Action suggestion approved.',
+      );
+    }
+
     final response = await _dio.post(
       '/api/home/$homeId/action-suggestions/$encodedSuggestionId/approve',
     );
@@ -1116,6 +1239,17 @@ class FirebaseRealtimeService {
   }) async {
     final encodedSuggestionId = Uri.encodeComponent(suggestionId);
     try {
+      if (usesLocalPiApi) {
+        final response = await _dio.post(
+          '/api/action-suggestions/$encodedSuggestionId/dismiss',
+        );
+        final data = _asMap(response.data);
+        return _asString(
+          _pick(data, ['message']),
+          fallback: 'Action suggestion dismissed.',
+        );
+      }
+
       final response = await _dio.post(
         '/api/home/$homeId/action-suggestions/$encodedSuggestionId/dismiss',
       );
@@ -1205,6 +1339,25 @@ class FirebaseRealtimeService {
     }
 
     try {
+      if (usesLocalPiApi) {
+        final response = await _dio.post(
+          '/api/command',
+          data: {
+            'device_id': deviceId,
+            'action': action,
+            if (emergency) 'emergency': true,
+          },
+        );
+        final data = _asMap(response.data);
+        return DeviceCommandResult(
+          success: _asBool(_pick(data, ['success']), fallback: true),
+          noAction: _asBool(_pick(data, ['no_action'])),
+          status: _asString(_pick(data, ['status'])),
+          message: _asString(_pick(data, ['message'])),
+          commandId: _asNullableString(_pick(data, ['command_id'])),
+        );
+      }
+
       final response = await _dio.post(
         '/api/home/$homeId/devices/$deviceId/command',
         data: {
@@ -1239,6 +1392,10 @@ class FirebaseRealtimeService {
 
       if (deviceId.startsWith('matter_')) {
         throw Exception('Local controller command requires the backend API.');
+      }
+
+      if (usesLocalPiApi) {
+        throw Exception('Local Pi API command failed.');
       }
 
       final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -1278,6 +1435,9 @@ class FirebaseRealtimeService {
     String homeId,
     String deviceId,
   ) {
+    if (usesLocalPiApi) {
+      return const Stream<DeviceCommandState>.empty();
+    }
     final commandRef = _firebaseRef('homes/$homeId/commands/$deviceId/latest');
 
     return commandRef.onValue.map((event) {
@@ -1301,6 +1461,9 @@ class FirebaseRealtimeService {
   }
 
   Stream<bool?> watchDeviceSwitchStatusForHome(String homeId, String deviceId) {
+    if (usesLocalPiApi) {
+      return const Stream<bool?>.empty();
+    }
     return _firebaseRef(
       'homes/$homeId/devices/$deviceId/status/switch',
     ).onValue.map((event) {
@@ -1313,6 +1476,9 @@ class FirebaseRealtimeService {
   }
 
   Stream<Device> watchDeviceForHome(String homeId, String deviceId) {
+    if (usesLocalPiApi) {
+      return const Stream<Device>.empty();
+    }
     return _firebaseRef('homes/$homeId/devices/$deviceId').onValue.map((event) {
       final raw = _asMap(event.snapshot.value);
       if (raw.isEmpty) {
