@@ -6,9 +6,12 @@ import requests
 
 
 HOME_ID = os.environ.get("HOME_ID", "home_001")
-SMART_ENERGY_API_URL = os.environ.get(
-    "SMART_ENERGY_API_URL",
-    "https://smart-energy-api-qs7uzdqawq-as.a.run.app",
+KAHRABAIQ_API_URL = os.environ.get(
+    "KAHRABAIQ_API_URL",
+    os.environ.get(
+        "SMART_ENERGY_API_URL",
+        "https://smart-energy-api-qs7uzdqawq-as.a.run.app",
+    ),
 ).rstrip("/")
 POLL_INTERVAL_SECONDS = 60
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
@@ -26,7 +29,7 @@ def run_due_schedules() -> None:
     elif PI_DASHBOARD_TOKEN:
         headers["X-Device-Token"] = PI_DASHBOARD_TOKEN
     response = requests.post(
-        f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/run-due",
+        f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/schedules/run-due",
         headers=headers,
         timeout=30,
     )
@@ -38,7 +41,7 @@ def run_due_schedules() -> None:
 
 
 def main() -> int:
-    log(f"Started for {HOME_ID}; API={SMART_ENERGY_API_URL}")
+    log(f"Started for {HOME_ID}; API={KAHRABAIQ_API_URL}")
     while True:
         started = time.time()
         try:

@@ -3,11 +3,11 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'screens/auth_screen.dart';
-import 'screens/home_screen.dart';
-import 'services/auth_service.dart';
-import 'services/firebase_realtime_service.dart';
-import 'utils/constants.dart';
+import 'features/auth/screens/auth_screen.dart';
+import 'features/dashboard/screens/home_screen.dart';
+import 'shared/services/auth_service.dart';
+import 'shared/services/firebase_realtime_service.dart';
+import 'core/utils/constants.dart';
 
 const String _pushInstallationIdKey = 'push_installation_id';
 
@@ -19,7 +19,7 @@ Future<void> main() async {
   } catch (_) {
     // Keep app running even when Firebase native config is not present.
   }
-  runApp(const SmartEnergyApp());
+  runApp(const KahrabaIQApp());
 }
 
 Future<void> _registerPushNotifications() async {
@@ -34,9 +34,15 @@ Future<void> _registerPushNotificationsForUser(User? user) async {
     return;
   }
   if (user != null) {
+    final profile = await AuthService().loadCurrentUserProfile();
+    final homeId = profile.defaultHomeId ??
+        (profile.homes.isNotEmpty ? profile.homes.first.homeId : null);
+    if (homeId == null || homeId.isEmpty) {
+      return;
+    }
     final installationId = await _getPushInstallationId();
     await FirebaseRealtimeService().registerNotificationToken(
-      homeId: NetworkConfig.firebaseHomeId,
+      homeId: homeId,
       token: token,
       userId: user.uid,
       platform: 'android',
@@ -52,13 +58,13 @@ Future<String> _getPushInstallationId() async {
     return existing;
   }
   final created =
-      'smart_energy_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+      'kahrabaiq_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
   await prefs.setString(_pushInstallationIdKey, created);
   return created;
 }
 
-class SmartEnergyApp extends StatelessWidget {
-  const SmartEnergyApp({super.key, this.enableRealtimeSync = true});
+class KahrabaIQApp extends StatelessWidget {
+  const KahrabaIQApp({super.key, this.enableRealtimeSync = true});
 
   final bool enableRealtimeSync;
 

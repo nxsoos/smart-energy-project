@@ -28,8 +28,8 @@ ACTIVE_DEVICE_POWER_W = 10.0
 FRESH_DATA_MAX_AGE_MS = 3 * 60 * 1000
 
 app = FastAPI(
-    title="Smart Energy AI",
-    description="Cloud Run FastAPI service for Smart Energy Consumption AI predictions.",
+    title="KahrabaIQ Intelligence",
+    description="Cloud Run FastAPI service for KahrabaIQ energy predictions.",
     version="1.0.0",
 )
 
@@ -1266,7 +1266,7 @@ def build_chat_prompt(
         )
 
     return f"""
-You are the Smart Energy AI assistant for a senior project.
+You are the KahrabaIQ Intelligence assistant.
 
 Rules:
 - Answer the user's exact question first. Do not switch topics unless the user asks.

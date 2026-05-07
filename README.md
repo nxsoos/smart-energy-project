@@ -1,71 +1,124 @@
-# Smart Energy Project
+# KahrabaIQ
 
-Monorepo for the Smart Energy senior project. The repository is split into a
-Flutter client, a Python AI backend, and Firebase Cloud Functions.
+Monorepo for the KahrabaIQ product: Flutter mobile app, cloud backend, AI service, Firebase functions, and Raspberry Pi edge dashboard/services.
 
-## Structure
+## Repository Layout
 
 ```text
 smart-energy-project/
-  smart_energy_app/          Flutter application
-  seniorproject-backend/     FastAPI AI service and Firebase Functions
-    devices/                 AI training, prediction, and device scripts
-    functions/               Firebase Cloud Functions TypeScript project
+  smart_energy_app/              Flutter mobile app
+    lib/
+      core/                      Shared UI, config, utilities
+      features/                  Feature-first screens and flows
+      shared/                    Shared models and API services
+
+  seniorproject-backend/         Python backend workspace
+    api_server.py                Cloud API for app, homes, users, pairing, devices
+    main.py                      AI service entry point
+    docs/                        Deployment and AI documentation
+    devices/                     Raspberry Pi dashboard, services, firmware, local docs
+    functions/                   Firebase Cloud Functions project
 ```
 
-## Run The Flutter App
+## Flutter App
 
-```powershell
+```bash
 cd smart_energy_app
 flutter pub get
 flutter run
 ```
 
-Runtime values used by the Flutter app live in:
+Runtime config lives in:
 
 ```text
-smart_energy_app/lib/config/app_config.dart
+smart_energy_app/lib/core/config/app_config.dart
 ```
-## deploy FastAPI
-gcloud builds submit --config cloudbuild-api.yaml .
 
-gcloud run deploy smart-energy-api --image asia-southeast1-docker.pkg.dev/seniorproject-energy/smart-energy/smart-energy-api:latest --region asia-southeast1 --set-env-vars FIREBASE_DATABASE_URL=https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app,AI_SERVICE_URL=https://smart-energy-ai-237804589333.asia-southeast1.run.app --allow-unauthenticated
-## deploy AI server
-cd C:\Nasser\Univirsity\smart-energy-project\seniorproject-backend
-gcloud run deploy smart-energy-ai --source . --region asia-southeast1 --set-env-vars FIREBASE_DATABASE_URL=https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app,DEFAULT_HOME_ID=home_001,GEMINI_API_KEY="AIzaSyAGvYQCx3aXPsf1_GuUnbnNvPe5MKkwOlQ" --allow-unauthenticated
-## Run The AI Backend Locally
+## Cloud API
 
-```powershell
+```bash
 cd seniorproject-backend
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:FIREBASE_DATABASE_URL="https://YOUR_DATABASE.firebaseio.com"
+uvicorn api_server:app --reload
+```
+
+Required environment values depend on the feature being used:
+
+```text
+FIREBASE_DATABASE_URL
+PLATFORM_ADMIN_EMAILS
+AI_SERVICE_URL
+INTERNAL_SERVICE_TOKEN
+PI_DASHBOARD_TOKEN
+```
+
+Deployment docs:
+
+```text
+seniorproject-backend/docs/deployment/
+```
+
+## AI Service
+
+```bash
+cd seniorproject-backend
+pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-Cloud Run deployment notes are in:
+Set secrets and API keys through environment variables or your cloud secret manager. Do not commit keys.
+
+## Raspberry Pi Dashboard
+
+Pi dashboard files live in:
 
 ```text
-seniorproject-backend/README_DEPLOY.md
+seniorproject-backend/devices/
+  dashboard_server.py
+  static/
+  templates/
+  docs/
+```
+
+Local kiosk URL:
+
+```text
+http://localhost:5001
+```
+
+Pi docs:
+
+```text
+seniorproject-backend/devices/docs/
 ```
 
 ## Firebase Functions
 
-```powershell
+```bash
 cd seniorproject-backend/functions
 npm install
 npm run build
 npm run serve
 ```
 
-## Repository Notes
+## Verification
 
-- Keep Firebase service account keys, local `.env` files, build outputs, and
-  generated model data out of git.
-- The trained model currently lives at
-  `seniorproject-backend/devices/models/smart_energy_ai.joblib` because the
-  Cloud Run Dockerfile copies it into the image.
-- `seniorproject-backend` still contains its own `.git` folder from the original
-  backend repository. Remove that nested `.git` only after you are sure the
-  outer repository is the one you want to use going forward.
+Flutter:
+
+```bash
+cd smart_energy_app
+flutter analyze
+flutter test
+```
+
+Backend syntax:
+
+```bash
+cd seniorproject-backend
+python3 -m py_compile api_server.py main.py devices/dashboard_server.py
+```
+
+## Security Notes
+
+- Do not commit Firebase service account keys, local `.env` files, API keys, generated datasets, or trained model artifacts unless explicitly intended.
+- `.agents/` and local agent lock files are development tooling and are ignored.

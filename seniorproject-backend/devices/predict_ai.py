@@ -146,7 +146,7 @@ def calculate_efficiency_score(result: dict[str, Any], payload: dict[str, Any]) 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Smart Energy AI prediction.")
+    parser = argparse.ArgumentParser(description="Run KahrabaIQ Intelligence prediction.")
     parser.add_argument(
         "--payload",
         help="JSON string or path to a JSON file. If omitted, a demo payload is used.",

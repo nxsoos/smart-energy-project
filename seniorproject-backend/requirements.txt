@@ -9,3 +9,4 @@ pydantic==2.12.5
 google-genai>=1.0.0
 python-dotenv
 requests
+qrcode[pil]

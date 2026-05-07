@@ -78,7 +78,7 @@ def create_initial_admin(uid: str, email: str, display_name: str, home_id: str) 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create the first Smart Energy admin.")
+    parser = argparse.ArgumentParser(description="Create the first KahrabaIQ admin.")
     parser.add_argument("--uid", required=True)
     parser.add_argument("--email", required=True)
     parser.add_argument("--name", default="Demo Admin")

@@ -1,41 +1,43 @@
-# Smart Energy Backend
+# KahrabaIQ Backend Workspace
 
-Backend workspace for the Smart Energy project.
+Python workspace for the cloud API, AI service, Firebase deployment files, and Raspberry Pi edge code.
 
-to rebuild gcloud:
-gcloud run deploy smart-energy-ai --source . --region asia-southeast1 --allow-unauthenticated
-## Parts
+## Layout
 
 ```text
-main.py                 FastAPI AI service for Cloud Run
-requirements.txt       Python dependencies for the AI service
-Dockerfile             Cloud Run container build
-devices/               AI scripts, local Firebase scripts, and model files
-functions/             Firebase Cloud Functions project
-README_DEPLOY.md       Cloud Run deployment guide
+seniorproject-backend/
+  api_server.py                 Cloud API for Flutter and Pi sync
+  main.py                       AI service entry point
+  home_assistant_controller.py  Shared Home Assistant integration
+  occupancy_utils.py            Occupancy calculations
+  timestamp_utils.py            Time helpers
+  devices/                      Raspberry Pi dashboard/services/firmware
+  docs/                         Deployment and AI reports
+  functions/                    Firebase Cloud Functions
 ```
 
-## Local AI Service
+## Cloud API Local Run
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
+```bash
 pip install -r requirements.txt
-$env:FIREBASE_DATABASE_URL="https://YOUR_DATABASE.firebaseio.com"
+uvicorn api_server:app --reload
+```
+
+## AI Service Local Run
+
+```bash
+pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-## Firebase Functions
+## Docs
 
-```powershell
-cd functions
-npm install
-npm run build
-npm run serve
+```text
+docs/deployment/
+docs/ai/
+devices/docs/
 ```
 
 ## Secrets
 
-Do not commit Firebase service account keys or API keys. Cloud Run should use
-Application Default Credentials, and Gemini keys should be set as environment
-variables or stored in a secret manager.
+Do not commit Firebase service account keys, API keys, `.env` files, Pi device tokens, or kiosk passwords. Use environment variables or a secret manager.

@@ -1,6 +1,6 @@
-# Smart Energy App
+# KahrabaIQ App
 
-Flutter client for the Smart Energy project. It reads dashboard, sensor, device,
+Flutter client for the KahrabaIQ product. It reads dashboard, sensor, device,
 alert, and AI insight data from Firebase Realtime Database and calls the Cloud
 Run AI backend for chatbot responses.
 

@@ -14,6 +14,7 @@ firebase-debug.*.log
 # Environment and secrets
 .env
 .env.*
+!.env.sample
 *.local
 serviceAccountKey.json
 **/serviceAccountKey.json
@@ -53,3 +54,6 @@ coverage/
 seniorproject-backend/devices/ai_ready_dataset_60_days.csv
 seniorproject-backend/devices/models/smart_energy_ai_metrics.json
 seniorproject-backend/ai_scenario_validation_results*.json
+
+.agents/
+skills-lock.json

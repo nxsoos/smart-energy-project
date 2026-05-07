@@ -607,7 +607,7 @@ def run(home_id: str, dry_run: bool) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Read Firebase data, run Smart Energy AI, and write the result back."
+        description="Read Firebase data, run KahrabaIQ Intelligence, and write the result back."
     )
     parser.add_argument("--home-id", default=DEFAULT_HOME_ID)
     parser.add_argument(

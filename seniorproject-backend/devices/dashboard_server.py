@@ -1,5 +1,7 @@
 import os
 import time
+import base64
+import io
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,9 +31,16 @@ CLOUD_BACKEND_ENABLED = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 HOME_ID = os.environ.get("HOME_ID", "home_001")
-SMART_ENERGY_API_URL = os.environ.get(
-    "SMART_ENERGY_API_URL",
-    "https://smart-energy-api-qs7uzdqawq-as.a.run.app",
+PI_ID = os.environ.get("PI_ID", "pi_local_001")
+PI_DEVICE_TOKEN = os.environ.get("PI_DEVICE_TOKEN", "")
+KIOSK_ADMIN_PASSWORD_HASH = os.environ.get("KIOSK_ADMIN_PASSWORD_HASH", "")
+KIOSK_ADMIN_PASSWORD = os.environ.get("KIOSK_ADMIN_PASSWORD", "")
+KAHRABAIQ_API_URL = os.environ.get(
+    "KAHRABAIQ_API_URL",
+    os.environ.get(
+        "SMART_ENERGY_API_URL",
+        "https://smart-energy-api-qs7uzdqawq-as.a.run.app",
+    ),
 ).rstrip("/")
 PI_DASHBOARD_TOKEN = os.environ.get("PI_DASHBOARD_TOKEN", "")
 ALLOWED_DEVICES = {"breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"}
@@ -64,6 +73,32 @@ DEFAULT_SETTINGS = {
 }
 
 app = Flask(__name__)
+
+try:
+    import qrcode
+except Exception:  # pragma: no cover - optional Pi dependency
+    qrcode = None
+
+
+def sha256_text(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def kiosk_password_valid(password: str) -> bool:
+    if KIOSK_ADMIN_PASSWORD_HASH:
+        return sha256_text(password) == KIOSK_ADMIN_PASSWORD_HASH
+    return bool(KIOSK_ADMIN_PASSWORD) and password == KIOSK_ADMIN_PASSWORD
+
+
+def qr_data_url(payload: str) -> str | None:
+    if not qrcode or not payload:
+        return None
+    image = qrcode.make(payload)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def initialize_firebase() -> None:
@@ -421,6 +456,52 @@ def index():
     return render_template("index.html")
 
 
+@app.get("/api/kiosk/state")
+def kiosk_state():
+    pi_status = "paired" if HOME_ID else "unpaired"
+    pairing_payload = None
+    token_expires_at_ms = None
+    if CLOUD_BACKEND_ENABLED and PI_DEVICE_TOKEN:
+        try:
+            response = requests.post(
+                f"{KAHRABAIQ_API_URL}/api/pairing/pi-token",
+                headers={"X-Pi-Id": PI_ID, "X-Device-Token": PI_DEVICE_TOKEN},
+                json={"display_name": PI_ID, "dashboard_version": "local-kiosk"},
+                timeout=10,
+            )
+            data = response.json()
+            if response.ok:
+                pairing_payload = data.get("qr_payload")
+                token_expires_at_ms = data.get("expires_at_ms")
+        except Exception as error:
+            print(f"[PAIRING TOKEN ERROR] {error}", flush=True)
+    if not pairing_payload:
+        pairing_payload = f"kahrabaiq://pair?pi_id={PI_ID}&token=configure-cloud-token"
+    return jsonify(
+        {
+            "success": True,
+            "pi_id": PI_ID,
+            "home_id": HOME_ID,
+            "paired": pi_status == "paired",
+            "status": pi_status,
+            "cloud_enabled": CLOUD_BACKEND_ENABLED,
+            "cloud_status": "configured" if CLOUD_BACKEND_ENABLED else "local-only",
+            "pairing_payload": pairing_payload,
+            "pairing_qr_data_url": qr_data_url(pairing_payload),
+            "pairing_expires_at_ms": token_expires_at_ms,
+            "admin_unlock_configured": bool(KIOSK_ADMIN_PASSWORD_HASH or KIOSK_ADMIN_PASSWORD),
+        }
+    )
+
+
+@app.post("/api/kiosk/unlock")
+def kiosk_unlock():
+    data = request.get_json(silent=True) or {}
+    if not kiosk_password_valid(str(data.get("password", ""))):
+        return jsonify({"success": False, "message": "Invalid admin password."}), 403
+    return jsonify({"success": True, "message": "Kiosk admin unlocked."})
+
+
 @app.get("/api/latest")
 def latest():
     try:
@@ -430,7 +511,7 @@ def latest():
         if CLOUD_BACKEND_ENABLED:
             try:
                 response = requests.get(
-                    f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/dashboard",
+                    f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/dashboard",
                     headers=api_headers(),
                     timeout=10,
                 )
@@ -524,7 +605,7 @@ def send_command():
             return jsonify(result), 200 if result.get("success") else 500
 
         response = requests.post(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/devices/{device_id}/command",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/devices/{device_id}/command",
             headers=api_headers(),
             json={
                 "command": action,
@@ -588,7 +669,7 @@ def turn_off_safe_devices():
             ), 200 if not failed else 500
 
         response = requests.post(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/turn-off-safe-devices",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/turn-off-safe-devices",
             headers=api_headers(),
             timeout=10,
         )
@@ -626,7 +707,7 @@ def mark_smoke_safe():
             return jsonify({"success": True, "message": "Smoke emergency marked safe locally."})
 
         response = requests.post(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/mark-safe",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/safety/smoke/actions/mark-safe",
             headers=api_headers(),
             timeout=10,
         )
@@ -658,7 +739,7 @@ def update_control_mode():
             )
 
         response = requests.put(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/control/mode",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/control/mode",
             headers=api_headers(),
             json={"mode": mode, "updated_by": "pi_dashboard"},
             timeout=10,
@@ -703,7 +784,7 @@ def decide_action_suggestion(suggestion_id: str, decision: str):
             return jsonify(result), 500
 
         response = requests.post(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/action-suggestions/{suggestion_id}/{decision}",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/action-suggestions/{suggestion_id}/{decision}",
             headers=api_headers(),
             timeout=10,
         )
@@ -736,7 +817,7 @@ def get_settings():
             )
 
         response = requests.get(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/settings",
             headers=api_headers(),
             timeout=10,
         )
@@ -772,7 +853,7 @@ def update_settings():
             return jsonify({"success": True, "home_id": HOME_ID, "settings": merged})
 
         response = requests.put(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/settings",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/settings",
             headers=api_headers(),
             json=data,
             timeout=10,
@@ -797,7 +878,7 @@ def get_schedules():
             )
 
         response = requests.get(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/schedules",
             headers=api_headers(),
             timeout=10,
         )
@@ -823,7 +904,7 @@ def create_schedule():
             return jsonify({"success": True, "home_id": HOME_ID, "schedule": schedule})
 
         response = requests.post(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/schedules",
             headers=api_headers(),
             json=data,
             timeout=10,
@@ -860,7 +941,7 @@ def update_schedule_enabled(schedule_id: str):
             )
 
         response = requests.patch(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/enabled",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/enabled",
             headers=api_headers(),
             json=data,
             timeout=10,
@@ -897,7 +978,7 @@ def run_schedule_now(schedule_id: str):
             return jsonify({"success": bool(result.get("success")), "home_id": HOME_ID, "log": log})
 
         response = requests.post(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/run-now",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}/run-now",
             headers=api_headers(),
             timeout=10,
         )
@@ -924,7 +1005,7 @@ def delete_schedule(schedule_id: str):
             return jsonify({"success": True, "home_id": HOME_ID, "schedule": {**schedule, **updates}})
 
         response = requests.delete(
-            f"{SMART_ENERGY_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}",
+            f"{KAHRABAIQ_API_URL}/api/home/{HOME_ID}/schedules/{schedule_id}",
             headers=api_headers(),
             params={"deleted_by": "pi_dashboard"},
             timeout=10,

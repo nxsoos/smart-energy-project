@@ -4,6 +4,7 @@ import os
 import re
 import hashlib
 import hmac
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta
@@ -38,6 +39,9 @@ load_dotenv()
 SERVICE_NAME = "smart_energy_api"
 BAHRAIN_TZ = ZoneInfo(TIMEZONE)
 DEFAULT_HOME_ID = "home_001"
+HOME_MEMBER_LIMIT = int(os.environ.get("HOME_MEMBER_LIMIT", "3"))
+PAIRING_TOKEN_TTL_MS = int(os.environ.get("PAIRING_TOKEN_TTL_SECONDS", "900")) * 1000
+HOME_INVITE_TTL_MS = int(os.environ.get("HOME_INVITE_TTL_SECONDS", str(7 * 24 * 60 * 60))) * 1000
 MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch"}
 CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *MATTER_DEVICE_IDS}
 VALID_COMMANDS = {"turn_on", "turn_off"}
@@ -287,7 +291,7 @@ SETTINGS_OPTIONS = {
 }
 
 app = FastAPI(
-    title="Smart Energy API",
+    title="KahrabaIQ API",
     description="Clean API layer for Flutter and Raspberry Pi dashboard clients.",
     version="1.0.0",
 )
@@ -431,7 +435,29 @@ class ChatSessionMessageRequest(BaseModel):
 
 class SignupProfileRequest(BaseModel):
     display_name: str
-    home_id: str = DEFAULT_HOME_ID
+    home_id: str | None = None
+
+
+class PiPairingTokenRequest(BaseModel):
+    display_name: str | None = None
+    dashboard_version: str | None = None
+    firmware_version: str | None = None
+
+
+class PiClaimRequest(BaseModel):
+    pi_id: str
+    token: str
+    home_name: str | None = None
+
+
+class HomeInviteCreateRequest(BaseModel):
+    role: str = "member"
+    max_uses: int = Field(1, ge=1, le=3)
+
+
+class HomeInviteClaimRequest(BaseModel):
+    invite_id: str
+    token: str
 
 
 class MemberCreateRequest(BaseModel):
@@ -455,7 +481,7 @@ class AuthContext:
 
 
 ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
-    "admin": {
+    "home_admin": {
         "can_view": True,
         "can_control_devices": True,
         "can_change_settings": True,
@@ -464,16 +490,18 @@ ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
         "can_change_control_mode": True,
         "can_use_ai_chat": True,
         "can_acknowledge_alerts": True,
+        "can_generate_invites": True,
     },
     "member": {
         "can_view": True,
         "can_control_devices": True,
         "can_change_settings": False,
         "can_manage_users": False,
-        "can_manage_schedules": True,
+        "can_manage_schedules": False,
         "can_change_control_mode": False,
         "can_use_ai_chat": True,
         "can_acknowledge_alerts": True,
+        "can_generate_invites": False,
     },
     "viewer": {
         "can_view": True,
@@ -484,8 +512,11 @@ ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
         "can_change_control_mode": False,
         "can_use_ai_chat": False,
         "can_acknowledge_alerts": False,
+        "can_generate_invites": False,
     },
 }
+
+ROLE_ALIASES = {"admin": "home_admin"}
 
 
 def iso_from_ms(timestamp_ms: Any) -> str | None:
@@ -687,17 +718,44 @@ def start_home_assistant_sync_thread(home_id: str) -> None:
 
 
 def get_permissions_for_role(role: str) -> dict[str, bool]:
-    normalized = role.strip().lower()
+    normalized = ROLE_ALIASES.get(role.strip().lower(), role.strip().lower())
     if normalized not in ROLE_PERMISSIONS:
         raise HTTPException(status_code=400, detail="Invalid role.")
     return dict(ROLE_PERMISSIONS[normalized])
 
 
 def validate_role(role: str) -> str:
-    normalized = role.strip().lower()
+    normalized = ROLE_ALIASES.get(role.strip().lower(), role.strip().lower())
     if normalized not in ROLE_PERMISSIONS:
-        raise HTTPException(status_code=400, detail="Role must be admin, member, or viewer.")
+        raise HTTPException(status_code=400, detail="Role must be home_admin, member, or viewer.")
     return normalized
+
+
+def platform_admin_emails() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in os.environ.get("PLATFORM_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+
+
+def platform_role_for_email(email: str) -> str:
+    return "platform_admin" if email.strip().lower() in platform_admin_emails() else "user"
+
+
+def is_platform_admin_profile(profile: dict[str, Any]) -> bool:
+    return str(profile.get("platform_role") or "user").lower() == "platform_admin"
+
+
+def home_member_count(home_id: str, *, roles: set[str] | None = None) -> int:
+    members = as_dict(safe_get(f"/homes/{home_id}/members", {}))
+    count = 0
+    for raw_member in members.values():
+        member = as_dict(raw_member)
+        role = validate_role(str(member.get("role", "viewer")))
+        if roles is None or role in roles:
+            count += 1
+    return count
 
 
 def hash_secret(secret: str) -> str:
@@ -780,12 +838,16 @@ def authenticate_user_token(token: str) -> AuthContext:
     profile = as_dict(safe_get(f"/users/{uid}", {}))
     if not profile:
         raise HTTPException(status_code=403, detail="User profile does not exist.")
+    email = str(decoded.get("email") or profile.get("email") or "")
+    platform_role = platform_role_for_email(email)
+    if profile.get("platform_role") != platform_role:
+        safe_update(f"/users/{uid}", {"platform_role": platform_role, "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
     return AuthContext(
         actor_type="user",
         actor_id=uid,
-        actor_role="user",
+        actor_role=platform_role,
         uid=uid,
-        email=str(decoded.get("email") or profile.get("email") or ""),
+        email=email,
         claims=decoded,
         permissions={},
     )
@@ -868,6 +930,17 @@ def require_home_permission(permission: str):
         actor: AuthContext
         if token:
             actor = authenticate_user_token(token)
+            if actor.actor_role == "platform_admin":
+                actor = AuthContext(
+                    actor_type=actor.actor_type,
+                    actor_id=actor.actor_id,
+                    actor_role="platform_admin",
+                    uid=actor.uid,
+                    email=actor.email,
+                    claims=actor.claims,
+                    permissions={permission: True for permissions in ROLE_PERMISSIONS.values() for permission in permissions},
+                )
+                return actor
             member = as_dict(safe_get(f"/homes/{home_id}/members/{actor.uid}", {}))
             if not member:
                 audit_log(home_id, actor, "permission_check_failed", "home", home_id, {"permission": permission}, "denied")
@@ -900,7 +973,8 @@ def require_home_permission(permission: str):
 
 def require_home_role(required_role: str):
     def dependency(actor: AuthContext = Depends(require_home_permission("can_view"))) -> AuthContext:
-        if actor.actor_role != required_role and actor.actor_type != "service":
+        normalized_required = ROLE_ALIASES.get(required_role, required_role)
+        if actor.actor_role not in {normalized_required, "platform_admin"} and actor.actor_type != "service":
             raise HTTPException(status_code=403, detail="Admin role is required.")
         return actor
 
@@ -909,11 +983,12 @@ def require_home_role(required_role: str):
 
 def admin_count(home_id: str) -> int:
     members = as_dict(safe_get(f"/homes/{home_id}/members", {}))
-    return sum(1 for member in members.values() if as_dict(member).get("role") == "admin")
+    return sum(1 for member in members.values() if validate_role(str(as_dict(member).get("role", "viewer"))) == "home_admin")
 
 
 def member_record(uid: str, email: str, display_name: str, role: str) -> dict[str, Any]:
     timestamp_ms = now_ms()
+    role = validate_role(role)
     permissions = get_permissions_for_role(role)
     return {
         "uid": uid,
@@ -926,6 +1001,65 @@ def member_record(uid: str, email: str, display_name: str, role: str) -> dict[st
         "updated_at_ms": timestamp_ms,
         "updated_at_iso": iso_from_ms(timestamp_ms),
     }
+
+
+def add_user_to_home(uid: str, email: str, display_name: str, home_id: str, role: str) -> dict[str, Any]:
+    record = member_record(uid, email, display_name, role)
+    safe_set(f"/homes/{home_id}/members/{uid}", record)
+    profile = as_dict(safe_get(f"/users/{uid}", {}))
+    safe_update(
+        f"/users/{uid}",
+        {
+            "uid": uid,
+            "email": email,
+            "display_name": display_name,
+            "platform_role": profile.get("platform_role") or platform_role_for_email(email),
+            "default_home_id": profile.get("default_home_id") or home_id,
+            "homes": {**as_dict(profile.get("homes")), home_id: {"role": record["role"], **record["permissions"]}},
+            "created_at_ms": profile.get("created_at_ms") or record["added_at_ms"],
+            "created_at_iso": profile.get("created_at_iso") or record["added_at_iso"],
+            "updated_at_ms": record["updated_at_ms"],
+            "updated_at_iso": record["updated_at_iso"],
+        },
+    )
+    return record
+
+
+def create_home_for_pi(pi_id: str, uid: str, email: str, display_name: str, home_name: str | None) -> str:
+    timestamp_ms = now_ms()
+    home_id = f"home_{timestamp_ms}_{secrets.token_hex(3)}"
+    safe_set(
+        f"/homes/{home_id}",
+        {
+            "home_id": home_id,
+            "name": (home_name or "KahrabaIQ Home").strip() or "KahrabaIQ Home",
+            "owner_uid": uid,
+            "pi_id": pi_id,
+            "status": "active",
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    safe_set(f"/homes/{home_id}/settings", {**DEFAULT_SETTINGS, "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+    safe_set(f"/homes/{home_id}/control", {"mode": "assist", "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+    ensure_matter_devices(home_id)
+    add_user_to_home(uid, email, display_name, home_id, "home_admin")
+    safe_update(
+        f"/pis/{pi_id}",
+        {
+            "pi_id": pi_id,
+            "status": "paired",
+            "home_id": home_id,
+            "paired_by_uid": uid,
+            "paired_at_ms": timestamp_ms,
+            "paired_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    return home_id
 
 
 @app.post("/api/auth/complete-signup")
@@ -945,60 +1079,44 @@ def complete_signup_profile(
     email = str(decoded.get("email") or "")
     if not uid:
         raise HTTPException(status_code=401, detail="Invalid Firebase ID token.")
-    home_id = request.home_id.strip() or DEFAULT_HOME_ID
     display_name = request.display_name.strip() or email or uid
     existing_profile = as_dict(safe_get(f"/users/{uid}", {}))
-    existing_member = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
-    if existing_profile and existing_member:
+    requested_home_id = (request.home_id or "").strip()
+    if existing_profile and not requested_home_id:
         return {
             "success": True,
-            "home_id": home_id,
+            "home_id": existing_profile.get("default_home_id"),
             "uid": uid,
-            "role": existing_member.get("role", "viewer"),
+            "role": None,
+            "platform_role": existing_profile.get("platform_role", platform_role_for_email(email)),
             "created": False,
         }
 
-    role = "admin" if admin_count(home_id) == 0 else "viewer"
     timestamp_ms = now_ms()
     timestamp_iso = iso_from_ms(timestamp_ms)
-    permissions = get_permissions_for_role(role)
+    platform_role = platform_role_for_email(email)
+    homes = as_dict(existing_profile.get("homes"))
     profile = {
         "uid": uid,
         "email": email,
         "display_name": display_name,
-        "default_home_id": existing_profile.get("default_home_id") or home_id,
-        "homes": {
-            **as_dict(existing_profile.get("homes")),
-            home_id: {"role": role, **permissions},
-        },
+        "platform_role": platform_role,
+        "default_home_id": existing_profile.get("default_home_id"),
+        "homes": homes,
         "created_at_ms": existing_profile.get("created_at_ms") or timestamp_ms,
         "created_at_iso": existing_profile.get("created_at_iso") or timestamp_iso,
         "updated_at_ms": timestamp_ms,
         "updated_at_iso": timestamp_iso,
     }
-    member = {
-        "uid": uid,
-        "email": email,
-        "display_name": display_name,
-        "role": role,
-        "permissions": permissions,
-        "added_at_ms": timestamp_ms,
-        "added_at_iso": timestamp_iso,
-        "updated_at_ms": timestamp_ms,
-        "updated_at_iso": timestamp_iso,
-    }
     safe_set(f"/users/{uid}", profile)
-    safe_set(f"/homes/{home_id}/members/{uid}", member)
-    actor = AuthContext("user", uid, role, permissions, uid=uid, email=email)
-    audit_log(
-        home_id,
-        actor,
-        "signup_profile_created",
-        "user",
-        uid,
-        {"email": email, "first_admin": role == "admin"},
-    )
-    return {"success": True, "home_id": home_id, "uid": uid, "role": role, "created": True}
+    return {
+        "success": True,
+        "home_id": profile.get("default_home_id"),
+        "uid": uid,
+        "role": None,
+        "platform_role": platform_role,
+        "created": not bool(existing_profile),
+    }
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -1017,7 +1135,245 @@ def object_to_list(value: Any) -> list[dict[str, Any]]:
                 items.append({"id": str(key), **item})
             else:
                 items.append({"id": str(key), "value": item})
-        return items
+    return items
+
+
+@app.get("/api/me")
+def get_me(actor: AuthContext = Depends(require_authenticated_user)) -> dict[str, Any]:
+    profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
+    homes = []
+    for home_id, raw_access in as_dict(profile.get("homes")).items():
+        access = as_dict(raw_access)
+        home = as_dict(safe_get(f"/homes/{home_id}", {}))
+        role = validate_role(str(access.get("role", "viewer")))
+        homes.append(
+            {
+                "home_id": home_id,
+                "name": home.get("name") or home_id,
+                "role": role,
+                "permissions": {**get_permissions_for_role(role), **as_dict(access.get("permissions"))},
+                "pi_id": home.get("pi_id"),
+                "status": home.get("status", "active"),
+            }
+        )
+    platform_role = platform_role_for_email(actor.email or "")
+    return {
+        "success": True,
+        "uid": actor.uid,
+        "email": actor.email,
+        "display_name": profile.get("display_name") or actor.email,
+        "platform_role": platform_role,
+        "is_platform_admin": platform_role == "platform_admin",
+        "default_home_id": profile.get("default_home_id"),
+        "homes": homes,
+    }
+
+
+def authenticate_pi_request(pi_id: str, device_token: str) -> dict[str, Any]:
+    pi_id = pi_id.strip()
+    if not pi_id or not device_token:
+        raise HTTPException(status_code=401, detail="Pi ID and device token are required.")
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    if not pi:
+        timestamp_ms = now_ms()
+        pi = {
+            "pi_id": pi_id,
+            "status": "unpaired",
+            "token_hash": hash_secret(device_token),
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+        }
+        safe_set(f"/pis/{pi_id}", pi)
+    elif not secret_matches(device_token, str(pi.get("token_hash") or "")):
+        raise HTTPException(status_code=401, detail="Invalid Pi device token.")
+    safe_update(f"/pis/{pi_id}", {"last_seen_at_ms": now_ms(), "last_seen_at_iso": iso_from_ms(now_ms())})
+    return {**pi, "pi_id": pi_id}
+
+
+@app.post("/api/pairing/pi-token")
+def create_pi_pairing_token(
+    request: PiPairingTokenRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = authenticate_pi_request(x_pi_id or "", x_device_token or "")
+    pi_id = str(pi["pi_id"])
+    timestamp_ms = now_ms()
+    raw_token = secrets.token_urlsafe(24)
+    token_id = f"pair_{timestamp_ms}_{secrets.token_hex(3)}"
+    safe_set(
+        f"/pi_pairing_tokens/{token_id}",
+        {
+            "token_id": token_id,
+            "pi_id": pi_id,
+            "token_hash": hash_secret(raw_token),
+            "expires_at_ms": timestamp_ms + PAIRING_TOKEN_TTL_MS,
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+            "used": False,
+        },
+    )
+    safe_update(
+        f"/pis/{pi_id}",
+        {
+            "display_name": request.display_name or pi.get("display_name") or pi_id,
+            "dashboard_version": request.dashboard_version,
+            "firmware_version": request.firmware_version,
+            "latest_pairing_token_id": token_id,
+            "status": pi.get("status") or "unpaired",
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    return {
+        "success": True,
+        "pi_id": pi_id,
+        "token_id": token_id,
+        "token": raw_token,
+        "expires_at_ms": timestamp_ms + PAIRING_TOKEN_TTL_MS,
+        "qr_payload": f"kahrabaiq://pair?pi_id={pi_id}&token={raw_token}",
+    }
+
+
+@app.get("/api/pairing/pi-status/{pi_id}")
+def get_pi_pairing_status(pi_id: str) -> dict[str, Any]:
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    if not pi:
+        raise HTTPException(status_code=404, detail="Pi does not exist.")
+    return {"success": True, "pi": {"pi_id": pi_id, **pi}}
+
+
+@app.post("/api/pairing/claim-pi")
+def claim_pi(request: PiClaimRequest, actor: AuthContext = Depends(require_authenticated_user)) -> dict[str, Any]:
+    pi_id = request.pi_id.strip()
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    if not pi:
+        raise HTTPException(status_code=404, detail="Pi does not exist.")
+    if pi.get("status") == "paired" and pi.get("home_id"):
+        raise HTTPException(status_code=409, detail="This Pi is already paired.")
+    active_token_id = str(pi.get("latest_pairing_token_id") or "")
+    token_record = as_dict(safe_get(f"/pi_pairing_tokens/{active_token_id}", {}))
+    if not token_record or token_record.get("pi_id") != pi_id:
+        raise HTTPException(status_code=404, detail="Pairing token does not exist.")
+    if token_record.get("used") is True or as_number(token_record.get("expires_at_ms")) < now_ms():
+        raise HTTPException(status_code=409, detail="Pairing token expired. Refresh the QR code on the Pi.")
+    if not secret_matches(request.token, str(token_record.get("token_hash") or "")):
+        raise HTTPException(status_code=401, detail="Invalid pairing token.")
+    profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
+    display_name = str(profile.get("display_name") or actor.email or actor.uid)
+    home_id = create_home_for_pi(pi_id, str(actor.uid), str(actor.email or ""), display_name, request.home_name)
+    timestamp_ms = now_ms()
+    safe_update(
+        f"/pi_pairing_tokens/{active_token_id}",
+        {"used": True, "used_by_uid": actor.uid, "used_at_ms": timestamp_ms, "used_at_iso": iso_from_ms(timestamp_ms)},
+    )
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "role": "home_admin"}
+
+
+@app.post("/api/home/{home_id}/invites")
+def create_home_invite(
+    home_id: str,
+    request: HomeInviteCreateRequest,
+    actor: AuthContext = Depends(require_home_permission("can_generate_invites")),
+) -> dict[str, Any]:
+    role = validate_role(request.role)
+    if role == "home_admin":
+        raise HTTPException(status_code=400, detail="Invite role cannot be home_admin.")
+    if home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
+    timestamp_ms = now_ms()
+    raw_token = secrets.token_urlsafe(24)
+    invite_id = f"invite_{timestamp_ms}_{secrets.token_hex(3)}"
+    safe_set(
+        f"/home_invites/{invite_id}",
+        {
+            "invite_id": invite_id,
+            "home_id": home_id,
+            "role": role,
+            "token_hash": hash_secret(raw_token),
+            "created_by_uid": actor.uid,
+            "expires_at_ms": timestamp_ms + HOME_INVITE_TTL_MS,
+            "max_uses": request.max_uses,
+            "used_count": 0,
+            "active": True,
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    return {
+        "success": True,
+        "home_id": home_id,
+        "invite_id": invite_id,
+        "token": raw_token,
+        "expires_at_ms": timestamp_ms + HOME_INVITE_TTL_MS,
+        "qr_payload": f"kahrabaiq://invite?invite_id={invite_id}&token={raw_token}",
+    }
+
+
+@app.post("/api/home-invites/claim")
+def claim_home_invite(
+    request: HomeInviteClaimRequest,
+    actor: AuthContext = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    invite = as_dict(safe_get(f"/home_invites/{request.invite_id}", {}))
+    if not invite or invite.get("active") is not True:
+        raise HTTPException(status_code=404, detail="Invite does not exist.")
+    if as_number(invite.get("expires_at_ms")) < now_ms():
+        raise HTTPException(status_code=409, detail="Invite expired.")
+    if as_number(invite.get("used_count")) >= as_number(invite.get("max_uses"), 1):
+        raise HTTPException(status_code=409, detail="Invite has already been used.")
+    if not secret_matches(request.token, str(invite.get("token_hash") or "")):
+        raise HTTPException(status_code=401, detail="Invalid invite token.")
+    home_id = str(invite.get("home_id") or "")
+    if home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
+    existing = as_dict(safe_get(f"/homes/{home_id}/members/{actor.uid}", {}))
+    if existing:
+        return {"success": True, "home_id": home_id, "role": validate_role(str(existing.get("role", "viewer"))), "already_member": True}
+    profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
+    display_name = str(profile.get("display_name") or actor.email or actor.uid)
+    role = validate_role(str(invite.get("role", "member")))
+    member = add_user_to_home(str(actor.uid), str(actor.email or ""), display_name, home_id, role)
+    used_count = int(as_number(invite.get("used_count"))) + 1
+    safe_update(
+        f"/home_invites/{request.invite_id}",
+        {"used_count": used_count, "active": used_count < int(as_number(invite.get("max_uses"), 1)), "last_used_at_ms": now_ms(), "last_used_at_iso": iso_from_ms(now_ms())},
+    )
+    return {"success": True, "home_id": home_id, "role": member["role"], "already_member": False}
+
+
+def require_platform_admin(actor: AuthContext = Depends(require_authenticated_user)) -> AuthContext:
+    if actor.actor_role != "platform_admin":
+        raise HTTPException(status_code=403, detail="Platform admin role is required.")
+    return actor
+
+
+@app.get("/api/admin/users")
+def admin_users(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    users = object_to_list(safe_get("/users", {}))
+    return {"success": True, "count": len(users), "users": users}
+
+
+@app.get("/api/admin/homes")
+def admin_homes(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    homes = object_to_list(safe_get("/homes", {}))
+    return {"success": True, "count": len(homes), "homes": homes}
+
+
+@app.get("/api/admin/pis")
+def admin_pis(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    pis = object_to_list(safe_get("/pis", {}))
+    for pi in pis:
+        pi.pop("token_hash", None)
+    return {"success": True, "count": len(pis), "pis": pis}
+
+
+@app.get("/api/admin/pairings")
+def admin_pairings(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    tokens = object_to_list(safe_get("/pi_pairing_tokens", {}))
+    for token in tokens:
+        token.pop("token_hash", None)
+    return {"success": True, "count": len(tokens), "pairings": tokens}
     return []
 
 
@@ -2902,6 +3258,8 @@ def add_member(
     actor: AuthContext = Depends(require_home_permission("can_manage_users")),
 ) -> dict[str, Any]:
     role = validate_role(request.role)
+    if role == "member" and home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
     email = request.email.strip().lower()
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email is required.")
@@ -2962,7 +3320,7 @@ def update_member_role(
     existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
     if not existing:
         raise HTTPException(status_code=404, detail="Member does not exist.")
-    if existing.get("role") == "admin" and role != "admin" and admin_count(home_id) <= 1:
+    if validate_role(str(existing.get("role", "viewer"))) == "home_admin" and role != "home_admin" and admin_count(home_id) <= 1:
         raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
 
     timestamp_ms = now_ms()
@@ -2989,7 +3347,7 @@ def remove_member(
     existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
     if not existing:
         raise HTTPException(status_code=404, detail="Member does not exist.")
-    if existing.get("role") == "admin" and admin_count(home_id) <= 1:
+    if validate_role(str(existing.get("role", "viewer"))) == "home_admin" and admin_count(home_id) <= 1:
         raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
     safe_set(f"/homes/{home_id}/members/{uid}", None)
     safe_set(f"/users/{uid}/homes/{home_id}", None)
@@ -3787,7 +4145,7 @@ def title_from_message(message: str) -> str:
         picked = words[:4]
     title = " ".join(word.capitalize() for word in picked[:5]).strip()
     if not title:
-        return "Smart Energy Chat"
+        return "KahrabaIQ Chat"
     if any(word.lower() in {"power", "cost", "energy", "usage"} for word in picked):
         title = f"{title} Explanation" if "explanation" not in title.lower() else title
     return title[:60]
@@ -3832,7 +4190,7 @@ def require_chat_session_access(
     if session.get("archived") is True and not allow_archived:
         raise HTTPException(status_code=404, detail="Chat session is archived.")
     created_by = str(session.get("created_by") or "")
-    if actor.actor_type != "service" and actor.actor_role != "admin" and created_by != chat_actor_id(actor):
+    if actor.actor_type != "service" and actor.actor_role not in {"home_admin", "platform_admin"} and created_by != chat_actor_id(actor):
         raise HTTPException(status_code=403, detail="You do not have access to this chat session.")
     return session
 
@@ -4004,7 +4362,7 @@ def list_chat_sessions(
         item
         for item in sessions
         if item.get("archived") is not True
-        and (actor.actor_role == "admin" or str(item.get("created_by")) == actor_id)
+        and (actor.actor_role in {"home_admin", "platform_admin"} or str(item.get("created_by")) == actor_id)
     ]
     visible.sort(key=lambda item: as_number(item.get("updated_at_ms")), reverse=True)
     return {"home_id": home_id, "count": len(visible), "sessions": visible}
