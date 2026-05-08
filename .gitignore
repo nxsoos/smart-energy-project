@@ -14,7 +14,6 @@ firebase-debug.*.log
 # Environment and secrets
 
 !.env.sample
-*.local
 serviceAccountKey.json
 **/serviceAccountKey.json
 *firebase-adminsdk*.json
