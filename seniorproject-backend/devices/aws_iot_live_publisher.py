@@ -25,7 +25,7 @@ AWS_IOT_KEY_PATH = os.environ.get("AWS_IOT_KEY_PATH", "certs/private.pem.key")
 AWS_IOT_CA_PATH = os.environ.get("AWS_IOT_CA_PATH", "certs/AmazonRootCA1.pem")
 AWS_IOT_CLIENT_ID = os.environ.get("AWS_IOT_CLIENT_ID", f"smart-energy-pi-{HOME_ID}")
 AWS_IOT_LIVE_TOPIC = os.environ.get("AWS_IOT_LIVE_TOPIC", f"homes/{HOME_ID}/live/state")
-AWS_IOT_LIVE_INTERVAL_SECONDS = float(os.environ.get("AWS_IOT_LIVE_INTERVAL_SECONDS", "3"))
+AWS_IOT_LIVE_INTERVAL_SECONDS = float(os.environ.get("AWS_IOT_LIVE_INTERVAL_SECONDS", "15"))
 AWS_IOT_RETAIN_LIVE_STATE = os.environ.get("AWS_IOT_RETAIN_LIVE_STATE", "false").strip().lower() in {
     "1",
     "true",
