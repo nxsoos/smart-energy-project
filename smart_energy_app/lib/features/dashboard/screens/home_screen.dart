@@ -121,7 +121,9 @@ class _HomeScreenState extends State<HomeScreen> {
         id: home.homeId,
         label: home.name,
         badge: home.role == 'home_admin' ? 'ADMIN' : home.role.toUpperCase(),
-        description: home.piId == null ? 'Assigned smart energy home' : 'Controller ${home.piId}',
+        description: home.piId == null
+            ? 'Assigned smart energy home'
+            : 'Controller ${home.piId}',
         isDemo: false,
       ),
     ),
@@ -141,10 +143,11 @@ class _HomeScreenState extends State<HomeScreen> {
       ? 'Local Pi API data'
       : 'Live backend data';
 
-  bool get _canUseRemoteLiveSensors =>
-      !_isDemoHome && _remoteLiveOnly;
+  bool get _canUseRemoteLiveSensors => !_isDemoHome && _remoteLiveOnly;
   bool get _remoteLiveOnly =>
-      !_isDemoHome && NetworkConfig.remoteLiveOnly && NetworkConfig.useAwsIotLive;
+      !_isDemoHome &&
+      NetworkConfig.remoteLiveOnly &&
+      NetworkConfig.useAwsIotLive;
 
   @override
   void initState() {
@@ -250,7 +253,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadUserContext() async {
-    if (NetworkConfig.useLocalPiApi) {
+    if (NetworkConfig.useLocalPiApi || !NetworkConfig.useCognitoAuth) {
       setState(() {
         _selectedHomeId = NetworkConfig.firebaseHomeId;
         _permissions = UserPermissions.admin;
@@ -287,7 +290,9 @@ class _HomeScreenState extends State<HomeScreen> {
         _availableHomes = homes;
         _selectedHomeId = selected.homeId;
         _permissions = selected.homeId.isEmpty
-            ? (profile.isPlatformAdmin ? UserPermissions.admin : UserPermissions.viewer)
+            ? (profile.isPlatformAdmin
+                  ? UserPermissions.admin
+                  : UserPermissions.viewer)
             : selected.permissions;
         _isLoading = false;
       });
@@ -954,7 +959,9 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _selectedHomeId = homeId;
       final access = _availableHomes.where((home) => home.homeId == homeId);
-      _permissions = access.isEmpty ? UserPermissions.viewer : access.first.permissions;
+      _permissions = access.isEmpty
+          ? UserPermissions.viewer
+          : access.first.permissions;
       _selectedScenarioId = null;
       _activeScenarioName = null;
       _activeScenarioDescription = null;
@@ -1660,7 +1667,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   initialValue: role,
                   decoration: const InputDecoration(labelText: 'Role'),
                   items: const [
-                    DropdownMenuItem(value: 'home_admin', child: Text('Home Admin')),
+                    DropdownMenuItem(
+                      value: 'home_admin',
+                      child: Text('Home Admin'),
+                    ),
                     DropdownMenuItem(value: 'member', child: Text('Member')),
                     DropdownMenuItem(value: 'viewer', child: Text('Viewer')),
                   ],
@@ -1756,29 +1766,69 @@ class _HomeScreenState extends State<HomeScreen> {
     final averageCurrent = _currentReading.current > 0
         ? _currentReading.current
         : 0.0;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final background = isDark ? AppColors.background : const Color(0xFFF4F1E8);
+    final surface = theme.colorScheme.surface;
+    final outline = isDark ? AppColors.outline : const Color(0xFFD8CFBE);
+    final textPrimary = isDark
+        ? AppColors.textPrimary
+        : const Color(0xFF17231D);
+    final textSecondary = isDark
+        ? AppColors.textSecondary
+        : const Color(0xFF65766D);
 
     return Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: background,
       appBar: AppBar(
-        title: const Text(
-          appName,
-          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              appName,
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+                color: textPrimary,
+                letterSpacing: -0.4,
+              ),
+            ),
+            Text(
+              'Live home energy cockpit',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: textSecondary,
+              ),
+            ),
+          ],
         ),
-        backgroundColor: AppColors.primary,
+        backgroundColor: Colors.transparent,
         elevation: 0,
         actions: [
+          AnimatedBuilder(
+            animation: AppThemeController.instance,
+            builder: (context, _) => IconButton(
+              tooltip: AppThemeController.instance.isDark
+                  ? 'Switch to light mode'
+                  : 'Switch to dark mode',
+              icon: Icon(
+                AppThemeController.instance.isDark
+                    ? Icons.light_mode_outlined
+                    : Icons.dark_mode_outlined,
+                color: textPrimary,
+              ),
+              onPressed: AppThemeController.instance.toggle,
+            ),
+          ),
           if (_permissions.canChangeSettings ||
               _permissions.canManageSchedules ||
               _permissions.canChangeControlMode)
             IconButton(
-              icon: const Icon(Icons.settings, color: Colors.white),
+              icon: Icon(Icons.settings, color: textPrimary),
               onPressed: _showSettingsSheet,
             ),
           PopupMenuButton<String>(
-            icon: const Icon(
-              Icons.account_circle_outlined,
-              color: Colors.white,
-            ),
+            icon: Icon(Icons.account_circle_outlined, color: textPrimary),
             onSelected: (value) {
               if (value == 'logout') {
                 _authService.signOut();
@@ -1794,377 +1844,393 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          await _refreshData();
-        },
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (_isLoading) ...[
-                const LinearProgressIndicator(),
-                const SizedBox(height: 16),
-              ],
-
-              if (_loadError != null) ...[
-                Card(
-                  color: Colors.orange.shade50,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.warning_amber_rounded,
-                          color: Colors.orange,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            _loadError!,
-                            style: const TextStyle(color: Colors.black87),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-              ],
-
-              if (_liveSensorError != null) ...[
-                Card(
-                  color: Colors.red.shade50,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.sensors_off_outlined,
-                          color: AppColors.energyDanger,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'AWS IoT live connection failed: $_liveSensorError',
-                            style: const TextStyle(color: Colors.black87),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-              ],
-
-              if (_remoteLiveOnly) ...[
-                Card(
-                  color: _hasLiveData ? Colors.green.shade50 : Colors.blue.shade50,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        Icon(
-                          _hasLiveData
-                              ? Icons.sensors_outlined
-                              : Icons.sync_outlined,
-                          color:
-                              _hasLiveData ? AppColors.primary : Colors.blue,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            _liveSensorStatus,
-                            style: const TextStyle(color: Colors.black87),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-              ],
-
-              _buildHomeSelectorCard(),
-              const SizedBox(height: 16),
-
-              _buildControlModeCard(),
-              const SizedBox(height: 16),
-
-              if (_nextSchedule != null) ...[
-                _buildNextScheduleCard(_nextSchedule!),
-                const SizedBox(height: 16),
-              ],
-
-              if (_controlMode.mode == 'assist' &&
-                  _actionSuggestions.isNotEmpty) ...[
-                _buildSectionTitle('Action Suggestions'),
-                const SizedBox(height: 8),
-                ..._actionSuggestions.map(_buildActionSuggestionCard),
-                const SizedBox(height: 16),
-              ],
-
-              if (_controlMode.mode == 'auto' &&
-                  _automationLogs.isNotEmpty) ...[
-                _buildAutomationLogCard(_automationLogs.first),
-                const SizedBox(height: 16),
-              ],
-
-              if (!_hasLiveData && !_isLoading) ...[
-                _buildNoLiveDataCard(),
-                const SizedBox(height: 16),
-              ],
-
-              if (_alerts.isNotEmpty) ...[
-                _buildSectionTitle('Alerts'),
-                const SizedBox(height: 8),
-                ..._alerts.map(_buildAlertCard),
-                const SizedBox(height: 16),
-              ],
-
-              // Energy Metrics
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildSectionTitle('Energy Overview'),
-                  Text(
-                    _dataSourceLabel,
-                    style: TextStyle(
-                      color: Colors.grey[600],
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: RadialGradient(
+            center: Alignment.topLeft,
+            radius: 1.1,
+            colors: [
+              isDark ? const Color(0xFF12372A) : const Color(0xFFDCEBD7),
+              background,
+            ],
+          ),
+        ),
+        child: RefreshIndicator(
+          color: AppColors.primary,
+          backgroundColor: surface,
+          onRefresh: () async {
+            await _refreshData();
+          },
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (_isLoading) ...[
+                  const LinearProgressIndicator(),
+                  const SizedBox(height: 16),
                 ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: MetricCard(
-                      title: 'Current Power',
-                      value: _hasLiveData
-                          ? (_currentReading.power / 1000).toStringAsFixed(2)
-                          : '--',
-                      unit: 'kW',
-                      icon: Icons.bolt,
-                      color: AppColors.primary,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MetricCard(
-                      title: 'Energy Today',
-                      value: _hasLiveData
-                          ? _currentReading.energyToday.toStringAsFixed(2)
-                          : '--',
-                      unit: 'kWh',
-                      icon: Icons.calendar_today,
-                      color: AppColors.accent,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: MetricCard(
-                      title: 'Cost Today',
-                      value: _hasLiveData ? totalCost.toStringAsFixed(3) : '--',
-                      unit: 'BD',
-                      icon: Icons.attach_money,
-                      color: Colors.orange,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MetricCard(
-                      title: 'Tariff',
-                      value: _hasLiveData
-                          ? _currentTariff.toStringAsFixed(3)
-                          : '--',
-                      unit: 'BD/kWh',
-                      icon: Icons.price_change,
-                      color: Colors.indigo,
-                    ),
-                  ),
-                ],
-              ),
 
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: MetricCard(
-                      title: 'Voltage',
-                      value: _hasLiveData
-                          ? _currentReading.voltage.toStringAsFixed(1)
-                          : '--',
-                      unit: 'V',
-                      icon: Icons.electrical_services,
-                      color: Colors.blue,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MetricCard(
-                      title: 'Current',
-                      value: _hasLiveData
-                          ? averageCurrent.toStringAsFixed(2)
-                          : '--',
-                      unit: 'A',
-                      icon: Icons.cable,
-                      color: Colors.teal,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              MetricCard(
-                title: 'Total Energy',
-                value: _hasLiveData
-                    ? _currentReading.energyTotal.toStringAsFixed(2)
-                    : '--',
-                unit: 'kWh',
-                icon: Icons.stacked_line_chart,
-                color: Colors.deepPurple,
-              ),
-
-              const SizedBox(height: 24),
-
-              _buildSectionTitle('KahrabaIQ Intelligence'),
-              const SizedBox(height: 12),
-              if (_isDemoHome) ...[
-                _buildModeNotice(
-                  icon: Icons.science_outlined,
-                  message:
-                      'Home Test Mode: AI analysis is based on demo/test scenario data.',
-                  color: Colors.indigo,
-                ),
-                const SizedBox(height: 12),
-              ],
-              _buildAiDashboardCard(),
-              const SizedBox(height: 12),
-              _buildAiDailySummaryCard(),
-              if (_aiRecommendation?.isActive ?? false) ...[
-                const SizedBox(height: 12),
-                _buildAiRecommendationCard(_aiRecommendation!),
-              ],
-              const SizedBox(height: 12),
-              _buildAiAlertCard(),
-
-              const SizedBox(height: 24),
-
-              // Environment Sensors
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildSectionTitle('Environment'),
-                  _buildStatusChip(
-                    icon: _isDemoHome
-                        ? Icons.science_outlined
-                        : Icons.sensors_outlined,
-                    label: _isDemoHome
-                        ? 'Simulated sensors'
-                        : 'Live sensor data',
-                    color: _isDemoHome ? Colors.indigo : AppColors.primary,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              if (_isDemoHome) ...[
-                _buildModeNotice(
-                  icon: Icons.info_outline,
-                  message:
-                      'Test Home Mode: Showing the latest simulated environment sensor record for demonstration.',
-                  color: Colors.indigo,
-                ),
-                const SizedBox(height: 12),
-              ],
-              Card(
-                elevation: 2,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                if (_loadError != null) ...[
+                  Card(
+                    color: Colors.orange.shade50,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
                         children: [
-                          Text(
-                            _isDemoHome
-                                ? 'Simulated sensor record'
-                                : 'Live sensor feed',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.grey[800],
-                            ),
+                          const Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.orange,
                           ),
-                          TextButton.icon(
-                            onPressed: () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => SensorsStatusScreen(
-                                    sensorData: _sensorData,
-                                    isDemoMode: _isDemoHome,
-                                  ),
-                                ),
-                              );
-                            },
-                            icon: const Icon(Icons.sensors, size: 16),
-                            label: const Text('Sensors'),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _loadError!,
+                              style: TextStyle(color: textPrimary),
+                            ),
                           ),
                         ],
                       ),
-                      Text(
-                        DateFormat(
-                          'MMM d, HH:mm:ss',
-                        ).format(_sensorData.timestamp),
-                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                      ),
-                      const SizedBox(height: 12),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: _roomComfortColor().withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: _roomComfortColor().withValues(alpha: 0.25),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                if (_liveSensorError != null) ...[
+                  Card(
+                    color: Colors.red.shade50,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.sensors_off_outlined,
+                            color: AppColors.energyDanger,
                           ),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              _roomComfortIcon(),
-                              size: 18,
-                              color: _roomComfortColor(),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'AWS IoT live connection failed: $_liveSensorError',
+                              style: TextStyle(color: textPrimary),
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                _roomComfortMessage(),
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: _roomComfortColor(),
-                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                if (_remoteLiveOnly) ...[
+                  Card(
+                    color: _hasLiveData
+                        ? Colors.green.shade50
+                        : Colors.blue.shade50,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _hasLiveData
+                                ? Icons.sensors_outlined
+                                : Icons.sync_outlined,
+                            color: _hasLiveData
+                                ? AppColors.primary
+                                : Colors.blue,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _liveSensorStatus,
+                              style: TextStyle(color: textPrimary),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                _buildHomeSelectorCard(),
+                const SizedBox(height: 16),
+
+                _buildControlModeCard(),
+                const SizedBox(height: 16),
+
+                if (_nextSchedule != null) ...[
+                  _buildNextScheduleCard(_nextSchedule!),
+                  const SizedBox(height: 16),
+                ],
+
+                if (_controlMode.mode == 'assist' &&
+                    _actionSuggestions.isNotEmpty) ...[
+                  _buildSectionTitle('Action Suggestions'),
+                  const SizedBox(height: 8),
+                  ..._actionSuggestions.map(_buildActionSuggestionCard),
+                  const SizedBox(height: 16),
+                ],
+
+                if (_controlMode.mode == 'auto' &&
+                    _automationLogs.isNotEmpty) ...[
+                  _buildAutomationLogCard(_automationLogs.first),
+                  const SizedBox(height: 16),
+                ],
+
+                if (!_hasLiveData && !_isLoading) ...[
+                  _buildNoLiveDataCard(),
+                  const SizedBox(height: 16),
+                ],
+
+                if (_alerts.isNotEmpty) ...[
+                  _buildSectionTitle('Alerts'),
+                  const SizedBox(height: 8),
+                  ..._alerts.map(_buildAlertCard),
+                  const SizedBox(height: 16),
+                ],
+
+                // Energy Metrics
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: surface.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(26),
+                    border: Border.all(color: outline),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Energy Overview',
+                              style: TextStyle(
+                                fontSize: 23,
+                                fontWeight: FontWeight.w900,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _dataSourceLabel,
+                              style: const TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
                               ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      _buildOccupancySummary(),
-                      const SizedBox(height: 12),
-                      if (!isSensorFeedWorking) ...[
+                      _buildStatusChip(
+                        icon: _hasLiveData
+                            ? Icons.radio_button_checked
+                            : Icons.sync_problem,
+                        label: _hasLiveData ? 'Live' : 'Waiting',
+                        color: _hasLiveData
+                            ? AppColors.primary
+                            : AppColors.energyWarning,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: MetricCard(
+                        title: 'Current Power',
+                        value: _hasLiveData
+                            ? (_currentReading.power / 1000).toStringAsFixed(2)
+                            : '--',
+                        unit: 'kW',
+                        icon: Icons.bolt,
+                        color: AppColors.primary,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: MetricCard(
+                        title: 'Energy Today',
+                        value: _hasLiveData
+                            ? _currentReading.energyToday.toStringAsFixed(2)
+                            : '--',
+                        unit: 'kWh',
+                        icon: Icons.calendar_today,
+                        color: AppColors.accent,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: MetricCard(
+                        title: 'Cost Today',
+                        value: _hasLiveData
+                            ? totalCost.toStringAsFixed(3)
+                            : '--',
+                        unit: 'BD',
+                        icon: Icons.attach_money,
+                        color: AppColors.energyWarning,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: MetricCard(
+                        title: 'Tariff',
+                        value: _hasLiveData
+                            ? _currentTariff.toStringAsFixed(3)
+                            : '--',
+                        unit: 'BD/kWh',
+                        icon: Icons.price_change,
+                        color: const Color(0xFF8EA7FF),
+                      ),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: MetricCard(
+                        title: 'Voltage',
+                        value: _hasLiveData
+                            ? _currentReading.voltage.toStringAsFixed(1)
+                            : '--',
+                        unit: 'V',
+                        icon: Icons.electrical_services,
+                        color: const Color(0xFF65B7FF),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: MetricCard(
+                        title: 'Current',
+                        value: _hasLiveData
+                            ? averageCurrent.toStringAsFixed(2)
+                            : '--',
+                        unit: 'A',
+                        icon: Icons.cable,
+                        color: AppColors.energySafe,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                MetricCard(
+                  title: 'Total Energy',
+                  value: _hasLiveData
+                      ? _currentReading.energyTotal.toStringAsFixed(2)
+                      : '--',
+                  unit: 'kWh',
+                  icon: Icons.stacked_line_chart,
+                  color: const Color(0xFFC79BFF),
+                ),
+
+                const SizedBox(height: 24),
+
+                _buildSectionTitle('KahrabaIQ Intelligence'),
+                const SizedBox(height: 12),
+                if (_isDemoHome) ...[
+                  _buildModeNotice(
+                    icon: Icons.science_outlined,
+                    message:
+                        'Home Test Mode: AI analysis is based on demo/test scenario data.',
+                    color: Colors.indigo,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                _buildAiDashboardCard(),
+                const SizedBox(height: 12),
+                _buildAiDailySummaryCard(),
+                if (_aiRecommendation?.isActive ?? false) ...[
+                  const SizedBox(height: 12),
+                  _buildAiRecommendationCard(_aiRecommendation!),
+                ],
+                const SizedBox(height: 12),
+                _buildAiAlertCard(),
+
+                const SizedBox(height: 24),
+
+                // Environment Sensors
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _buildSectionTitle('Environment'),
+                    _buildStatusChip(
+                      icon: _isDemoHome
+                          ? Icons.science_outlined
+                          : Icons.sensors_outlined,
+                      label: _isDemoHome
+                          ? 'Simulated sensors'
+                          : 'Live sensor data',
+                      color: _isDemoHome ? Colors.indigo : AppColors.primary,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                if (_isDemoHome) ...[
+                  _buildModeNotice(
+                    icon: Icons.info_outline,
+                    message:
+                        'Test Home Mode: Showing the latest simulated environment sensor record for demonstration.',
+                    color: Colors.indigo,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                Card(
+                  elevation: 2,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              _isDemoHome
+                                  ? 'Simulated sensor record'
+                                  : 'Live sensor feed',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.grey[800],
+                              ),
+                            ),
+                            TextButton.icon(
+                              onPressed: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => SensorsStatusScreen(
+                                      sensorData: _sensorData,
+                                      isDemoMode: _isDemoHome,
+                                    ),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(Icons.sensors, size: 16),
+                              label: const Text('Sensors'),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          DateFormat(
+                            'MMM d, HH:mm:ss',
+                          ).format(_sensorData.timestamp),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
                         Container(
                           width: double.infinity,
                           padding: const EdgeInsets.symmetric(
@@ -2172,31 +2238,29 @@ class _HomeScreenState extends State<HomeScreen> {
                             vertical: 10,
                           ),
                           decoration: BoxDecoration(
-                            color: AppColors.energyDanger.withValues(
-                              alpha: 0.10,
-                            ),
+                            color: _roomComfortColor().withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(10),
                             border: Border.all(
-                              color: AppColors.energyDanger.withValues(
+                              color: _roomComfortColor().withValues(
                                 alpha: 0.25,
                               ),
                             ),
                           ),
-                          child: const Row(
+                          child: Row(
                             children: [
                               Icon(
-                                Icons.sensors_off_outlined,
+                                _roomComfortIcon(),
                                 size: 18,
-                                color: AppColors.energyDanger,
+                                color: _roomComfortColor(),
                               ),
-                              SizedBox(width: 8),
+                              const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
-                                  'Sensor feed is offline. Waiting for a new ESP32 update.',
+                                  _roomComfortMessage(),
                                   style: TextStyle(
                                     fontSize: 13,
                                     fontWeight: FontWeight.w600,
-                                    color: AppColors.energyDanger,
+                                    color: _roomComfortColor(),
                                   ),
                                 ),
                               ),
@@ -2204,239 +2268,285 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ),
                         const SizedBox(height: 12),
-                      ],
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          _buildStatusChip(
-                            icon: !isSensorFeedWorking
-                                ? Icons.sensors_off_outlined
-                                : _sensorData.isOccupied
-                                ? Icons.person
-                                : Icons.person_outline,
-                            label: !isSensorFeedWorking
-                                ? 'Feed offline'
-                                : _sensorData.isOccupied
-                                ? 'Occupied'
-                                : 'Not occupied',
-                            color: !isSensorFeedWorking
-                                ? AppColors.energyDanger
-                                : _sensorData.isOccupied
-                                ? AppColors.primary
-                                : Colors.blueGrey,
+                        _buildOccupancySummary(),
+                        const SizedBox(height: 12),
+                        if (!isSensorFeedWorking) ...[
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.energyDanger.withValues(
+                                alpha: 0.10,
+                              ),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: AppColors.energyDanger.withValues(
+                                  alpha: 0.25,
+                                ),
+                              ),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(
+                                  Icons.sensors_off_outlined,
+                                  size: 18,
+                                  color: AppColors.energyDanger,
+                                ),
+                                SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Sensor feed is offline. Waiting for a new ESP32 update.',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.energyDanger,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                          _buildStatusChip(
-                            icon: isSensorFeedWorking && _sensorData.ahtOk
-                                ? Icons.check_circle
-                                : Icons.error_outline,
-                            label: isSensorFeedWorking && _sensorData.ahtOk
-                                ? 'AHT sensor OK'
-                                : 'AHT sensor issue',
-                            color: isSensorFeedWorking && _sensorData.ahtOk
-                                ? AppColors.energySafe
-                                : AppColors.energyDanger,
-                          ),
-                          _buildStatusChip(
-                            icon: isSensorFeedWorking && _sensorData.ens160Ok
-                                ? Icons.check_circle
-                                : Icons.error_outline,
-                            label: isSensorFeedWorking && _sensorData.ens160Ok
-                                ? 'ENS160 OK'
-                                : 'ENS160 issue',
-                            color: isSensorFeedWorking && _sensorData.ens160Ok
-                                ? AppColors.energySafe
-                                : AppColors.energyDanger,
-                          ),
-                          _buildStatusChip(
-                            icon: Icons.wb_sunny_outlined,
-                            label: isSensorFeedWorking
-                                ? _sensorData.lightStatus
-                                : 'Light sensor issue',
-                            color: isSensorFeedWorking
-                                ? Colors.amber
-                                : AppColors.energyDanger,
-                          ),
-                          _buildStatusChip(
-                            icon: Icons.local_fire_department_outlined,
-                            label: !isSensorFeedWorking
-                                ? 'Smoke sensor issue'
-                                : _sensorData.smokeStatus.toLowerCase() ==
-                                      'clear'
-                                ? 'Air clear'
-                                : _sensorData.smokeStatus,
-                            color:
-                                isSensorFeedWorking &&
-                                    _sensorData.smokeStatus.toLowerCase() ==
+                          const SizedBox(height: 12),
+                        ],
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            _buildStatusChip(
+                              icon: !isSensorFeedWorking
+                                  ? Icons.sensors_off_outlined
+                                  : _sensorData.isOccupied
+                                  ? Icons.person
+                                  : Icons.person_outline,
+                              label: !isSensorFeedWorking
+                                  ? 'Feed offline'
+                                  : _sensorData.isOccupied
+                                  ? 'Occupied'
+                                  : 'Not occupied',
+                              color: !isSensorFeedWorking
+                                  ? AppColors.energyDanger
+                                  : _sensorData.isOccupied
+                                  ? AppColors.primary
+                                  : Colors.blueGrey,
+                            ),
+                            _buildStatusChip(
+                              icon: isSensorFeedWorking && _sensorData.ahtOk
+                                  ? Icons.check_circle
+                                  : Icons.error_outline,
+                              label: isSensorFeedWorking && _sensorData.ahtOk
+                                  ? 'AHT sensor OK'
+                                  : 'AHT sensor issue',
+                              color: isSensorFeedWorking && _sensorData.ahtOk
+                                  ? AppColors.energySafe
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildStatusChip(
+                              icon: isSensorFeedWorking && _sensorData.ens160Ok
+                                  ? Icons.check_circle
+                                  : Icons.error_outline,
+                              label: isSensorFeedWorking && _sensorData.ens160Ok
+                                  ? 'ENS160 OK'
+                                  : 'ENS160 issue',
+                              color: isSensorFeedWorking && _sensorData.ens160Ok
+                                  ? AppColors.energySafe
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildStatusChip(
+                              icon: Icons.wb_sunny_outlined,
+                              label: isSensorFeedWorking
+                                  ? _sensorData.lightStatus
+                                  : 'Light sensor issue',
+                              color: isSensorFeedWorking
+                                  ? Colors.amber
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildStatusChip(
+                              icon: Icons.local_fire_department_outlined,
+                              label: !isSensorFeedWorking
+                                  ? 'Smoke sensor issue'
+                                  : _sensorData.smokeStatus.toLowerCase() ==
                                         'clear'
-                                ? AppColors.energySafe
-                                : AppColors.energyDanger,
-                          ),
-                          _buildStatusChip(
-                            icon: Icons.graphic_eq,
-                            label: isSensorFeedWorking
-                                ? _noiseLabel()
-                                : 'Noise sensor issue',
-                            color: !isSensorFeedWorking
-                                ? AppColors.energyDanger
-                                : _sensorData.noise == 1
-                                ? AppColors.energyWarning
-                                : Colors.blueGrey,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      GridView.count(
-                        crossAxisCount: 2,
-                        crossAxisSpacing: 10,
-                        mainAxisSpacing: 10,
-                        childAspectRatio: 1.25,
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        children: [
-                          _buildSensorStatCard(
-                            icon: Icons.thermostat,
-                            title: 'Temperature',
-                            value: isSensorFeedWorking
-                                ? '${_sensorData.temperature.toStringAsFixed(1)} C'
-                                : 'Offline',
-                            color:
-                                isSensorFeedWorking &&
-                                    _sensorData.isComfortableTemp
-                                ? AppColors.energySafe
-                                : AppColors.energyDanger,
-                          ),
-                          _buildSensorStatCard(
-                            icon: Icons.water_drop,
-                            title: 'Humidity',
-                            value: isSensorFeedWorking
-                                ? '${_sensorData.humidity.toStringAsFixed(1)}%'
-                                : 'Offline',
-                            color:
-                                isSensorFeedWorking &&
-                                    _sensorData.isComfortableHumidity
-                                ? AppColors.energySafe
-                                : AppColors.energyDanger,
-                          ),
-                          _buildSensorStatCard(
-                            icon: Icons.air,
-                            title: 'Air Quality',
-                            value: isSensorFeedWorking
-                                ? _airQualityLabel()
-                                : 'Offline',
-                            color: isSensorFeedWorking
-                                ? _airQualityStatusColor()
-                                : AppColors.energyDanger,
-                          ),
-                          _buildSensorStatCard(
-                            icon: Icons.wb_incandescent_outlined,
-                            title: 'Room Light',
-                            value: isSensorFeedWorking
-                                ? _sensorData.lightStatus
-                                : 'Offline',
-                            color:
-                                isSensorFeedWorking &&
-                                    _sensorData.lightStatus.toLowerCase() ==
-                                        'bright'
-                                ? Colors.amber.shade700
-                                : isSensorFeedWorking
-                                ? Colors.blueGrey
-                                : AppColors.energyDanger,
-                          ),
-                          _buildSensorStatCard(
-                            icon: Icons.graphic_eq,
-                            title: 'Noise',
-                            value: isSensorFeedWorking
-                                ? '${_noiseLabel()} (${_sensorData.soundRaw})'
-                                : 'Offline',
-                            color: !isSensorFeedWorking
-                                ? AppColors.energyDanger
-                                : _sensorData.noise == 1
-                                ? AppColors.energyWarning
-                                : Colors.blueGrey,
-                          ),
-                        ],
-                      ),
-                    ],
+                                  ? 'Air clear'
+                                  : _sensorData.smokeStatus,
+                              color:
+                                  isSensorFeedWorking &&
+                                      _sensorData.smokeStatus.toLowerCase() ==
+                                          'clear'
+                                  ? AppColors.energySafe
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildStatusChip(
+                              icon: Icons.graphic_eq,
+                              label: isSensorFeedWorking
+                                  ? _noiseLabel()
+                                  : 'Noise sensor issue',
+                              color: !isSensorFeedWorking
+                                  ? AppColors.energyDanger
+                                  : _sensorData.noise == 1
+                                  ? AppColors.energyWarning
+                                  : Colors.blueGrey,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        GridView.count(
+                          crossAxisCount: 2,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                          childAspectRatio: 1.25,
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          children: [
+                            _buildSensorStatCard(
+                              icon: Icons.thermostat,
+                              title: 'Temperature',
+                              value: isSensorFeedWorking
+                                  ? '${_sensorData.temperature.toStringAsFixed(1)} C'
+                                  : 'Offline',
+                              color:
+                                  isSensorFeedWorking &&
+                                      _sensorData.isComfortableTemp
+                                  ? AppColors.energySafe
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildSensorStatCard(
+                              icon: Icons.water_drop,
+                              title: 'Humidity',
+                              value: isSensorFeedWorking
+                                  ? '${_sensorData.humidity.toStringAsFixed(1)}%'
+                                  : 'Offline',
+                              color:
+                                  isSensorFeedWorking &&
+                                      _sensorData.isComfortableHumidity
+                                  ? AppColors.energySafe
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildSensorStatCard(
+                              icon: Icons.air,
+                              title: 'Air Quality',
+                              value: isSensorFeedWorking
+                                  ? _airQualityLabel()
+                                  : 'Offline',
+                              color: isSensorFeedWorking
+                                  ? _airQualityStatusColor()
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildSensorStatCard(
+                              icon: Icons.wb_incandescent_outlined,
+                              title: 'Room Light',
+                              value: isSensorFeedWorking
+                                  ? _sensorData.lightStatus
+                                  : 'Offline',
+                              color:
+                                  isSensorFeedWorking &&
+                                      _sensorData.lightStatus.toLowerCase() ==
+                                          'bright'
+                                  ? Colors.amber.shade700
+                                  : isSensorFeedWorking
+                                  ? Colors.blueGrey
+                                  : AppColors.energyDanger,
+                            ),
+                            _buildSensorStatCard(
+                              icon: Icons.graphic_eq,
+                              title: 'Noise',
+                              value: isSensorFeedWorking
+                                  ? '${_noiseLabel()} (${_sensorData.soundRaw})'
+                                  : 'Offline',
+                              color: !isSensorFeedWorking
+                                  ? AppColors.energyDanger
+                                  : _sensorData.noise == 1
+                                  ? AppColors.energyWarning
+                                  : Colors.blueGrey,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
 
-              const SizedBox(height: 24),
+                const SizedBox(height: 24),
 
-              // Devices Section
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildSectionTitle('Devices'),
-                  TextButton.icon(
-                    onPressed: () {
-                      // TODO: Navigate to all devices
-                    },
-                    icon: const Icon(Icons.arrow_forward, size: 16),
-                    label: const Text('View All'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              if (_isDemoHome) ...[
-                _buildModeNotice(
-                  icon: Icons.lock_outline,
-                  message:
-                      'Test Home Mode: Device control is disabled because this home uses demo data.',
-                  color: AppColors.energyWarning,
+                // Devices Section
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _buildSectionTitle('Devices'),
+                    TextButton.icon(
+                      onPressed: () {
+                        // TODO: Navigate to all devices
+                      },
+                      icon: const Icon(Icons.arrow_forward, size: 16),
+                      label: const Text('View All'),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 12),
+                if (_isDemoHome) ...[
+                  _buildModeNotice(
+                    icon: Icons.lock_outline,
+                    message:
+                        'Test Home Mode: Device control is disabled because this home uses demo data.',
+                    color: AppColors.energyWarning,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (_devices.isEmpty)
+                  _buildNoDevicesCard()
+                else
+                  ..._devices.map(
+                    (device) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12.0),
+                      child: DeviceCard(
+                        device: device,
+                        onToggle: _deviceControlEnabled
+                            ? (value) => _toggleDevice(device, value)
+                            : null,
+                        isCommandPending:
+                            _pendingDeviceCommands.contains(device.id) ||
+                            device.commandInProgress,
+                        commandError: _deviceCommandErrors[device.id],
+                        onTap: () {
+                          // TODO: Navigate to device details
+                        },
+                      ),
+                    ),
+                  ),
+
+                const SizedBox(height: 24),
+
+                // Emergency Button
+                SizedBox(
+                  width: double.infinity,
+                  height: 56,
+                  child: ElevatedButton.icon(
+                    onPressed: _deviceControlEnabled
+                        ? _showEmergencyDialog
+                        : null,
+                    icon: const Icon(Icons.power_off, size: 24),
+                    label: const Text(
+                      'EMERGENCY SHUTDOWN',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.energyDanger,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 24),
               ],
-              if (_devices.isEmpty)
-                _buildNoDevicesCard()
-              else
-                ..._devices.map(
-                  (device) => Padding(
-                    padding: const EdgeInsets.only(bottom: 12.0),
-                    child: DeviceCard(
-                      device: device,
-                      onToggle: _deviceControlEnabled
-                          ? (value) => _toggleDevice(device, value)
-                          : null,
-                      isCommandPending:
-                          _pendingDeviceCommands.contains(device.id) ||
-                          device.commandInProgress,
-                      commandError: _deviceCommandErrors[device.id],
-                      onTap: () {
-                        // TODO: Navigate to device details
-                      },
-                    ),
-                  ),
-                ),
-
-              const SizedBox(height: 24),
-
-              // Emergency Button
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton.icon(
-                  onPressed: _deviceControlEnabled
-                      ? _showEmergencyDialog
-                      : null,
-                  icon: const Icon(Icons.power_off, size: 24),
-                  label: const Text(
-                    'EMERGENCY SHUTDOWN',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.energyDanger,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 24),
-            ],
+            ),
           ),
         ),
       ),
@@ -2470,12 +2580,20 @@ class _HomeScreenState extends State<HomeScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Icon(Icons.qr_code_scanner, size: 56, color: Color(0xFF60E6A8)),
+                    const Icon(
+                      Icons.qr_code_scanner,
+                      size: 56,
+                      color: Color(0xFF60E6A8),
+                    ),
                     const SizedBox(height: 16),
                     const Text(
                       'Pair your controller',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w800),
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 26,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                     const SizedBox(height: 10),
                     const Text(
@@ -2535,8 +2653,14 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          ElevatedButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('Pair')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Pair'),
+          ),
         ],
       ),
     );
@@ -2577,11 +2701,15 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       await _loadUserContext();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pairing completed.')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Pairing completed.')));
       }
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Pairing failed: $error')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Pairing failed: $error')));
       }
     }
   }
@@ -2599,7 +2727,10 @@ class _HomeScreenState extends State<HomeScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Platform Admin', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            const Text(
+              'Platform Admin',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 12),
             Text('Users: ${_asList(data['users']).length}'),
             Text('Homes: ${_asList(data['homes']).length}'),
@@ -2610,11 +2741,14 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  List<dynamic> _asList(dynamic value) => value is List ? value : const <dynamic>[];
+  List<dynamic> _asList(dynamic value) =>
+      value is List ? value : const <dynamic>[];
 
   Future<void> _showInviteQrDialog() async {
     try {
-      final invite = await _firebaseRealtimeService.createHomeInvite(homeId: _selectedHomeId);
+      final invite = await _firebaseRealtimeService.createHomeInvite(
+        homeId: _selectedHomeId,
+      );
       if (!mounted) {
         return;
       }
@@ -2626,7 +2760,9 @@ class _HomeScreenState extends State<HomeScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text('Share this QR payload with a member. They can paste it in the pairing screen to join this home.'),
+              const Text(
+                'Share this QR payload with a member. They can paste it in the pairing screen to join this home.',
+              ),
               const SizedBox(height: 12),
               SelectableText(
                 invite.qrPayload,
@@ -2635,13 +2771,18 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
           ],
         ),
       );
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Invite failed: $error')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Invite failed: $error')));
       }
     }
   }
@@ -2916,7 +3057,10 @@ class _HomeScreenState extends State<HomeScreen> {
             DropdownButton<String>(
               value: member.role,
               items: const [
-                DropdownMenuItem(value: 'home_admin', child: Text('Home Admin')),
+                DropdownMenuItem(
+                  value: 'home_admin',
+                  child: Text('Home Admin'),
+                ),
                 DropdownMenuItem(value: 'member', child: Text('Member')),
                 DropdownMenuItem(value: 'viewer', child: Text('Viewer')),
               ],
@@ -3097,8 +3241,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return Text(
       title,
       style: const TextStyle(
-        fontSize: 20,
-        fontWeight: FontWeight.bold,
+        fontSize: 21,
+        fontWeight: FontWeight.w900,
+        letterSpacing: -0.3,
         color: AppColors.textPrimary,
       ),
     );
@@ -3341,7 +3486,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         const SizedBox(height: 5),
                         Text(
                           ai.explanation,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13,
                             height: 1.35,
                             color: AppColors.textPrimary,

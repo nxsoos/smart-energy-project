@@ -69,6 +69,9 @@ class AppConfig {
       awsIotPolicyName.isNotEmpty &&
       awsIotLiveTopic.isNotEmpty;
 
+  static bool get useCognitoAuth =>
+      cognitoUserPoolId.isNotEmpty && cognitoAppClientId.isNotEmpty;
+
   static const bool useLocalPiApi = bool.fromEnvironment(
     'USE_LOCAL_PI_API',
     defaultValue: false,

@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
+
 import '../../shared/models/alert.dart';
+import '../utils/constants.dart';
 import '../utils/helpers.dart';
 
-/// Alert banner widget for displaying system alerts
+/// High-contrast alert banner for dashboard safety states.
 class AlertBanner extends StatelessWidget {
+  const AlertBanner({super.key, required this.alert, this.onDismiss});
+
   final Alert alert;
   final VoidCallback? onDismiss;
-
-  const AlertBanner({super.key, required this.alert, this.onDismiss});
 
   IconData _getAlertIcon() {
     switch (alert.type.toString().split('.').last) {
@@ -26,18 +28,34 @@ class AlertBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textPrimary = isDark
+        ? AppColors.textPrimary
+        : const Color(0xFF17231D);
+    final textSecondary = isDark
+        ? AppColors.textSecondary
+        : const Color(0xFF65766D);
+    final textMuted = isDark ? AppColors.textMuted : const Color(0xFF849287);
+    final color = Color(alert.color);
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
+      margin: const EdgeInsets.symmetric(vertical: 5),
       decoration: BoxDecoration(
-        color: Color(alert.color).withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Color(alert.color), width: 1),
+        color: color.withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
       child: Padding(
-        padding: const EdgeInsets.all(12.0),
+        padding: const EdgeInsets.all(14),
         child: Row(
           children: [
-            Icon(_getAlertIcon(), color: Color(alert.color), size: 24),
+            Container(
+              padding: const EdgeInsets.all(9),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.16),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(_getAlertIcon(), color: color, size: 21),
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -47,20 +65,21 @@ class AlertBanner extends StatelessWidget {
                     alert.message,
                     style: TextStyle(
                       fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Color(alert.color),
+                      fontWeight: FontWeight.w800,
+                      color: textPrimary,
                     ),
                   ),
                   if (alert.affectedBranch != null) ...[
-                    const SizedBox(height: 2),
+                    const SizedBox(height: 3),
                     Text(
                       alert.affectedBranch!,
-                      style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                      style: TextStyle(fontSize: 12, color: textSecondary),
                     ),
                   ],
+                  const SizedBox(height: 3),
                   Text(
                     formatTime(alert.timestamp),
-                    style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+                    style: TextStyle(fontSize: 11, color: textMuted),
                   ),
                 ],
               ),
@@ -69,7 +88,7 @@ class AlertBanner extends StatelessWidget {
               IconButton(
                 icon: const Icon(Icons.close, size: 20),
                 onPressed: onDismiss,
-                color: Colors.grey[600],
+                color: textSecondary,
               ),
           ],
         ),

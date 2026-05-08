@@ -8,22 +8,43 @@ import '../config/app_config.dart';
 const String appName = 'KahrabaIQ';
 const String appVersion = '1.0.0';
 
+class AppThemeController extends ChangeNotifier {
+  AppThemeController._();
+
+  static final AppThemeController instance = AppThemeController._();
+
+  ThemeMode _mode = ThemeMode.dark;
+
+  ThemeMode get mode => _mode;
+
+  bool get isDark => _mode == ThemeMode.dark;
+
+  void toggle() {
+    _mode = isDark ? ThemeMode.light : ThemeMode.dark;
+    notifyListeners();
+  }
+}
+
 // Colors - Energy theme (Green)
 class AppColors {
-  static const Color primary = Color(0xFF2E7D32); // Dark Green
-  static const Color primaryLight = Color(0xFF60AD5E);
-  static const Color primaryDark = Color(0xFF005005);
+  static const Color primary = Color(0xFF49E6A2);
+  static const Color primaryLight = Color(0xFF86F2C6);
+  static const Color primaryDark = Color(0xFF0F6D4A);
 
-  static const Color accent = Color(0xFF00C853); // Bright Green
+  static const Color accent = Color(0xFFFFC857);
 
-  static const Color energySafe = Color(0xFF4CAF50); // Green
-  static const Color energyWarning = Color(0xFFFF9800); // Orange
-  static const Color energyDanger = Color(0xFFF44336); // Red
+  static const Color energySafe = Color(0xFF4FE39A);
+  static const Color energyWarning = Color(0xFFFFB84D);
+  static const Color energyDanger = Color(0xFFFF5A5F);
 
-  static const Color background = Color(0xFFF5F5F5);
-  static const Color surface = Colors.white;
-  static const Color textPrimary = Color(0xFF212121);
-  static const Color textSecondary = Color(0xFF757575);
+  static const Color background = Color(0xFF07110E);
+  static const Color surface = Color(0xFF101D19);
+  static const Color surfaceElevated = Color(0xFF162620);
+  static const Color surfaceMuted = Color(0xFF20312A);
+  static const Color outline = Color(0xFF2B443A);
+  static const Color textPrimary = Color(0xFFEAF6F0);
+  static const Color textSecondary = Color(0xFF9CB4AA);
+  static const Color textMuted = Color(0xFF6F877C);
 }
 
 // Device Types
@@ -88,6 +109,7 @@ class NetworkConfig {
   static const String cognitoMemberGroup = AppConfig.cognitoMemberGroup;
   static const bool remoteLiveOnly = AppConfig.remoteLiveOnly;
   static const int piApiTimeoutSeconds = AppConfig.piApiTimeoutSeconds;
+  static bool get useCognitoAuth => AppConfig.useCognitoAuth;
   static bool get useAwsIotLive => AppConfig.useAwsIotLive;
 
   static String get apiBaseUrl => backendApiUrl;
@@ -112,8 +134,8 @@ class ElectricityPricing {
 
 // UI Constants
 class UIConstants {
-  static const double cardBorderRadius = 12.0;
-  static const double buttonBorderRadius = 8.0;
+  static const double cardBorderRadius = 22.0;
+  static const double buttonBorderRadius = 16.0;
   static const double defaultPadding = 16.0;
   static const double smallPadding = 8.0;
   static const double largePadding = 24.0;

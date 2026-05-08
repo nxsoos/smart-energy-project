@@ -163,7 +163,8 @@ class _AuthScreenState extends State<AuthScreen> {
         case 'NetworkError':
           return 'Network error. Check the internet connection and try again.';
       }
-      return error.message ?? 'AWS Cognito authentication failed: ${error.code}.';
+      return error.message ??
+          'AWS Cognito authentication failed: ${error.code}.';
     }
 
     if (error is DioException) {
@@ -202,6 +203,17 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final background = isDark ? AppColors.background : const Color(0xFFF4F1E8);
+    final surface = theme.colorScheme.surface;
+    final outline = isDark ? AppColors.outline : const Color(0xFFD8CFBE);
+    final textPrimary = isDark
+        ? AppColors.textPrimary
+        : const Color(0xFF17231D);
+    final textSecondary = isDark
+        ? AppColors.textSecondary
+        : const Color(0xFF65766D);
     final isSignup = _mode == _AuthMode.signup;
     final isConfirmSignup = _mode == _AuthMode.confirmSignup;
     final isForgotPassword = _mode == _AuthMode.forgotPassword;
@@ -209,212 +221,308 @@ class _AuthScreenState extends State<AuthScreen> {
     final title = isSignup
         ? 'Create account'
         : isConfirmSignup
-            ? 'Verify email'
+        ? 'Verify email'
         : isForgotPassword
-            ? 'Reset password'
-            : isConfirmReset
-                ? 'Confirm reset'
-            : 'Welcome back';
+        ? 'Reset password'
+        : isConfirmReset
+        ? 'Confirm reset'
+        : 'Welcome back';
     final actionLabel = isSignup
         ? 'Sign Up'
         : isConfirmSignup
-            ? 'Verify Email'
+        ? 'Verify Email'
         : isForgotPassword
-            ? 'Send Reset Email'
-            : isConfirmReset
-                ? 'Update Password'
-            : 'Log In';
+        ? 'Send Reset Email'
+        : isConfirmReset
+        ? 'Update Password'
+        : 'Log In';
 
     return Scaffold(
-      backgroundColor: AppColors.background,
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Form(
-                    key: _formKey,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const Icon(
-                          Icons.energy_savings_leaf,
-                          color: AppColors.primary,
-                          size: 44,
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          title,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 24,
-                            fontWeight: FontWeight.w800,
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: RadialGradient(
+            center: Alignment.topRight,
+            radius: 1.2,
+            colors: [
+              isDark ? const Color(0xFF173C2E) : const Color(0xFFDDEBD4),
+              background,
+            ],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: surface.withValues(alpha: 0.96),
+                    borderRadius: BorderRadius.circular(28),
+                    border: Border.all(color: outline),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.primary.withValues(alpha: 0.10),
+                        blurRadius: 42,
+                        offset: const Offset(0, 24),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Form(
+                      key: _formKey,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: AppColors.primary.withValues(
+                                    alpha: 0.14,
+                                  ),
+                                  borderRadius: BorderRadius.circular(18),
+                                ),
+                                child: const Icon(
+                                  Icons.offline_bolt,
+                                  color: AppColors.primary,
+                                  size: 30,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'KahrabaIQ',
+                                      style: TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.w900,
+                                        color: textPrimary,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'Smart energy command center',
+                                      style: TextStyle(
+                                        color: textSecondary,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           ),
-                        ),
-                        const SizedBox(height: 20),
-                        if (isSignup) ...[
-                          TextFormField(
-                            controller: _nameController,
-                            textInputAction: TextInputAction.next,
-                            decoration: const InputDecoration(
-                              labelText: 'Name',
-                              prefixIcon: Icon(Icons.person_outline),
-                            ),
-                            validator: (value) =>
-                                value?.trim().isEmpty == true ? 'Name is required.' : null,
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        TextFormField(
-                          controller: _emailController,
-                          keyboardType: TextInputType.emailAddress,
-                          textInputAction:
-                              isForgotPassword ? TextInputAction.done : TextInputAction.next,
-                          decoration: const InputDecoration(
-                            labelText: 'Email',
-                            prefixIcon: Icon(Icons.email_outlined),
-                          ),
-                          validator: (value) {
-                            final text = value?.trim() ?? '';
-                            if (!text.contains('@')) {
-                              return 'Enter a valid email.';
-                            }
-                            return null;
-                          },
-                        ),
-                        if (isConfirmSignup || isConfirmReset) ...[
-                          const SizedBox(height: 12),
-                          TextFormField(
-                            controller: _codeController,
-                            keyboardType: TextInputType.number,
-                            textInputAction: isConfirmReset
-                                ? TextInputAction.next
-                                : TextInputAction.done,
-                            decoration: const InputDecoration(
-                              labelText: 'Verification code',
-                              prefixIcon: Icon(Icons.verified_outlined),
-                            ),
-                            validator: (value) {
-                              if ((value ?? '').trim().isEmpty) {
-                                return 'Code is required.';
-                              }
-                              return null;
-                            },
-                            onFieldSubmitted: (_) {
-                              if (!isConfirmReset) {
-                                _submit();
-                              }
-                            },
-                          ),
-                        ],
-                        if (!isForgotPassword &&
-                            !isConfirmSignup &&
-                            !isConfirmReset) ...[
-                          const SizedBox(height: 12),
-                          TextFormField(
-                            controller: _passwordController,
-                            obscureText: true,
-                            textInputAction: TextInputAction.done,
-                            decoration: const InputDecoration(
-                              labelText: 'Password',
-                              prefixIcon: Icon(Icons.lock_outline),
-                            ),
-                            validator: (value) {
-                              if ((value ?? '').length < 6) {
-                                return 'Password must be at least 6 characters.';
-                              }
-                              return null;
-                            },
-                            onFieldSubmitted: (_) => _submit(),
-                          ),
-                        ],
-                        if (isConfirmReset) ...[
-                          const SizedBox(height: 12),
-                          TextFormField(
-                            controller: _newPasswordController,
-                            obscureText: true,
-                            textInputAction: TextInputAction.done,
-                            decoration: const InputDecoration(
-                              labelText: 'New password',
-                              prefixIcon: Icon(Icons.lock_reset),
-                            ),
-                            validator: (value) {
-                              if ((value ?? '').length < 6) {
-                                return 'Password must be at least 6 characters.';
-                              }
-                              return null;
-                            },
-                            onFieldSubmitted: (_) => _submit(),
-                          ),
-                        ],
-                        if (_message != null) ...[
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 26),
                           Text(
-                            _message!,
-                            textAlign: TextAlign.center,
+                            title,
                             style: TextStyle(
-                              color: _message!.contains('sent')
-                                  ? AppColors.energySafe
-                                  : AppColors.energyDanger,
+                              fontSize: 28,
+                              fontWeight: FontWeight.w900,
+                              color: textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            isSignup
+                                ? 'Create the control account for your home energy hub.'
+                                : 'Enter the control room for live power, sensors, and AI guidance.',
+                            style: TextStyle(
+                              color: textSecondary,
+                              height: 1.35,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          if (isSignup) ...[
+                            TextFormField(
+                              controller: _nameController,
+                              textInputAction: TextInputAction.next,
+                              decoration: const InputDecoration(
+                                labelText: 'Name',
+                                prefixIcon: Icon(Icons.person_outline),
+                              ),
+                              validator: (value) =>
+                                  value?.trim().isEmpty == true
+                                  ? 'Name is required.'
+                                  : null,
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                          TextFormField(
+                            controller: _emailController,
+                            keyboardType: TextInputType.emailAddress,
+                            textInputAction: isForgotPassword
+                                ? TextInputAction.done
+                                : TextInputAction.next,
+                            decoration: const InputDecoration(
+                              labelText: 'Email',
+                              prefixIcon: Icon(Icons.email_outlined),
+                            ),
+                            validator: (value) {
+                              final text = value?.trim() ?? '';
+                              if (!text.contains('@')) {
+                                return 'Enter a valid email.';
+                              }
+                              return null;
+                            },
+                          ),
+                          if (isConfirmSignup || isConfirmReset) ...[
+                            const SizedBox(height: 12),
+                            TextFormField(
+                              controller: _codeController,
+                              keyboardType: TextInputType.number,
+                              textInputAction: isConfirmReset
+                                  ? TextInputAction.next
+                                  : TextInputAction.done,
+                              decoration: const InputDecoration(
+                                labelText: 'Verification code',
+                                prefixIcon: Icon(Icons.verified_outlined),
+                              ),
+                              validator: (value) {
+                                if ((value ?? '').trim().isEmpty) {
+                                  return 'Code is required.';
+                                }
+                                return null;
+                              },
+                              onFieldSubmitted: (_) {
+                                if (!isConfirmReset) {
+                                  _submit();
+                                }
+                              },
+                            ),
+                          ],
+                          if (!isForgotPassword &&
+                              !isConfirmSignup &&
+                              !isConfirmReset) ...[
+                            const SizedBox(height: 12),
+                            TextFormField(
+                              controller: _passwordController,
+                              obscureText: true,
+                              textInputAction: TextInputAction.done,
+                              decoration: const InputDecoration(
+                                labelText: 'Password',
+                                prefixIcon: Icon(Icons.lock_outline),
+                              ),
+                              validator: (value) {
+                                if ((value ?? '').length < 6) {
+                                  return 'Password must be at least 6 characters.';
+                                }
+                                return null;
+                              },
+                              onFieldSubmitted: (_) => _submit(),
+                            ),
+                          ],
+                          if (isConfirmReset) ...[
+                            const SizedBox(height: 12),
+                            TextFormField(
+                              controller: _newPasswordController,
+                              obscureText: true,
+                              textInputAction: TextInputAction.done,
+                              decoration: const InputDecoration(
+                                labelText: 'New password',
+                                prefixIcon: Icon(Icons.lock_reset),
+                              ),
+                              validator: (value) {
+                                if ((value ?? '').length < 6) {
+                                  return 'Password must be at least 6 characters.';
+                                }
+                                return null;
+                              },
+                              onFieldSubmitted: (_) => _submit(),
+                            ),
+                          ],
+                          if (_message != null) ...[
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color:
+                                    (_message!.contains('sent')
+                                            ? AppColors.energySafe
+                                            : AppColors.energyDanger)
+                                        .withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(
+                                  color:
+                                      (_message!.contains('sent')
+                                              ? AppColors.energySafe
+                                              : AppColors.energyDanger)
+                                          .withValues(alpha: 0.28),
+                                ),
+                              ),
+                              child: Text(
+                                _message!,
+                                style: TextStyle(
+                                  color: _message!.contains('sent')
+                                      ? AppColors.energySafe
+                                      : AppColors.energyDanger,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 18),
+                          ElevatedButton.icon(
+                            onPressed: _isBusy ? null : _submit,
+                            icon: _isBusy
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.login),
+                            label: Text(actionLabel),
+                          ),
+                          const SizedBox(height: 10),
+                          TextButton(
+                            onPressed: _isBusy
+                                ? null
+                                : () {
+                                    setState(() {
+                                      _message = null;
+                                      _mode = isSignup || isConfirmSignup
+                                          ? _AuthMode.login
+                                          : _AuthMode.signup;
+                                    });
+                                  },
+                            child: Text(
+                              isSignup || isConfirmSignup
+                                  ? 'Already have an account? Log in'
+                                  : 'Create a new account',
+                            ),
+                          ),
+                          if (isConfirmSignup)
+                            TextButton(
+                              onPressed: _isBusy
+                                  ? null
+                                  : _resendVerificationCode,
+                              child: const Text('Resend verification code'),
+                            ),
+                          TextButton(
+                            onPressed: _isBusy
+                                ? null
+                                : () {
+                                    setState(() {
+                                      _message = null;
+                                      _mode = isForgotPassword || isConfirmReset
+                                          ? _AuthMode.login
+                                          : _AuthMode.forgotPassword;
+                                    });
+                                  },
+                            child: Text(
+                              isForgotPassword || isConfirmReset
+                                  ? 'Back to login'
+                                  : 'Forgot password?',
                             ),
                           ),
                         ],
-                        const SizedBox(height: 18),
-                        ElevatedButton.icon(
-                          onPressed: _isBusy ? null : _submit,
-                          icon: _isBusy
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
-                                )
-                              : const Icon(Icons.login),
-                          label: Text(actionLabel),
-                        ),
-                        const SizedBox(height: 8),
-                        TextButton(
-                          onPressed: _isBusy
-                              ? null
-                              : () {
-                                  setState(() {
-                                    _message = null;
-                                    _mode = isSignup || isConfirmSignup
-                                        ? _AuthMode.login
-                                        : _AuthMode.signup;
-                                  });
-                                },
-                          child: Text(isSignup || isConfirmSignup
-                              ? 'Already have an account? Log in'
-                              : 'Create a new account'),
-                        ),
-                        if (isConfirmSignup)
-                          TextButton(
-                            onPressed:
-                                _isBusy ? null : _resendVerificationCode,
-                            child: const Text('Resend verification code'),
-                          ),
-                        TextButton(
-                          onPressed: _isBusy
-                              ? null
-                              : () {
-                                  setState(() {
-                                    _message = null;
-                                    _mode = isForgotPassword || isConfirmReset
-                                        ? _AuthMode.login
-                                        : _AuthMode.forgotPassword;
-                                  });
-                                },
-                          child: Text(
-                            isForgotPassword || isConfirmReset
-                                ? 'Back to login'
-                                : 'Forgot password?',
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),

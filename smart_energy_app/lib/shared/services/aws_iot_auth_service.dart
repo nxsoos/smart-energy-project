@@ -10,11 +10,7 @@ import '../models/user_permissions.dart';
 import '../../core/utils/constants.dart';
 
 class AppUser {
-  const AppUser({
-    required this.uid,
-    required this.email,
-    this.displayName,
-  });
+  const AppUser({required this.uid, required this.email, this.displayName});
 
   final String uid;
   final String email;
@@ -103,6 +99,7 @@ class AuthService {
     yield _currentUser;
     yield* _authStateController.stream;
   }
+
   AppUser? get currentUser => _currentUser;
 
   CognitoUserPool get _pool {
@@ -244,6 +241,9 @@ class AuthService {
   }
 
   Future<String?> getIdToken({bool forceRefresh = false}) async {
+    if (!NetworkConfig.useCognitoAuth) {
+      return null;
+    }
     final session = await _validSession();
     return session?.getIdToken().getJwtToken();
   }
@@ -334,6 +334,9 @@ class AuthService {
   }
 
   Future<CognitoUserSession?> _validSession() async {
+    if (!NetworkConfig.useCognitoAuth) {
+      return null;
+    }
     if (_session != null && _session!.isValid()) {
       return _session;
     }
@@ -423,9 +426,7 @@ class AuthService {
     final email = payload is Map
         ? (payload['email']?.toString() ?? fallbackEmail ?? '')
         : (fallbackEmail ?? '');
-    final uid = payload is Map
-        ? (payload['sub']?.toString() ?? email)
-        : email;
+    final uid = payload is Map ? (payload['sub']?.toString() ?? email) : email;
     final name = payload is Map ? payload['name']?.toString() : null;
     return AppUser(uid: uid, email: email, displayName: name);
   }
@@ -446,9 +447,7 @@ class AuthService {
   }
 
   bool _containsGroup(Set<String> groups, String expected) {
-    return groups.any(
-      (group) => group.toLowerCase() == expected.toLowerCase(),
-    );
+    return groups.any((group) => group.toLowerCase() == expected.toLowerCase());
   }
 
   String _buildAwsIotWebSocketUrl(CognitoCredentials credentials) {
