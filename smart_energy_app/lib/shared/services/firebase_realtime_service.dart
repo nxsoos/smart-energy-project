@@ -1,5 +1,9 @@
 // ignore_for_file: unused_element, unused_element_parameter
 
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 
 import '../models/alert.dart';
@@ -295,8 +299,8 @@ class FirebaseRealtimeService {
     : _dio = Dio(
         BaseOptions(
           baseUrl: NetworkConfig.apiBaseUrl,
-          connectTimeout: const Duration(seconds: 30),
-          receiveTimeout: const Duration(seconds: 30),
+          connectTimeout: Duration(seconds: NetworkConfig.piApiTimeoutSeconds),
+          receiveTimeout: Duration(seconds: NetworkConfig.piApiTimeoutSeconds),
         ),
       ) {
     _dio.interceptors.add(
@@ -341,7 +345,307 @@ class FirebaseRealtimeService {
   }
 
   Stream<SensorData> watchLiveSensorData({required String homeId}) {
-    return const Stream<SensorData>.empty();
+    if (!NetworkConfig.useAwsIotLive || homeId != NetworkConfig.firebaseHomeId) {
+      return const Stream<SensorData>.empty();
+    }
+    return _watchAwsIotLiveSensors(homeId: homeId);
+  }
+
+  Stream<SensorData> _watchAwsIotLiveSensors({required String homeId}) {
+    final controller = StreamController<SensorData>();
+    WebSocket? socket;
+    StreamSubscription<dynamic>? subscription;
+    Timer? firstMessageTimer;
+    Timer? pingTimer;
+
+    Future<void> connect() async {
+      try {
+        final config = await AuthService().createAwsIotConnectionConfig(
+          homeId: homeId,
+        ).timeout(
+          const Duration(seconds: 25),
+          onTimeout: () => throw TimeoutException(
+            'Timed out while preparing AWS IoT connection config. '
+            'Check Cognito Identity Pool and IoT policy permissions.',
+          ),
+        );
+
+        final connack = Completer<void>();
+        socket = await WebSocket.connect(
+          config.signedUrl,
+          protocols: const ['mqtt'],
+        ).timeout(
+          const Duration(seconds: 15),
+          onTimeout: () => throw TimeoutException(
+            'Timed out while opening the AWS IoT WebSocket. '
+            'Check the IoT endpoint, client policy, and phone internet.',
+          ),
+        );
+
+        subscription = socket!.listen(
+          (event) {
+            try {
+              final bytes = _webSocketEventBytes(event);
+              if (bytes.isEmpty) {
+                return;
+              }
+              final packetType = bytes.first >> 4;
+              if (packetType == 2) {
+                if (bytes.length < 4 || bytes[3] != 0) {
+                  final code = bytes.length >= 4 ? bytes[3] : -1;
+                  throw Exception('AWS IoT MQTT CONNACK failed: code=$code');
+                }
+                if (!connack.isCompleted) {
+                  connack.complete();
+                }
+                return;
+              }
+              if (packetType == 3) {
+                final publish = _decodeMqttPublishPacket(bytes);
+                if (publish.packetId != null) {
+                  socket?.add(_buildMqttPubackPacket(publish.packetId!));
+                }
+                if (publish.topic != config.topic) {
+                  return;
+                }
+                final decoded = jsonDecode(publish.payload);
+                final data = _asMap(decoded);
+                final room = _asMap(data['room']);
+                if (room.isNotEmpty && !controller.isClosed) {
+                  firstMessageTimer?.cancel();
+                  controller.add(_parseAwsIotLiveSensor(room));
+                }
+                return;
+              }
+              if (packetType == 9 || packetType == 13) {
+                return;
+              }
+            } catch (error, stackTrace) {
+              if (!connack.isCompleted) {
+                connack.completeError(error, stackTrace);
+              }
+              if (!controller.isClosed) {
+                controller.addError(error, stackTrace);
+              }
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            if (!connack.isCompleted) {
+              connack.completeError(error, stackTrace);
+            }
+            if (!controller.isClosed) {
+              controller.addError(error, stackTrace);
+            }
+          },
+          onDone: () {
+            if (!connack.isCompleted) {
+              connack.completeError(
+                StateError('AWS IoT WebSocket closed before MQTT connected.'),
+              );
+            }
+            if (!controller.isClosed) {
+              controller.addError('AWS IoT live connection closed.');
+            }
+          },
+        );
+
+        socket!.add(_buildMqttConnectPacket(config.clientId));
+        await connack.future.timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => throw TimeoutException(
+            'Timed out waiting for AWS IoT MQTT CONNACK.',
+          ),
+        );
+
+        socket!.add(_buildMqttSubscribePacket(config.topic, 1));
+        pingTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+          try {
+            socket?.add(const [0xC0, 0x00]);
+          } catch (_) {
+            // The stream listener will surface the connection failure.
+          }
+        });
+        firstMessageTimer = Timer(const Duration(seconds: 15), () {
+          if (!controller.isClosed) {
+            controller.addError(
+              'Connected to AWS IoT, but no live message arrived yet. '
+              'Check that the Pi publisher is publishing to ${config.topic}.',
+            );
+          }
+        });
+      } catch (error, stackTrace) {
+        if (!controller.isClosed) {
+          controller.addError(_friendlyAwsIotError(error), stackTrace);
+        }
+      }
+    }
+
+    controller.onListen = connect;
+    controller.onCancel = () async {
+      firstMessageTimer?.cancel();
+      pingTimer?.cancel();
+      await subscription?.cancel();
+      await socket?.close();
+    };
+    return controller.stream;
+  }
+
+  List<int> _webSocketEventBytes(dynamic event) {
+    if (event is List<int>) {
+      return event;
+    }
+    if (event is String) {
+      return utf8.encode(event);
+    }
+    throw FormatException('Unexpected AWS IoT WebSocket message type.');
+  }
+
+  List<int> _buildMqttConnectPacket(String clientId) {
+    final variableHeader = <int>[
+      ..._encodeMqttString('MQTT'),
+      0x04,
+      0x02,
+      0x00,
+      0x1E,
+    ];
+    final payload = _encodeMqttString(clientId);
+    return [
+      0x10,
+      ..._encodeMqttRemainingLength(variableHeader.length + payload.length),
+      ...variableHeader,
+      ...payload,
+    ];
+  }
+
+  List<int> _buildMqttSubscribePacket(String topic, int packetId) {
+    final variableHeader = [(packetId >> 8) & 0xFF, packetId & 0xFF];
+    final payload = [..._encodeMqttString(topic), 0x00];
+    return [
+      0x82,
+      ..._encodeMqttRemainingLength(variableHeader.length + payload.length),
+      ...variableHeader,
+      ...payload,
+    ];
+  }
+
+  List<int> _buildMqttPubackPacket(int packetId) {
+    return [0x40, 0x02, (packetId >> 8) & 0xFF, packetId & 0xFF];
+  }
+
+  List<int> _encodeMqttString(String value) {
+    final bytes = utf8.encode(value);
+    if (bytes.length > 65535) {
+      throw ArgumentError.value(value, 'value', 'MQTT string is too long.');
+    }
+    return [(bytes.length >> 8) & 0xFF, bytes.length & 0xFF, ...bytes];
+  }
+
+  List<int> _encodeMqttRemainingLength(int length) {
+    var value = length;
+    final encoded = <int>[];
+    do {
+      var digit = value % 128;
+      value = value ~/ 128;
+      if (value > 0) {
+        digit |= 0x80;
+      }
+      encoded.add(digit);
+    } while (value > 0);
+    return encoded;
+  }
+
+  ({int value, int nextIndex}) _decodeMqttRemainingLength(
+    List<int> bytes,
+    int startIndex,
+  ) {
+    var multiplier = 1;
+    var value = 0;
+    var index = startIndex;
+    while (index < bytes.length) {
+      final digit = bytes[index++];
+      value += (digit & 127) * multiplier;
+      if ((digit & 128) == 0) {
+        return (value: value, nextIndex: index);
+      }
+      multiplier *= 128;
+      if (multiplier > 128 * 128 * 128) {
+        break;
+      }
+    }
+    throw const FormatException('Invalid MQTT remaining length.');
+  }
+
+  ({String topic, String payload, int? packetId}) _decodeMqttPublishPacket(
+    List<int> bytes,
+  ) {
+    if (bytes.length < 4) {
+      throw const FormatException('Invalid MQTT publish packet.');
+    }
+    final qos = (bytes.first & 0x06) >> 1;
+    final remaining = _decodeMqttRemainingLength(bytes, 1);
+    var index = remaining.nextIndex;
+    final packetEnd = index + remaining.value;
+    if (packetEnd > bytes.length || index + 2 > packetEnd) {
+      throw const FormatException('Invalid MQTT publish length.');
+    }
+
+    final topicLength = (bytes[index] << 8) | bytes[index + 1];
+    index += 2;
+    if (index + topicLength > packetEnd) {
+      throw const FormatException('Invalid MQTT publish topic.');
+    }
+    final topic = utf8.decode(bytes.sublist(index, index + topicLength));
+    index += topicLength;
+
+    int? packetId;
+    if (qos > 0) {
+      if (index + 2 > packetEnd) {
+        throw const FormatException('Invalid MQTT publish packet id.');
+      }
+      packetId = (bytes[index] << 8) | bytes[index + 1];
+      index += 2;
+    }
+
+    final payload = utf8.decode(bytes.sublist(index, packetEnd));
+    return (topic: topic, payload: payload, packetId: packetId);
+  }
+
+  String _friendlyAwsIotError(Object error) {
+    final text = error.toString();
+    if (text.contains('HTTP status code: 403')) {
+      return 'AWS IoT rejected the app credentials (HTTP 403). '
+          'Rebuild the app with the latest AWS IoT signer, then sign out and '
+          'sign in again so Cognito gets fresh AWS credentials.';
+    }
+    if (text.contains('was not upgraded to websocket')) {
+      return 'AWS IoT WebSocket upgrade failed. Check the Cognito role, IoT '
+          'policy, and signed WebSocket URL.';
+    }
+    return text.replaceFirst('Exception: ', '');
+  }
+
+  SensorData _parseAwsIotLiveSensor(Map<String, dynamic> room) {
+    return SensorData(
+      timestamp: _asDateTime(_pick(room, ['timestampMs', 'timestampIso'])),
+      temperature: _asDouble(_pick(room, ['temperature'])),
+      humidity: _asDouble(_pick(room, ['humidity'])),
+      isOccupied: _asBool(_pick(room, ['motion', 'motionText'])),
+      eco2: _asDouble(_pick(room, ['eco2'])),
+      tvoc: _asDouble(_pick(room, ['tvoc'])),
+      aqi: _asInt(_pick(room, ['aqi'])),
+      smokeRaw: _asInt(_pick(room, ['smokeRaw'])),
+      lightRaw: _asInt(_pick(room, ['lightRaw'])),
+      soundRaw: _asInt(_pick(room, ['soundRaw'])),
+      noise: _asInt(_pick(room, ['noise'])),
+      noiseStatus: _asString(_pick(room, ['noiseText']), fallback: 'Unknown'),
+      lightStatus: _asString(_pick(room, ['lightStatus']), fallback: 'Unknown'),
+      smokeStatus: _asString(
+        _pick(room, ['smokeText']),
+        fallback: _asBool(_pick(room, ['smoke'])) ? 'Smoke/Gas' : 'Clear',
+      ),
+      ahtOk: _asBool(_pick(room, ['ahtOk']), fallback: true),
+      ens160Ok: _asBool(_pick(room, ['ens160Ok']), fallback: true),
+    );
   }
 
   SensorData _parseLiveSensorDevice(Map<String, dynamic> raw) {
@@ -769,7 +1073,10 @@ class FirebaseRealtimeService {
     CancelToken? cancelToken,
   }) async {
     if (usesLocalPiApi) {
-      final response = await _dio.get('/api/settings', cancelToken: cancelToken);
+      final response = await _dio.get(
+        '/api/settings',
+        cancelToken: cancelToken,
+      );
       return HomeSettings(_asMap(_asMap(response.data)['settings']));
     }
 
@@ -798,7 +1105,10 @@ class FirebaseRealtimeService {
     CancelToken? cancelToken,
   }) async {
     if (usesLocalPiApi) {
-      final response = await _dio.get('/api/schedules', cancelToken: cancelToken);
+      final response = await _dio.get(
+        '/api/schedules',
+        cancelToken: cancelToken,
+      );
       return _asList(
         _asMap(response.data)['schedules'],
       ).map(_parseSchedule).toList();
@@ -1025,7 +1335,7 @@ class FirebaseRealtimeService {
         'user_id': userId,
         'token': token,
         'platform': platform,
-        'installation_id': ?installationId,
+        if (installationId != null) ...{'installation_id': installationId},
       },
     );
   }
@@ -1209,6 +1519,15 @@ class FirebaseRealtimeService {
 
       throw Exception('Backend API command failed.');
     }
+  }
+
+  Future<DeviceCommandResult> _sendCloudDeviceCommand(
+    String deviceId,
+    String action, {
+    required String homeId,
+    bool emergency = false,
+  }) async {
+    throw UnsupportedError('Cloud command queue is not enabled.');
   }
 
   Stream<DeviceCommandState> watchLatestCommandStatus(String deviceId) {

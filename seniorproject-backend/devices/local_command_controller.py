@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from tuya_connector import TUYA_LOGGER, TuyaOpenAPI
 
 from local_state_store import home_ref
@@ -14,6 +15,9 @@ from local_state_store import home_ref
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
+load_dotenv()
 
 from home_assistant_controller import (  # noqa: E402
     HomeAssistantError,
@@ -24,8 +28,8 @@ from timestamp_utils import TIMEZONE, ms_to_iso, now_ms  # noqa: E402
 
 
 HOME_ID = os.environ.get("HOME_ID", "home_001")
-TUYA_ACCESS_ID = os.environ.get("TUYA_ACCESS_ID", "wsxgdxhatq8h7jmnr97n")
-TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "49a3750db4434937a1f725c8b1e28e82")
+TUYA_ACCESS_ID = os.environ.get("TUYA_ACCESS_ID", "")
+TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "")
 TUYA_API_ENDPOINT = os.environ.get("TUYA_API_ENDPOINT", "https://openapi.tuyaeu.com")
 TUYA_VERIFY_ATTEMPTS = int(os.environ.get("TUYA_VERIFY_ATTEMPTS", "7"))
 LOCAL_COMMAND_VERIFY_DELAY_SECONDS = float(os.environ.get("LOCAL_COMMAND_VERIFY_DELAY_SECONDS", "1.5"))
@@ -34,13 +38,13 @@ LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS = float(os.environ.get("LOCAL_HA_STATE_SYNC
 TUYA_DEVICES = {
     "breaker_01": {
         "name": "Switch Breaker",
-        "tuya_device_id": os.environ.get("TUYA_BREAKER_01_DEVICE_ID", "bfdd92cd1b6554f95c0h2a"),
+        "tuya_device_id": os.environ.get("TUYA_BREAKER_01_DEVICE_ID", ""),
         "command_code": "switch",
         "fallback_codes": ["switch_1"],
     },
     "breaker_02": {
         "name": "AC Breaker",
-        "tuya_device_id": os.environ.get("TUYA_BREAKER_02_DEVICE_ID", "bf97ff360135427784mm8v"),
+        "tuya_device_id": os.environ.get("TUYA_BREAKER_02_DEVICE_ID", ""),
         "command_code": "switch",
         "fallback_codes": ["switch_1"],
     },

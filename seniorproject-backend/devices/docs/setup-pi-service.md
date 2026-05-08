@@ -3,8 +3,11 @@
 Final data flow:
 
 ```text
-ESP32 sensors -> HTTP POST -> Raspberry Pi Flask server -> Firebase Realtime Database
-Flutter/Pi dashboard -> Cloud Run API server -> Firebase Realtime Database
+ESP32 sensors -> HTTP POST -> Raspberry Pi Flask server -> local SQLite
+Tuya breakers -> Raspberry Pi poller -> local SQLite
+Matter switches -> Home Assistant -> Raspberry Pi server -> local SQLite
+Flutter/Pi dashboard -> Raspberry Pi local API for live data/control
+Raspberry Pi -> AWS DynamoDB for hourly/daily summaries only
 ```
 
 The Raspberry Pi preserves the original Firebase layout used by the app:
@@ -36,8 +39,9 @@ smart-energy-hub.service
 venv/
 ```
 
-`tuya_breakers_to_firebase.py` is optional and remains disabled in `main.py`
-until continuous Tuya metering/history polling is confirmed necessary.
+`tuya_breakers_to_firebase.py` is now the local Tuya breaker telemetry poller
+when `FIREBASE_ENABLED=false`. `aws_summary_sync.py` is optional and only runs
+when `ENABLE_AWS_SUMMARY_SYNC=true`.
 
 ## Install Python Dependencies
 
@@ -57,12 +61,100 @@ Create a local environment file on the Raspberry Pi:
 ```bash
 cat >/home/ali/smart-energy-hub/.env <<'EOF'
 ESP32_DEVICE_KEY=replace-with-a-long-random-device-key
+HOME_ID=home_001
+FIREBASE_ENABLED=false
+ENABLE_AWS_SUMMARY_SYNC=true
+ENABLE_AWS_REMOTE_COMMANDS=true
+ENABLE_AWS_IOT_LIVE=true
+AWS_REGION=eu-west-1
+AWS_DYNAMODB_SUMMARIES_TABLE=SmartEnergySummaries
+AWS_IOT_ENDPOINT=your-iot-endpoint-ats.iot.eu-west-1.amazonaws.com
+AWS_IOT_CERT_PATH=/home/ali/smart-energy-hub/certs/device.pem.crt
+AWS_IOT_KEY_PATH=/home/ali/smart-energy-hub/certs/private.pem.key
+AWS_IOT_CA_PATH=/home/ali/smart-energy-hub/certs/AmazonRootCA1.pem
 EOF
 chmod 600 /home/ali/smart-energy-hub/.env
 ```
 
 Use that same value in `ESP32_DEVICE_KEY` inside `ESP32_code.c`, then flash the
 ESP32.
+
+## Configure AWS Summary Uploads
+
+The Pi uploader uses normal AWS SDK credentials. Configure the restricted
+`smart-energy-pi-uploader` access key on the Raspberry Pi:
+
+```bash
+./venv/bin/pip install -r requirements-ai.txt
+aws configure --profile smart-energy-pi-uploader
+```
+
+Then add this to `/home/ali/smart-energy-hub/.env`:
+
+```bash
+AWS_PROFILE=smart-energy-pi-uploader
+ENABLE_AWS_SUMMARY_SYNC=true
+ENABLE_AWS_REMOTE_COMMANDS=true
+AWS_REGION=eu-west-1
+AWS_DYNAMODB_SUMMARIES_TABLE=SmartEnergySummaries
+```
+
+The uploader writes only compact items like:
+
+```text
+PK = HOME#home_001
+SK = SUMMARY#HOURLY#2026-05-08T14
+SK = SUMMARY#DAILY#2026-05-08
+```
+
+It does not upload raw sensor readings, raw breaker polls, or live device
+states.
+
+## Configure AWS Remote Commands
+
+When `ENABLE_AWS_REMOTE_COMMANDS=true`, the Pi polls DynamoDB for remote command
+requests written by the cloud API:
+
+```text
+PK = HOME#home_001
+SK = COMMAND#REMOTE#...
+```
+
+The Pi executes pending commands locally through Tuya Cloud or Home Assistant,
+then writes the command result back to the same DynamoDB item. This lets the
+mobile app request control from outside the home without exposing the Pi to the
+public internet.
+
+## Configure AWS IoT Core Live Data
+
+When `ENABLE_AWS_IOT_LIVE=true`, the Pi publishes compact live state to AWS IoT
+Core MQTT:
+
+```text
+homes/home_001/live/state
+```
+
+This is for live dashboard data outside the home network. It publishes only the
+latest compact state every few seconds, not raw history.
+
+Required `.env` values:
+
+```bash
+ENABLE_AWS_IOT_LIVE=true
+AWS_IOT_ENDPOINT=your-iot-endpoint-ats.iot.eu-west-1.amazonaws.com
+AWS_IOT_CLIENT_ID=smart-energy-pi-home_001
+AWS_IOT_LIVE_TOPIC=homes/home_001/live/state
+AWS_IOT_LIVE_INTERVAL_SECONDS=3
+AWS_IOT_CERT_PATH=/home/ali/smart-energy-hub/certs/device.pem.crt
+AWS_IOT_KEY_PATH=/home/ali/smart-energy-hub/certs/private.pem.key
+AWS_IOT_CA_PATH=/home/ali/smart-energy-hub/certs/AmazonRootCA1.pem
+```
+
+The Pi certificate policy needs permission to connect and publish to:
+
+```text
+homes/home_001/live/state
+```
 
 ## Install Or Update The systemd Service
 

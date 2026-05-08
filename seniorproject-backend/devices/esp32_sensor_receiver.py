@@ -7,10 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import firebase_admin
+from dotenv import load_dotenv
 from firebase_admin import credentials, db
 from flask import Flask, jsonify, request
 from local_state_store import add_history, home_ref as local_home_ref
 
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
+load_dotenv()
 
 SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
 DATABASE_URL = os.environ.get(

@@ -10,3 +10,4 @@ google-genai>=1.0.0
 python-dotenv
 requests
 qrcode[pil]
+boto3

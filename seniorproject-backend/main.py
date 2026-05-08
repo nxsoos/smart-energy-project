@@ -10,12 +10,16 @@ from typing import Any
 import firebase_admin
 import joblib
 import pandas as pd
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from firebase_admin import db
 
 from timestamp_utils import TIMEZONE, BAHRAIN_TZ, ms_to_iso, now_ms
 
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
+load_dotenv()
 
 SERVICE_NAME = "smart-energy-ai"
 DEFAULT_HOME_ID = os.environ.get("DEFAULT_HOME_ID", "home_001")

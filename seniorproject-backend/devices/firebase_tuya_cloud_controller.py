@@ -1,10 +1,12 @@
 import time
 import traceback
 import sys
+import os
 from pathlib import Path
 from typing import Dict, Any
 
 import firebase_admin
+from dotenv import load_dotenv
 from firebase_admin import credentials, db
 
 from tuya_connector import TuyaOpenAPI, TUYA_LOGGER
@@ -12,6 +14,9 @@ from tuya_connector import TuyaOpenAPI, TUYA_LOGGER
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
+load_dotenv()
 
 from timestamp_utils import TIMEZONE, ms_to_iso, now_ms
 from home_assistant_controller import (
@@ -29,14 +34,14 @@ from home_assistant_controller import (
 # Firebase settings
 # ============================================================
 
-SERVICE_ACCOUNT_PATH = "serviceAccountKey.json"
+SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
 
-DATABASE_URL = (
-    "https://seniorproject-energy-default-rtdb.asia-southeast1."
-    "firebasedatabase.app"
+DATABASE_URL = os.environ.get(
+    "FIREBASE_DATABASE_URL",
+    "https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app",
 )
 
-HOME_ID = "home_001"
+HOME_ID = os.environ.get("HOME_ID", "home_001")
 POLL_INTERVAL_SECONDS = 0.2
 COMMAND_MAX_AGE_MS = 2 * 60 * 1000
 HA_STATE_SYNC_INTERVAL_SECONDS = 30
@@ -47,11 +52,11 @@ HA_STATE_SYNC_INTERVAL_SECONDS = 30
 # ============================================================
 
 # From Tuya IoT Platform project overview:
-TUYA_ACCESS_ID = "wsxgdxhatq8h7jmnr97n"
-TUYA_ACCESS_SECRET = "49a3750db4434937a1f725c8b1e28e82"
+TUYA_ACCESS_ID = os.environ.get("TUYA_ACCESS_ID", "")
+TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "")
 
 # Your Tuya project says Central Europe.
-TUYA_API_ENDPOINT = "https://openapi.tuyaeu.com"
+TUYA_API_ENDPOINT = os.environ.get("TUYA_API_ENDPOINT", "https://openapi.tuyaeu.com")
 
 
 # ============================================================
@@ -61,7 +66,7 @@ TUYA_API_ENDPOINT = "https://openapi.tuyaeu.com"
 DEVICES = {
     "breaker_01": {
         "name": "Switch Breaker",
-        "tuya_device_id": "bfdd92cd1b6554f95c0h2a",
+        "tuya_device_id": os.environ.get("TUYA_BREAKER_01_DEVICE_ID", ""),
         # Common Tuya switch command codes: "switch", "switch_1"
         # We will try command_code first, then fallback_codes.
         "command_code": "switch",
@@ -69,7 +74,7 @@ DEVICES = {
     },
     "breaker_02": {
         "name": "AC Breaker",
-        "tuya_device_id": "bf97ff360135427784mm8v",
+        "tuya_device_id": os.environ.get("TUYA_BREAKER_02_DEVICE_ID", ""),
         "command_code": "switch",
         "fallback_codes": ["switch_1"],
     },

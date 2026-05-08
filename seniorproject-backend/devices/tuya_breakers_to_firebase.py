@@ -5,11 +5,15 @@ import logging
 import sys
 from pathlib import Path
 import requests
+from dotenv import load_dotenv
 from tuya_connector import TuyaOpenAPI, TUYA_LOGGER
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
+load_dotenv()
 
 from timestamp_utils import TIMEZONE, ms_to_iso, now_ms
 from local_state_store import add_history, home_ref as local_home_ref
@@ -22,15 +26,18 @@ from local_state_store import add_history, home_ref as local_home_ref
 # =========================================================
 # TUYA CONFIG
 # =========================================================
-ACCESS_ID = "wsxgdxhatq8h7jmnr97n"
-ACCESS_KEY = "49a3750db4434937a1f725c8b1e28e82"
-API_ENDPOINT = "https://openapi.tuyaeu.com"   # Central Europe
+ACCESS_ID = os.environ.get("TUYA_ACCESS_ID", "")
+ACCESS_KEY = os.environ.get("TUYA_ACCESS_SECRET", "")
+API_ENDPOINT = os.environ.get("TUYA_API_ENDPOINT", "https://openapi.tuyaeu.com")   # Central Europe
 
 # =========================================================
 # FIREBASE CONFIG
 # =========================================================
-FIREBASE_DB_URL = "https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app"
-HOME_ID = "home_001"
+FIREBASE_DB_URL = os.environ.get(
+    "FIREBASE_DATABASE_URL",
+    "https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app",
+)
+HOME_ID = os.environ.get("HOME_ID", "home_001")
 POLL_INTERVAL_SECONDS = 5
 OFFLINE_AFTER_FAILURES = 2
 FIREBASE_ENABLED = os.environ.get("FIREBASE_ENABLED", "false").strip().lower() in {
@@ -53,12 +60,12 @@ BREAKERS = [
     {
         "firebase_key": "breaker_01",
         "name": "Switch Breaker",
-        "device_id": "bfdd92cd1b6554f95c0h2a"
+        "device_id": os.environ.get("TUYA_BREAKER_01_DEVICE_ID", "")
     },
     {
         "firebase_key": "breaker_02",
         "name": "AC Breaker",
-        "device_id": "bf97ff360135427784mm8v"
+        "device_id": os.environ.get("TUYA_BREAKER_02_DEVICE_ID", "")
     }
 ]
 

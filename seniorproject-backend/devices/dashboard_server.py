@@ -3,15 +3,20 @@ import time
 import base64
 import io
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import firebase_admin
 import requests
+from dotenv import load_dotenv
 from firebase_admin import credentials, db
 from flask import Flask, jsonify, render_template, request
 from local_command_controller import execute_local_command, sync_home_assistant_device_states
 from local_state_store import home_ref as local_home_ref, home_snapshot
 
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
+load_dotenv()
 
 SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
 DATABASE_URL = os.environ.get(

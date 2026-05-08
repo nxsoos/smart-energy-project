@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -23,10 +22,10 @@ Future<void> main() async {
 }
 
 Future<void> _registerPushNotifications() async {
-  await _registerPushNotificationsForUser(FirebaseAuth.instance.currentUser);
+  await _registerPushNotificationsForUser(AuthService().currentUser);
 }
 
-Future<void> _registerPushNotificationsForUser(User? user) async {
+Future<void> _registerPushNotificationsForUser(AppUser? user) async {
   final messaging = FirebaseMessaging.instance;
   await messaging.requestPermission(alert: true, badge: true, sound: true);
   final token = await messaging.getToken();
@@ -112,7 +111,7 @@ class AuthGate extends StatefulWidget {
 class _AuthGateState extends State<AuthGate> {
   final Set<String> _registeredPushUsers = <String>{};
 
-  void _registerPushForSignedInUser(User user) {
+  void _registerPushForSignedInUser(AppUser user) {
     if (_registeredPushUsers.contains(user.uid)) {
       return;
     }
@@ -128,7 +127,7 @@ class _AuthGateState extends State<AuthGate> {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
+    return StreamBuilder<AppUser?>(
       stream: AuthService().authStateChanges,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {

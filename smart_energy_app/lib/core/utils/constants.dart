@@ -75,7 +75,20 @@ class NetworkConfig {
       AppConfig.firebaseRealtimeDatabaseUrl;
   static const String firebaseHomeId = AppConfig.firebaseHomeId;
   static const String backendApiUrl = AppConfig.backendApiUrl;
+  static const String cloudApiUrl = AppConfig.cloudApiUrl;
   static const bool useLocalPiApi = AppConfig.useLocalPiApi;
+  static const String awsRegion = AppConfig.awsRegion;
+  static const String cognitoUserPoolId = AppConfig.cognitoUserPoolId;
+  static const String cognitoAppClientId = AppConfig.cognitoAppClientId;
+  static const String cognitoIdentityPoolId = AppConfig.cognitoIdentityPoolId;
+  static const String awsIotEndpoint = AppConfig.awsIotEndpoint;
+  static const String awsIotPolicyName = AppConfig.awsIotPolicyName;
+  static const String awsIotLiveTopic = AppConfig.awsIotLiveTopic;
+  static const String cognitoAdminGroup = AppConfig.cognitoAdminGroup;
+  static const String cognitoMemberGroup = AppConfig.cognitoMemberGroup;
+  static const bool remoteLiveOnly = AppConfig.remoteLiveOnly;
+  static const int piApiTimeoutSeconds = AppConfig.piApiTimeoutSeconds;
+  static bool get useAwsIotLive => AppConfig.useAwsIotLive;
 
   static String get apiBaseUrl => backendApiUrl;
   static String get mqttBrokerUrl => defaultRaspberryPiIP;

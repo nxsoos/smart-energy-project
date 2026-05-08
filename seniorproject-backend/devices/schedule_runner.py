@@ -1,9 +1,14 @@
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
+load_dotenv()
 
 HOME_ID = os.environ.get("HOME_ID", "home_001")
 KAHRABAIQ_API_URL = os.environ.get(

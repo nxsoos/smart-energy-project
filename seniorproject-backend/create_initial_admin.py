@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 from typing import Any
 
 import firebase_admin
@@ -24,6 +25,7 @@ ROLE_PERMISSIONS = {
 
 
 def initialize_firebase() -> None:
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
     load_dotenv()
     if firebase_admin._apps:
         return

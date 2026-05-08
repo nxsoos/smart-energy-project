@@ -20,6 +20,7 @@ serviceAccountKey.json
 **/serviceAccountKey.json
 *firebase-adminsdk*.json
 **/*firebase-adminsdk*.json
+keys.txt
 *.pem
 *.key
 *.sqlite3
