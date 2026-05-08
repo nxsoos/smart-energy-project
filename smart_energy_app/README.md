@@ -1,39 +1,25 @@
 # KahrabaIQ App
 
-Flutter client for the KahrabaIQ product. It reads dashboard, sensor, device,
-alert, and AI insight data from Firebase Realtime Database and calls the Cloud
-Run AI backend for chatbot responses.
+Flutter client for the KahrabaIQ product. It reads dashboard, sensor, device, alert, and AI insight data from the AWS backend and calls the KahrabaIQ API for chatbot responses.
 
 ## Project Layout
 
 ```text
 lib/
-  config/      Runtime URLs and home ids
-  models/      Data models parsed from Firebase/backend responses
-  screens/     Main dashboard and AI screens
-  services/    Firebase Realtime Database access
-  utils/       Shared constants and helpers
-  widgets/     Reusable UI widgets
-```
-
-## Configuration
-
-Edit backend and Firebase values in:
-
-```text
-lib/config/app_config.dart
+  core/        Runtime configuration and shared utilities
+  features/    Main app features and screens
+  shared/      Shared models and KahrabaIQ API services
 ```
 
 ## Run
 
-```powershell
+```bash
 flutter pub get
-flutter emulators --launch Pixel_10_Pro
-flutter run -d emulator-5554
+flutter run
 ```
 
 ## Test
 
-```powershell
+```bash
 flutter test
 ```

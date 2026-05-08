@@ -14,10 +14,12 @@ fi
 
 python3 -m venv "$REPO_DIR/.venv"
 "$REPO_DIR/.venv/bin/pip" install --upgrade pip
-"$REPO_DIR/.venv/bin/pip" install flask python-dotenv requests boto3
+"$REPO_DIR/.venv/bin/pip" install flask python-dotenv requests boto3 tuya-connector
 
 sudo install -m 0644 "$REPO_DIR/pi/systemd/"*.service "$SERVICE_DIR/"
 sudo systemctl daemon-reload
 
 printf 'Installed KahrabaIQ Pi services. Enable after configuring /etc/kahrabaiq/pi.env:\n'
-printf '  sudo systemctl enable --now kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-kiosk-browser\n'
+printf '  sudo systemctl enable --now kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-kiosk-browser\n'
+printf 'For Home Assistant and Matter containers, install Docker and run:\n'
+printf '  KAHRABAIQ_REPO_DIR=%s %s/pi/scripts/setup-home-stack.sh\n' "$REPO_DIR" "$REPO_DIR"

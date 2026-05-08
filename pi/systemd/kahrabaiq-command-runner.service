@@ -1,0 +1,16 @@
+[Unit]
+Description=KahrabaIQ local command runner for Tuya and Home Assistant Matter devices
+After=network-online.target kahrabaiq-home-stack.service
+Wants=network-online.target kahrabaiq-home-stack.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kahrabaiq/pi/agent
+EnvironmentFile=/etc/kahrabaiq/pi.env
+ExecStart=/opt/kahrabaiq/.venv/bin/python /opt/kahrabaiq/pi/agent/aws_remote_command_runner.py
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target

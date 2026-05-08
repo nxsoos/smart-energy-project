@@ -1,23 +1,15 @@
 # KahrabaIQ
 
-Monorepo for the KahrabaIQ product: Flutter mobile app, cloud backend, AI service, Firebase functions, and Raspberry Pi edge dashboard/services.
+Monorepo for the KahrabaIQ product: Flutter mobile app, AWS cloud backend, AI service, Raspberry Pi edge runtime, and ESP32 firmware.
 
 ## Repository Layout
 
 ```text
 smart-energy-project/
   smart_energy_app/              Flutter mobile app
-    lib/
-      core/                      Shared UI, config, utilities
-      features/                  Feature-first screens and flows
-      shared/                    Shared models and API services
-
-  seniorproject-backend/         Python backend workspace
-    api_server.py                Cloud API for app, homes, users, pairing, devices
-    main.py                      AI service entry point
-    docs/                        Deployment and AI documentation
-    devices/                     Raspberry Pi dashboard, services, firmware, local docs
-    functions/                   Firebase Cloud Functions project
+  seniorproject-backend/         Python AWS backend and AI service
+  pi/                            Raspberry Pi runtime, systemd units, and docs
+  esp32/                         ESP32 firmware and docs
 ```
 
 ## Flutter App
@@ -28,12 +20,6 @@ flutter pub get
 flutter run
 ```
 
-Runtime config lives in:
-
-```text
-smart_energy_app/lib/core/config/app_config.dart
-```
-
 ## Cloud API
 
 ```bash
@@ -42,63 +28,27 @@ pip install -r requirements.txt
 uvicorn api_server:app --reload
 ```
 
-Required environment values depend on the feature being used:
+Key environment values:
 
 ```text
-FIREBASE_DATABASE_URL
-PLATFORM_ADMIN_EMAILS
-AI_SERVICE_URL
-INTERNAL_SERVICE_TOKEN
-PI_DASHBOARD_TOKEN
+STORAGE_BACKEND=aws
+AWS_DYNAMODB_APP_TABLE=KahrabaIQApp
+AWS_DYNAMODB_SUMMARIES_TABLE=SmartEnergySummaries
+PLATFORM_ADMIN_EMAILS=admin@example.com
+AI_SERVICE_URL=https://YOUR_AI_SERVICE_URL
+INTERNAL_SERVICE_TOKEN=change_me
+KIOSK_SESSION_SECRET=change_me_to_a_long_random_secret
 ```
 
-Deployment docs:
+## Raspberry Pi Runtime
+
+The Pi opens the deployed AWS-hosted kiosk dashboard in Chromium. The local agent keeps `PI_DEVICE_TOKEN` out of the browser and issues short-lived kiosk sessions.
 
 ```text
-seniorproject-backend/docs/deployment/
-```
-
-## AI Service
-
-```bash
-cd seniorproject-backend
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
-
-Set secrets and API keys through environment variables or your cloud secret manager. Do not commit keys.
-
-## Raspberry Pi Dashboard
-
-Pi dashboard files live in:
-
-```text
-seniorproject-backend/devices/
-  dashboard_server.py
-  static/
-  templates/
-  docs/
-```
-
-Local kiosk URL:
-
-```text
-http://localhost:5001
-```
-
-Pi docs:
-
-```text
-seniorproject-backend/devices/docs/
-```
-
-## Firebase Functions
-
-```bash
-cd seniorproject-backend/functions
-npm install
-npm run build
-npm run serve
+pi/agent/
+pi/scripts/
+pi/systemd/
+pi/docs/
 ```
 
 ## Verification
@@ -120,5 +70,5 @@ python3 -m py_compile api_server.py main.py devices/dashboard_server.py
 
 ## Security Notes
 
-- Do not commit Firebase service account keys, local `.env` files, API keys, generated datasets, or trained model artifacts unless explicitly intended.
+- Do not commit local `.env` files, API keys, Pi device tokens, kiosk secrets, generated datasets, or trained model artifacts unless explicitly intended.
 - `.agents/` and local agent lock files are development tooling and are ignored.

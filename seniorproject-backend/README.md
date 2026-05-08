@@ -1,6 +1,6 @@
 # KahrabaIQ Backend Workspace
 
-Python workspace for the cloud API, AI service, Firebase deployment files, and Raspberry Pi edge code.
+Python workspace for the AWS cloud API and AI service.
 
 ## Layout
 
@@ -8,12 +8,12 @@ Python workspace for the cloud API, AI service, Firebase deployment files, and R
 seniorproject-backend/
   api_server.py                 Cloud API for Flutter and Pi sync
   main.py                       AI service entry point
+  aws_cloud_store.py            DynamoDB path-store helpers
   home_assistant_controller.py  Shared Home Assistant integration
   occupancy_utils.py            Occupancy calculations
   timestamp_utils.py            Time helpers
-  devices/                      Raspberry Pi dashboard/services/firmware
+  devices/                      Legacy Pi dashboard reference code
   docs/                         Deployment and AI reports
-  functions/                    Firebase Cloud Functions
 ```
 
 ## Cloud API Local Run
@@ -30,14 +30,6 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-## Docs
-
-```text
-docs/deployment/
-docs/ai/
-devices/docs/
-```
-
 ## Secrets
 
-Do not commit Firebase service account keys, API keys, `.env` files, Pi device tokens, or kiosk passwords. Use environment variables or a secret manager.
+Do not commit API keys, `.env` files, Pi device tokens, kiosk secrets, or passwords. Use environment variables or a secret manager.
