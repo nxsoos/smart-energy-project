@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:amazon_cognito_identity_dart_2/cognito.dart';
 import 'package:dio/dio.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 
 import '../services/auth_service.dart';
 import '../utils/constants.dart';
 
-enum _AuthMode { login, signup, forgotPassword }
+enum _AuthMode { login, signup, confirmSignup, forgotPassword, confirmReset }
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -20,6 +20,8 @@ class _AuthScreenState extends State<AuthScreen> {
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _codeController = TextEditingController();
+  final _newPasswordController = TextEditingController();
   _AuthMode _mode = _AuthMode.login;
   bool _isBusy = false;
   String? _message;
@@ -29,6 +31,8 @@ class _AuthScreenState extends State<AuthScreen> {
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _codeController.dispose();
+    _newPasswordController.dispose();
     super.dispose();
   }
 
@@ -47,17 +51,87 @@ class _AuthScreenState extends State<AuthScreen> {
           password: _passwordController.text,
         );
       } else if (_mode == _AuthMode.signup) {
-        await _authService.signUp(
+        final result = await _authService.signUp(
           name: _nameController.text,
           email: _emailController.text,
           password: _passwordController.text,
         );
+        if (!result.userConfirmed) {
+          setState(() {
+            _mode = _AuthMode.confirmSignup;
+            _message = 'Enter the verification code sent to your email.';
+          });
+          return;
+        }
+        await _authService.signIn(
+          email: _emailController.text,
+          password: _passwordController.text,
+        );
+      } else if (_mode == _AuthMode.confirmSignup) {
+        await _authService.confirmSignUp(
+          email: _emailController.text,
+          code: _codeController.text,
+        );
+        await _authService.signIn(
+          email: _emailController.text,
+          password: _passwordController.text,
+        );
       } else {
-        await _authService.sendPasswordReset(_emailController.text);
+        if (_mode == _AuthMode.forgotPassword) {
+          await _authService.sendPasswordReset(_emailController.text);
+          setState(() {
+            _mode = _AuthMode.confirmReset;
+            _message = 'Enter the reset code sent to your email.';
+          });
+        } else {
+          await _authService.confirmPasswordReset(
+            email: _emailController.text,
+            code: _codeController.text,
+            newPassword: _newPasswordController.text,
+          );
+          setState(() {
+            _mode = _AuthMode.login;
+            _message = 'Password updated. Log in with your new password.';
+          });
+        }
+      }
+    } catch (error) {
+      if (error is CognitoUserConfirmationNecessaryException) {
         setState(() {
-          _message = 'Password reset email sent.';
+          _mode = _AuthMode.confirmSignup;
+          _message = 'Enter the verification code sent to your email.';
+        });
+        return;
+      }
+      setState(() {
+        _message = _friendlyAuthError(error);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isBusy = false;
         });
       }
+    }
+  }
+
+  Future<void> _resendVerificationCode() async {
+    final email = _emailController.text.trim();
+    if (!email.contains('@') || _isBusy) {
+      setState(() {
+        _message = 'Enter a valid email first.';
+      });
+      return;
+    }
+    setState(() {
+      _isBusy = true;
+      _message = null;
+    });
+    try {
+      await _authService.resendSignUpCode(email);
+      setState(() {
+        _message = 'Verification code sent again. Check inbox and spam.';
+      });
     } catch (error) {
       setState(() {
         _message = _friendlyAuthError(error);
@@ -72,22 +146,23 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   String _friendlyAuthError(Object error) {
-    if (error is FirebaseAuthException) {
+    if (error is CognitoClientException) {
       switch (error.code) {
-        case 'invalid-credential':
-        case 'wrong-password':
-        case 'user-not-found':
+        case 'NotAuthorizedException':
+        case 'UserNotFoundException':
           return 'Email or password is incorrect.';
-        case 'email-already-in-use':
+        case 'UsernameExistsException':
           return 'An account already exists for this email. Try logging in.';
-        case 'weak-password':
+        case 'InvalidPasswordException':
           return 'Choose a stronger password.';
-        case 'operation-not-allowed':
-          return 'Email/password sign-in is not enabled in Firebase Authentication.';
-        case 'network-request-failed':
+        case 'CodeMismatchException':
+          return 'The verification code is incorrect.';
+        case 'ExpiredCodeException':
+          return 'The verification code expired. Request a new one.';
+        case 'NetworkError':
           return 'Network error. Check the internet connection and try again.';
       }
-      return error.message ?? 'Firebase authentication failed: ${error.code}.';
+      return error.message ?? 'AWS Cognito authentication failed: ${error.code}.';
     }
 
     if (error is DioException) {
@@ -101,7 +176,8 @@ class _AuthScreenState extends State<AuthScreen> {
     final text = error.toString();
     if (text.contains('invalid-credential') ||
         text.contains('wrong-password') ||
-        text.contains('user-not-found')) {
+        text.contains('user-not-found') ||
+        text.contains('NotAuthorizedException')) {
       return 'Email or password is incorrect.';
     }
     if (text.contains('email-already-in-use')) {
@@ -126,16 +202,26 @@ class _AuthScreenState extends State<AuthScreen> {
   @override
   Widget build(BuildContext context) {
     final isSignup = _mode == _AuthMode.signup;
+    final isConfirmSignup = _mode == _AuthMode.confirmSignup;
     final isForgotPassword = _mode == _AuthMode.forgotPassword;
+    final isConfirmReset = _mode == _AuthMode.confirmReset;
     final title = isSignup
         ? 'Create account'
+        : isConfirmSignup
+            ? 'Verify email'
         : isForgotPassword
             ? 'Reset password'
+            : isConfirmReset
+                ? 'Confirm reset'
             : 'Welcome back';
     final actionLabel = isSignup
         ? 'Sign Up'
+        : isConfirmSignup
+            ? 'Verify Email'
         : isForgotPassword
             ? 'Send Reset Email'
+            : isConfirmReset
+                ? 'Update Password'
             : 'Log In';
 
     return Scaffold(
@@ -199,7 +285,34 @@ class _AuthScreenState extends State<AuthScreen> {
                             return null;
                           },
                         ),
-                        if (!isForgotPassword) ...[
+                        if (isConfirmSignup || isConfirmReset) ...[
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            controller: _codeController,
+                            keyboardType: TextInputType.number,
+                            textInputAction: isConfirmReset
+                                ? TextInputAction.next
+                                : TextInputAction.done,
+                            decoration: const InputDecoration(
+                              labelText: 'Verification code',
+                              prefixIcon: Icon(Icons.verified_outlined),
+                            ),
+                            validator: (value) {
+                              if ((value ?? '').trim().isEmpty) {
+                                return 'Code is required.';
+                              }
+                              return null;
+                            },
+                            onFieldSubmitted: (_) {
+                              if (!isConfirmReset) {
+                                _submit();
+                              }
+                            },
+                          ),
+                        ],
+                        if (!isForgotPassword &&
+                            !isConfirmSignup &&
+                            !isConfirmReset) ...[
                           const SizedBox(height: 12),
                           TextFormField(
                             controller: _passwordController,
@@ -208,6 +321,25 @@ class _AuthScreenState extends State<AuthScreen> {
                             decoration: const InputDecoration(
                               labelText: 'Password',
                               prefixIcon: Icon(Icons.lock_outline),
+                            ),
+                            validator: (value) {
+                              if ((value ?? '').length < 6) {
+                                return 'Password must be at least 6 characters.';
+                              }
+                              return null;
+                            },
+                            onFieldSubmitted: (_) => _submit(),
+                          ),
+                        ],
+                        if (isConfirmReset) ...[
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            controller: _newPasswordController,
+                            obscureText: true,
+                            textInputAction: TextInputAction.done,
+                            decoration: const InputDecoration(
+                              labelText: 'New password',
+                              prefixIcon: Icon(Icons.lock_reset),
                             ),
                             validator: (value) {
                               if ((value ?? '').length < 6) {
@@ -249,25 +381,37 @@ class _AuthScreenState extends State<AuthScreen> {
                               : () {
                                   setState(() {
                                     _message = null;
-                                    _mode = isSignup ? _AuthMode.login : _AuthMode.signup;
+                                    _mode = isSignup || isConfirmSignup
+                                        ? _AuthMode.login
+                                        : _AuthMode.signup;
                                   });
                                 },
-                          child: Text(isSignup
+                          child: Text(isSignup || isConfirmSignup
                               ? 'Already have an account? Log in'
                               : 'Create a new account'),
                         ),
+                        if (isConfirmSignup)
+                          TextButton(
+                            onPressed:
+                                _isBusy ? null : _resendVerificationCode,
+                            child: const Text('Resend verification code'),
+                          ),
                         TextButton(
                           onPressed: _isBusy
                               ? null
                               : () {
                                   setState(() {
                                     _message = null;
-                                    _mode = isForgotPassword
+                                    _mode = isForgotPassword || isConfirmReset
                                         ? _AuthMode.login
                                         : _AuthMode.forgotPassword;
                                   });
                                 },
-                          child: Text(isForgotPassword ? 'Back to login' : 'Forgot password?'),
+                          child: Text(
+                            isForgotPassword || isConfirmReset
+                                ? 'Back to login'
+                                : 'Forgot password?',
+                          ),
                         ),
                       ],
                     ),

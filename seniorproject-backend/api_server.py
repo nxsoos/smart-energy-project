@@ -31,6 +31,12 @@ from home_assistant_controller import (
     get_entity_state,
     is_home_assistant_configured,
 )
+from aws_cloud_store import (
+    create_remote_command,
+    create_iot_websocket_config,
+    find_remote_command,
+    query_recent_remote_commands,
+)
 
 
 load_dotenv()
@@ -309,6 +315,16 @@ class DeviceCommandRequest(BaseModel):
     source: str | None = None
     emergency: bool = False
     alert_id: str | None = None
+
+
+class CloudRemoteCommandRequest(BaseModel):
+    device_id: str
+    command: str = Field(..., description="turn_on or turn_off")
+    requested_by: str = "flutter_app"
+    source: str = "cloud_remote_api"
+    emergency: bool = False
+    alert_id: str | None = None
+    reason: str | None = None
 
 
 class DeviceCommandResponse(BaseModel):
@@ -2146,6 +2162,83 @@ def health() -> dict[str, Any]:
         "timestamp_ms": timestamp_ms,
         "timestamp_iso": iso_from_ms(timestamp_ms),
         "timezone": TIMEZONE,
+    }
+
+
+@app.post("/api/home/{home_id}/cloud/commands", dependencies=[Depends(require_home_permission("can_control_devices"))])
+def create_cloud_remote_command(home_id: str, request: CloudRemoteCommandRequest) -> dict[str, Any]:
+    command = request.command.strip().lower()
+    device_id = request.device_id.strip()
+    if command not in VALID_COMMANDS:
+        raise HTTPException(status_code=400, detail="Command must be turn_on or turn_off.")
+    if device_id not in CONTROLLABLE_DEVICES:
+        raise HTTPException(status_code=400, detail="Unsupported device_id.")
+
+    try:
+        command_record = create_remote_command(
+            home_id,
+            device_id,
+            command,
+            requested_by=request.requested_by,
+            source=request.source,
+            emergency=request.emergency,
+            alert_id=request.alert_id,
+            reason=request.reason,
+        )
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"AWS command queue write failed: {error}") from error
+
+    return {
+        "success": True,
+        "status": "pending",
+        "message": "Command queued for the Raspberry Pi.",
+        "command_id": command_record["command_id"],
+        "device_id": device_id,
+        "command": command,
+        "target_state": command_record["target_state"],
+        "command_record": command_record,
+    }
+
+
+@app.get("/api/home/{home_id}/cloud/commands", dependencies=[Depends(require_home_permission("can_view"))])
+def get_cloud_remote_commands(home_id: str, limit: int = Query(25, ge=1, le=100)) -> dict[str, Any]:
+    try:
+        commands = query_recent_remote_commands(home_id, limit)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"AWS command read failed: {error}") from error
+    return {
+        "success": True,
+        "home_id": home_id,
+        "count": len(commands),
+        "commands": commands,
+    }
+
+
+@app.get("/api/home/{home_id}/cloud/commands/{command_id}", dependencies=[Depends(require_home_permission("can_view"))])
+def get_cloud_remote_command(home_id: str, command_id: str) -> dict[str, Any]:
+    try:
+        command = find_remote_command(home_id, command_id)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"AWS command read failed: {error}") from error
+    if not command:
+        raise HTTPException(status_code=404, detail="Command not found.")
+    return {
+        "success": True,
+        "home_id": home_id,
+        "command": command,
+    }
+
+
+@app.get("/api/home/{home_id}/iot/live-config", dependencies=[Depends(require_home_permission("can_view"))])
+def get_iot_live_config(home_id: str) -> dict[str, Any]:
+    try:
+        config = create_iot_websocket_config(home_id)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"AWS IoT live config failed: {error}") from error
+    return {
+        "success": True,
+        "home_id": home_id,
+        "config": config,
     }
 
 

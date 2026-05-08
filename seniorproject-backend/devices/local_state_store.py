@@ -36,6 +36,22 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS summaries (
+            summary_id TEXT PRIMARY KEY,
+            home_id TEXT NOT NULL,
+            period TEXT NOT NULL,
+            start_at_ms INTEGER NOT NULL,
+            end_at_ms INTEGER NOT NULL,
+            value TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            synced_at_ms INTEGER,
+            sync_error TEXT
+        )
+        """
+    )
     return conn
 
 
@@ -173,6 +189,138 @@ def latest_history(category: str) -> dict[str, Any]:
             (category,),
         ).fetchone()
     return _decode(row[0]) if row else {}
+
+
+def history_between(category: str, start_at_ms: int, end_at_ms: int) -> list[dict[str, Any]]:
+    with _LOCK, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT value FROM history
+            WHERE category = ?
+              AND created_at_ms >= ?
+              AND created_at_ms < ?
+            ORDER BY created_at_ms ASC
+            """,
+            (category, int(start_at_ms), int(end_at_ms)),
+        ).fetchall()
+    return [value for row in rows if isinstance((value := _decode(row[0])), dict)]
+
+
+def upsert_summary(
+    summary_id: str,
+    home_id: str,
+    period: str,
+    start_at_ms: int,
+    end_at_ms: int,
+    value: dict[str, Any],
+) -> None:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True, default=str)
+    now = _now_ms()
+    with _LOCK, _connect() as conn:
+        existing = conn.execute(
+            "SELECT value, synced_at_ms FROM summaries WHERE summary_id = ?",
+            (summary_id,),
+        ).fetchone()
+        synced_at_ms = existing[1] if existing and existing[0] == encoded else None
+        created_at_ms = now
+        if existing:
+            created = conn.execute(
+                "SELECT created_at_ms FROM summaries WHERE summary_id = ?",
+                (summary_id,),
+            ).fetchone()
+            created_at_ms = int(created[0]) if created else now
+        conn.execute(
+            """
+            REPLACE INTO summaries(
+                summary_id, home_id, period, start_at_ms, end_at_ms, value,
+                created_at_ms, updated_at_ms, synced_at_ms, sync_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                summary_id,
+                home_id,
+                period,
+                int(start_at_ms),
+                int(end_at_ms),
+                encoded,
+                created_at_ms,
+                now,
+                synced_at_ms,
+                None if synced_at_ms else "",
+            ),
+        )
+
+
+def pending_summaries(limit: int = 25) -> list[dict[str, Any]]:
+    with _LOCK, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT summary_id, home_id, period, start_at_ms, end_at_ms, value,
+                   created_at_ms, updated_at_ms
+            FROM summaries
+            WHERE synced_at_ms IS NULL
+            ORDER BY start_at_ms ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    summaries = []
+    for row in rows:
+        value = _decode(row[5])
+        if not isinstance(value, dict):
+            continue
+        summaries.append(
+            {
+                "summary_id": row[0],
+                "home_id": row[1],
+                "period": row[2],
+                "start_at_ms": row[3],
+                "end_at_ms": row[4],
+                "value": value,
+                "created_at_ms": row[6],
+                "updated_at_ms": row[7],
+            }
+        )
+    return summaries
+
+
+def summaries_between(period: str, start_at_ms: int, end_at_ms: int) -> list[dict[str, Any]]:
+    with _LOCK, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT value FROM summaries
+            WHERE period = ?
+              AND start_at_ms >= ?
+              AND end_at_ms <= ?
+            ORDER BY start_at_ms ASC
+            """,
+            (period, int(start_at_ms), int(end_at_ms)),
+        ).fetchall()
+    return [value for row in rows if isinstance((value := _decode(row[0])), dict)]
+
+
+def mark_summary_synced(summary_id: str) -> None:
+    with _LOCK, _connect() as conn:
+        conn.execute(
+            """
+            UPDATE summaries
+            SET synced_at_ms = ?, sync_error = NULL
+            WHERE summary_id = ?
+            """,
+            (_now_ms(), summary_id),
+        )
+
+
+def mark_summary_sync_failed(summary_id: str, error: Any) -> None:
+    with _LOCK, _connect() as conn:
+        conn.execute(
+            """
+            UPDATE summaries
+            SET sync_error = ?
+            WHERE summary_id = ?
+            """,
+            (str(error)[:1000], summary_id),
+        )
 
 
 class LocalReference:

@@ -32,6 +32,30 @@ if os.environ.get("ENABLE_CLOUD_SCHEDULE_RUNNER", "false").strip().lower() in {
 }:
     SCRIPTS.append("schedule_runner.py")
 
+if os.environ.get("ENABLE_AWS_SUMMARY_SYNC", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    SCRIPTS.append("aws_summary_sync.py")
+
+if os.environ.get("ENABLE_AWS_REMOTE_COMMANDS", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    SCRIPTS.append("aws_remote_command_runner.py")
+
+if os.environ.get("ENABLE_AWS_IOT_LIVE", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    SCRIPTS.append("aws_iot_live_publisher.py")
+
 
 running_processes: dict[str, subprocess.Popen] = {}
 shutting_down = False

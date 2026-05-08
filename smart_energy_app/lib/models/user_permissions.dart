@@ -49,6 +49,18 @@ class UserPermissions {
     canAcknowledgeAlerts: true,
   );
 
+  static const member = UserPermissions(
+    role: 'member',
+    canView: true,
+    canControlDevices: true,
+    canChangeSettings: false,
+    canManageUsers: false,
+    canManageSchedules: false,
+    canChangeControlMode: false,
+    canUseAiChat: true,
+    canAcknowledgeAlerts: true,
+  );
+
   factory UserPermissions.fromHomeMap(Map<String, dynamic> data) {
     final role = (data['role'] ?? 'viewer').toString().toLowerCase();
     return UserPermissions(

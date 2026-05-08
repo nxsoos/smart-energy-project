@@ -100,6 +100,8 @@ class _HomeScreenState extends State<HomeScreen> {
   double _currentTariff = ElectricityPricing.costPerKWh;
   bool _isLoading = false;
   String? _loadError;
+  String? _liveSensorError;
+  String _liveSensorStatus = 'Not connected';
   CancelToken? _activeRequestToken;
   UserPermissions _permissions = UserPermissions.viewer;
 
@@ -126,12 +128,18 @@ class _HomeScreenState extends State<HomeScreen> {
     (home) => home.id == _selectedHomeId,
     orElse: () => _homeChoices.last,
   );
-  String get _dataSourceLabel =>
-      _isDemoHome
+  String get _dataSourceLabel => _isDemoHome
       ? 'Demo scenario data'
+      : _remoteLiveOnly
+      ? 'AWS IoT live sensor data'
       : _usesLocalPiApi
       ? 'Local Pi API data'
       : 'Live backend data';
+
+  bool get _canUseRemoteLiveSensors =>
+      !_isDemoHome && _remoteLiveOnly;
+  bool get _remoteLiveOnly =>
+      !_isDemoHome && NetworkConfig.remoteLiveOnly && NetworkConfig.useAwsIotLive;
 
   @override
   void initState() {
@@ -151,7 +159,7 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      if (widget.enableRealtimeSync && !_isDemoHome) {
+      if (widget.enableRealtimeSync && !_isDemoHome && !_remoteLiveOnly) {
         _refreshData(
           showErrorSnackBar: false,
           updateLoading: false,
@@ -160,7 +168,9 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
     if (widget.enableRealtimeSync) {
-      _refreshData(showErrorSnackBar: false);
+      if (!_remoteLiveOnly) {
+        _refreshData(showErrorSnackBar: false);
+      }
       _startLiveSensorListener();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) {
@@ -189,7 +199,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startLiveSensorListener() {
     _liveSensorSubscription?.cancel();
-    if (_isDemoHome || !widget.enableRealtimeSync || _usesLocalPiApi) {
+    final canUseAwsIotLive = _remoteLiveOnly;
+    if (canUseAwsIotLive) {
+      setState(() {
+        _liveSensorStatus = 'Connecting to AWS IoT live topic...';
+        _liveSensorError = null;
+      });
+    }
+    if (_isDemoHome ||
+        !widget.enableRealtimeSync ||
+        (_usesLocalPiApi && !canUseAwsIotLive)) {
       return;
     }
 
@@ -205,14 +224,22 @@ class _HomeScreenState extends State<HomeScreen> {
               _updateSmokeClearTimer(sensorData);
               _sensorData = sensorData;
               _hasLiveData = true;
+              _liveSensorError = null;
+              _liveSensorStatus = 'Receiving AWS IoT live messages';
             });
             _showEmergencyPopupIfNeeded();
           },
-          onError: (_) {
+          onError: (error) {
             if (!mounted) {
               return;
             }
-            setState(() {});
+            setState(() {
+              _liveSensorError = error.toString().replaceFirst(
+                'Exception: ',
+                '',
+              );
+              _liveSensorStatus = 'AWS IoT live connection has no data';
+            });
           },
         );
   }
@@ -637,6 +664,16 @@ class _HomeScreenState extends State<HomeScreen> {
     bool updateLoading = true,
     bool cancelActiveRequest = true,
   }) async {
+    if (_remoteLiveOnly) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _loadError = null;
+        });
+      }
+      return;
+    }
+
     if (_activeRequestToken != null) {
       if (!cancelActiveRequest) {
         return;
@@ -737,8 +774,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _loadError = _friendlyLoadError(error);
-        _hasLiveData = false;
-        _devices = const [];
+        if (!_canUseRemoteLiveSensors) {
+          _hasLiveData = false;
+          _devices = const [];
+        }
       });
 
       if (showErrorSnackBar) {
@@ -811,9 +850,9 @@ class _HomeScreenState extends State<HomeScreen> {
       final statusCode = error.response?.statusCode;
       final detail = error.response?.data?.toString();
       if (statusCode != null) {
-        return 'Cloud Run API error $statusCode. ${detail ?? 'Pull to retry.'}';
+        return 'Pi API error $statusCode. ${detail ?? 'Pull to retry.'}';
       }
-      return 'Cloud Run API connection failed: ${error.message ?? error.type.name}.';
+      return 'Pi API connection failed: ${error.message ?? error.type.name}.';
     }
 
     final message = error.toString().replaceFirst('Exception: ', '');
@@ -821,7 +860,7 @@ class _HomeScreenState extends State<HomeScreen> {
       return message;
     }
 
-    return 'Could not load dashboard data. Check the Cloud Run API connection and pull to retry.';
+    return 'Could not load dashboard data. Check the Pi API connection and pull to retry.';
   }
 
   void _selectHome(String homeId) {
@@ -851,6 +890,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _commandStatusSubscriptions.clear();
       _deviceSubscriptions.clear();
       _loadError = null;
+      _liveSensorError = null;
+      _liveSensorStatus = 'Not connected';
       _hasLiveData = false;
       _devices = const [];
     });
@@ -869,6 +910,8 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _selectedScenarioId = scenarioId;
       _loadError = null;
+      _liveSensorError = null;
+      _liveSensorStatus = 'Not connected';
       _pendingDeviceCommands.clear();
       _deviceCommandErrors.clear();
       _hasLiveData = false;
@@ -1706,6 +1749,59 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 12),
               ],
 
+              if (_liveSensorError != null) ...[
+                Card(
+                  color: Colors.red.shade50,
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.sensors_off_outlined,
+                          color: AppColors.energyDanger,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'AWS IoT live connection failed: $_liveSensorError',
+                            style: const TextStyle(color: Colors.black87),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+
+              if (_remoteLiveOnly) ...[
+                Card(
+                  color: _hasLiveData ? Colors.green.shade50 : Colors.blue.shade50,
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _hasLiveData
+                              ? Icons.sensors_outlined
+                              : Icons.sync_outlined,
+                          color:
+                              _hasLiveData ? AppColors.primary : Colors.blue,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _liveSensorStatus,
+                            style: const TextStyle(color: Colors.black87),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+
               _buildHomeSelectorCard(),
               const SizedBox(height: 16),
 
@@ -2263,30 +2359,36 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildNoLiveDataCard() {
+    final title = _remoteLiveOnly
+        ? 'Waiting for AWS IoT live data'
+        : 'Waiting for live sensor data';
+    final message = _remoteLiveOnly
+        ? 'The Pi API is unreachable from this network, and no AWS IoT sensor message has arrived yet. Check the IoT policy, Cognito role, and Pi publisher.'
+        : 'No local demo values are being shown. Pull to retry or check the live data connection.';
     return Card(
       color: Colors.orange.shade50,
-      child: const Padding(
-        padding: EdgeInsets.all(14),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.cloud_off_outlined, color: Colors.orange),
-            SizedBox(width: 10),
+            const Icon(Icons.cloud_off_outlined, color: Colors.orange),
+            const SizedBox(width: 10),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Waiting for live Firebase data',
-                    style: TextStyle(
+                    title,
+                    style: const TextStyle(
                       fontWeight: FontWeight.w800,
                       color: AppColors.textPrimary,
                     ),
                   ),
-                  SizedBox(height: 4),
+                  const SizedBox(height: 4),
                   Text(
-                    'No local demo values are being shown. Pull to retry or check the Firebase connection.',
-                    style: TextStyle(color: AppColors.textSecondary),
+                    message,
+                    style: const TextStyle(color: AppColors.textSecondary),
                   ),
                 ],
               ),
