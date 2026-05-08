@@ -96,6 +96,7 @@ class _AuthScreenState extends State<AuthScreen> {
         }
       }
     } catch (error) {
+      debugPrint('Auth error: $error');
       if (error is CognitoUserConfirmationNecessaryException) {
         setState(() {
           _mode = _AuthMode.confirmSignup;
@@ -186,7 +187,7 @@ class _AuthScreenState extends State<AuthScreen> {
     if (text.contains('weak-password')) {
       return 'Choose a stronger password.';
     }
-    return 'Authentication failed. Please check your details and try again.';
+    return 'Authentication failed: $text';
   }
 
   String? _extractDetail(dynamic data) {

@@ -127,7 +127,7 @@ class AuthService {
   }
 
   Future<void> signIn({required String email, required String password}) async {
-    final normalizedEmail = email.trim();
+    final normalizedEmail = email.trim().toLowerCase();
     final user = CognitoUser(normalizedEmail, _pool);
     final authDetails = AuthenticationDetails(
       username: normalizedEmail,
@@ -151,11 +151,12 @@ class AuthService {
     required String password,
     String homeId = NetworkConfig.firebaseHomeId,
   }) async {
+    final normalizedEmail = email.trim().toLowerCase();
     final result = await _pool.signUp(
-      email.trim(),
+      normalizedEmail,
       password,
       userAttributes: [
-        AttributeArg(name: 'email', value: email.trim()),
+        AttributeArg(name: 'email', value: normalizedEmail),
         if (name.trim().isNotEmpty)
           AttributeArg(name: 'name', value: name.trim()),
       ],
@@ -167,17 +168,17 @@ class AuthService {
     required String email,
     required String code,
   }) async {
-    final user = CognitoUser(email.trim(), _pool);
+    final user = CognitoUser(email.trim().toLowerCase(), _pool);
     await user.confirmRegistration(code.trim());
   }
 
   Future<void> resendSignUpCode(String email) async {
-    final user = CognitoUser(email.trim(), _pool);
+    final user = CognitoUser(email.trim().toLowerCase(), _pool);
     await user.resendConfirmationCode();
   }
 
   Future<void> sendPasswordReset(String email) async {
-    final user = CognitoUser(email.trim(), _pool);
+    final user = CognitoUser(email.trim().toLowerCase(), _pool);
     await user.forgotPassword();
   }
 
@@ -186,7 +187,7 @@ class AuthService {
     required String code,
     required String newPassword,
   }) async {
-    final user = CognitoUser(email.trim(), _pool);
+    final user = CognitoUser(email.trim().toLowerCase(), _pool);
     await user.confirmPassword(code.trim(), newPassword);
   }
 
