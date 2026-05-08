@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
-import '../utils/constants.dart';
+import '../theme/app_text_styles.dart';
+import '../theme/color_tokens.dart';
 
-/// Premium dashboard metric panel.
+/// Gradient metric card for compact energy KPIs.
 class MetricCard extends StatelessWidget {
   const MetricCard({
     super.key,
@@ -11,7 +12,8 @@ class MetricCard extends StatelessWidget {
     required this.unit,
     required this.icon,
     required this.color,
-    this.backgroundColor,
+    this.trendLabel,
+    this.isTrendPositive = true,
   });
 
   final String title;
@@ -19,114 +21,72 @@ class MetricCard extends StatelessWidget {
   final String unit;
   final IconData icon;
   final Color color;
-  final Color? backgroundColor;
+  final String? trendLabel;
+  final bool isTrendPositive;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final isDark = theme.brightness == Brightness.dark;
-    final textSecondary = isDark
-        ? AppColors.textSecondary
-        : const Color(0xFF65766D);
+    final trendColor = isTrendPositive
+        ? ColorTokens.success
+        : ColorTokens.danger;
     return Container(
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: backgroundColor ?? scheme.surface,
-        borderRadius: BorderRadius.circular(UIConstants.cardBorderRadius),
-        border: Border.all(color: color.withValues(alpha: 0.30)),
-        boxShadow: [
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [ColorTokens.surface, ColorTokens.surfaceElevated],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+        boxShadow: const [
           BoxShadow(
-            color: color.withValues(alpha: 0.10),
-            blurRadius: 24,
-            offset: const Offset(0, 12),
+            color: ColorTokens.shadow,
+            blurRadius: 12,
+            offset: Offset(0, 4),
           ),
         ],
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(UIConstants.cardBorderRadius),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              height: 3,
-              decoration: BoxDecoration(
-                color: color,
-                boxShadow: [
-                  BoxShadow(
-                    color: color.withValues(alpha: 0.55),
-                    blurRadius: 18,
-                  ),
-                ],
-              ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 28),
+          const SizedBox(height: 16),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(value, style: AppTextStyles.mono.copyWith(fontSize: 24)),
+                const SizedBox(width: 4),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 3),
+                  child: Text(unit, style: AppTextStyles.caption),
+                ),
+              ],
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 15, 16, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: color.withValues(alpha: 0.14),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(icon, color: color, size: 20),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          title.toUpperCase(),
-                          style: TextStyle(
-                            fontSize: 11,
-                            letterSpacing: 0.9,
-                            color: textSecondary,
-                            fontWeight: FontWeight.w800,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.centerLeft,
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          value,
-                          style: TextStyle(
-                            fontSize: 31,
-                            fontWeight: FontWeight.w900,
-                            color: color,
-                            height: 0.95,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 2),
-                          child: Text(
-                            unit,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: textSecondary,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+          ),
+          const SizedBox(height: 6),
+          Text(title, style: AppTextStyles.caption, maxLines: 1),
+          if (trendLabel != null) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Icon(
+                  isTrendPositive ? Icons.arrow_upward : Icons.arrow_downward,
+                  color: trendColor,
+                  size: 14,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  trendLabel!,
+                  style: AppTextStyles.caption.copyWith(color: trendColor),
+                ),
+              ],
             ),
           ],
-        ),
+        ],
       ),
     );
   }

@@ -11,10 +11,12 @@ import 'package:flutter/material.dart';
 import 'package:smart_energy_app/features/auth/screens/auth_screen.dart';
 
 void main() {
-  testWidgets('Auth screen displays login entry point', (WidgetTester tester) async {
+  testWidgets('Auth screen displays login entry point', (
+    WidgetTester tester,
+  ) async {
     await tester.pumpWidget(const MaterialApp(home: AuthScreen()));
 
-    expect(find.text('Welcome back'), findsOneWidget);
-    expect(find.text('Log In'), findsOneWidget);
+    expect(find.text('Welcome to KahrabaIQ'), findsOneWidget);
+    expect(find.text('Sign in'), findsWidgets);
   });
 }

@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
+import '../../../core/theme/app_text_styles.dart';
+import '../../../core/theme/color_tokens.dart';
+import '../../../core/widgets/app_state_widgets.dart';
 import '../../../shared/models/sensor_data.dart';
-import '../../../core/utils/constants.dart';
+import '../widgets/safety_status_bar.dart';
+import '../widgets/sensor_card.dart';
+import '../widgets/sensor_event_tile.dart';
 
+/// Live sensor cockpit screen.
 class SensorsStatusScreen extends StatelessWidget {
   const SensorsStatusScreen({
     super.key,
@@ -14,189 +19,161 @@ class SensorsStatusScreen extends StatelessWidget {
   final SensorData sensorData;
   final bool isDemoMode;
 
-  static const int _sensorFeedStaleThresholdMs = 2 * 60 * 1000;
+  @override
+  Widget build(BuildContext context) {
+    final sensors = _sensors();
+    return Scaffold(
+      body: SafeArea(
+        child: sensors.isEmpty
+            ? const AppEmptyState(
+                icon: Icons.sensors_off,
+                title: 'No sensor data',
+                message:
+                    'Sensor readings will appear once the Pi receives ESP32 telemetry.',
+              )
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+                children: [
+                  _Header(isDemoMode: isDemoMode),
+                  const SizedBox(height: 18),
+                  SafetyStatusBar(isSafe: _isSafe),
+                  const SizedBox(height: 18),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: sensors.length,
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 2,
+                          mainAxisSpacing: 12,
+                          crossAxisSpacing: 12,
+                          childAspectRatio: 0.9,
+                        ),
+                    itemBuilder: (context, index) => sensors[index],
+                  ),
+                  const SizedBox(height: 24),
+                  Text('Recent Events', style: AppTextStyles.h3),
+                  const SizedBox(height: 14),
+                  SensorEventTile(
+                    title: 'Temperature and humidity heartbeat received',
+                    time: 'now',
+                    isHealthy: sensorData.ahtOk,
+                  ),
+                  SensorEventTile(
+                    title:
+                        'Smoke sensor reports ${sensorData.smokeStatus.toLowerCase()}',
+                    time: '1m',
+                    isHealthy: !sensorData.smokeStatus.toLowerCase().contains(
+                      'alert',
+                    ),
+                  ),
+                  SensorEventTile(
+                    title: sensorData.isOccupied
+                        ? 'Motion detected in living room'
+                        : 'No motion detected',
+                    time: '3m',
+                    isHealthy: true,
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  bool get _isSafe => !sensorData.smokeStatus.toLowerCase().contains('alert');
+
+  List<SensorCard> _sensors() => [
+    SensorCard(
+      icon: Icons.thermostat,
+      label: 'Temperature',
+      value: sensorData.temperature.toStringAsFixed(1),
+      unit: '°C',
+      isHealthy: sensorData.ahtOk,
+      points: const [20, 21, 22, 23, 23.4],
+    ),
+    SensorCard(
+      icon: Icons.water_drop_outlined,
+      label: 'Humidity',
+      value: sensorData.humidity.toStringAsFixed(0),
+      unit: '%',
+      isHealthy: sensorData.ahtOk,
+      points: const [44, 45, 46, 46, 45],
+    ),
+    SensorCard(
+      icon: Icons.motion_photos_on,
+      label: 'Motion',
+      value: sensorData.isOccupied ? 'Yes' : 'No',
+      unit: '',
+      isHealthy: true,
+      points: const [0, 1, 1, 0, 1],
+    ),
+    SensorCard(
+      icon: Icons.local_fire_department,
+      label: 'Smoke',
+      value: sensorData.smokeRaw.toString(),
+      unit: 'raw',
+      isHealthy: _isSafe,
+      points: const [100, 110, 105, 120, 118],
+    ),
+    SensorCard(
+      icon: Icons.bolt,
+      label: 'Current',
+      value: sensorData.soundRaw.toString(),
+      unit: 'raw',
+      isHealthy: true,
+      points: const [18, 22, 19, 28, 24],
+    ),
+  ];
+}
+
+class _Header extends StatefulWidget {
+  const _Header({required this.isDemoMode});
+
+  final bool isDemoMode;
+
+  @override
+  State<_Header> createState() => _HeaderState();
+}
+
+class _HeaderState extends State<_Header> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final feedAge = DateTime.now().difference(sensorData.timestamp);
-    final isFeedFresh =
-        isDemoMode || feedAge.inMilliseconds <= _sensorFeedStaleThresholdMs;
-    final isAhtWorking = isFeedFresh && sensorData.ahtOk;
-    final isEns160Working = isFeedFresh && sensorData.ens160Ok;
-    final isSmokeWorking = isFeedFresh && _isSmokeSensorWorking(sensorData);
-    final isLightWorking = isFeedFresh && _isLightSensorWorking(sensorData);
-    final isNoiseWorking = isFeedFresh && _isNoiseSensorWorking(sensorData);
-    final isPirWorking = isFeedFresh;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'Sensors Status',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+    return Row(
+      children: [
+        Expanded(child: Text('Sensor Status', style: AppTextStyles.h1)),
+        AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) => Container(
+            width: 12,
+            height: 12,
+            decoration: BoxDecoration(
+              color: ColorTokens.success.withValues(
+                alpha: 0.4 + _controller.value * 0.6,
+              ),
+              shape: BoxShape.circle,
+            ),
+          ),
         ),
-        backgroundColor: AppColors.primary,
-        iconTheme: const IconThemeData(color: Colors.white),
-      ),
-      backgroundColor: AppColors.background,
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildStatusCard(
-              title: 'Sensor Feed',
-              subtitle: isDemoMode
-                  ? 'Demo scenario uses a simulated sensor record.'
-                  : isFeedFresh
-                  ? 'Live updates are recent.'
-                  : 'No recent sensor update detected.',
-              trailingText: isFeedFresh ? 'Working' : 'Not working',
-              isHealthy: isFeedFresh,
-            ),
-            const SizedBox(height: 12),
-            _buildStatusCard(
-              title: 'AHT20 (Temperature / Humidity)',
-              subtitle: _sensorSubtitle(isAhtWorking, isFeedFresh),
-              trailingText: isAhtWorking ? 'Working' : 'Not working',
-              isHealthy: isAhtWorking,
-            ),
-            const SizedBox(height: 12),
-            _buildStatusCard(
-              title: 'ENS160 (Air Quality)',
-              subtitle: _sensorSubtitle(isEns160Working, isFeedFresh),
-              trailingText: isEns160Working ? 'Working' : 'Not working',
-              isHealthy: isEns160Working,
-            ),
-            const SizedBox(height: 12),
-            _buildStatusCard(
-              title: 'Smoke Sensor',
-              subtitle: isSmokeWorking
-                  ? 'MQ2 raw: ${sensorData.smokeRaw} (${sensorData.smokeStatus}).'
-                  : _sensorSubtitle(isSmokeWorking, isFeedFresh),
-              trailingText: isSmokeWorking ? 'Working' : 'Not working',
-              isHealthy: isSmokeWorking,
-            ),
-            const SizedBox(height: 12),
-            _buildStatusCard(
-              title: 'Light Sensor',
-              subtitle: _sensorSubtitle(isLightWorking, isFeedFresh),
-              trailingText: isLightWorking ? 'Working' : 'Not working',
-              isHealthy: isLightWorking,
-            ),
-            const SizedBox(height: 12),
-            _buildStatusCard(
-              title: 'Noise Sensor',
-              subtitle: isNoiseWorking
-                  ? 'Sound level: ${sensorData.soundRaw} raw units (${_noiseLabel(sensorData)}).'
-                  : _sensorSubtitle(isNoiseWorking, isFeedFresh),
-              trailingText: isNoiseWorking ? 'Working' : 'Not working',
-              isHealthy: isNoiseWorking,
-            ),
-            const SizedBox(height: 12),
-            _buildStatusCard(
-              title: 'PIR Motion Sensor',
-              subtitle: isPirWorking
-                  ? 'Motion state: ${sensorData.isOccupied ? 'motion detected' : 'no motion'}.'
-                  : _sensorSubtitle(isPirWorking, isFeedFresh),
-              trailingText: isPirWorking ? 'Working' : 'Not working',
-              isHealthy: isPirWorking,
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'Last sensor timestamp: ${DateFormat('MMM d, HH:mm:ss').format(sensorData.timestamp)}',
-              style: TextStyle(color: Colors.grey[700], fontSize: 13),
-            ),
-          ],
-        ),
-      ),
+        const SizedBox(width: 8),
+        Text(widget.isDemoMode ? 'Demo' : 'Live', style: AppTextStyles.caption),
+      ],
     );
-  }
-
-  Widget _buildStatusCard({
-    required String title,
-    required String subtitle,
-    required String trailingText,
-    required bool isHealthy,
-  }) {
-    final color = isHealthy ? AppColors.energySafe : AppColors.energyDanger;
-
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.25)),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            isHealthy ? Icons.check_circle_outline : Icons.error_outline,
-            color: color,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  subtitle,
-                  style: TextStyle(fontSize: 12, color: Colors.grey[700]),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          Text(
-            trailingText,
-            style: TextStyle(fontWeight: FontWeight.w700, color: color),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _sensorSubtitle(bool working, bool isFeedFresh) {
-    if (isDemoMode) {
-      return working
-          ? 'Simulated value is present for this demo scenario.'
-          : 'No simulated value is available for this demo scenario.';
-    }
-
-    if (!isFeedFresh) {
-      return 'Sensor feed is offline, so this sensor is not trusted.';
-    }
-
-    return working
-        ? 'Sensor heartbeat and values look valid.'
-        : 'No valid signal detected from this sensor.';
-  }
-
-  bool _isSmokeSensorWorking(SensorData data) {
-    final status = data.smokeStatus.toLowerCase();
-    return status != 'unknown' || data.smokeRaw > 0;
-  }
-
-  bool _isLightSensorWorking(SensorData data) {
-    return data.lightStatus.toLowerCase() != 'unknown';
-  }
-
-  bool _isNoiseSensorWorking(SensorData data) {
-    return data.soundRaw > 0 ||
-        data.noiseStatus.toLowerCase() != 'unknown' ||
-        data.noise == 0 ||
-        data.noise == 1;
-  }
-
-  String _noiseLabel(SensorData data) {
-    final status = data.noiseStatus.trim();
-    if (status.isNotEmpty && status.toLowerCase() != 'unknown') {
-      return status;
-    }
-    return data.noise == 1 ? 'Noise' : 'Quiet';
   }
 }

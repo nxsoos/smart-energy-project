@@ -1,0 +1,80 @@
+import 'package:flutter/material.dart';
+
+import '../../../core/theme/app_text_styles.dart';
+import '../../../core/theme/color_tokens.dart';
+
+/// Dashboard top bar with greeting and notification state.
+class DashboardHeader extends StatelessWidget {
+  const DashboardHeader({
+    super.key,
+    required this.name,
+    required this.alertCount,
+  });
+
+  final String name;
+  final int alertCount;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 48,
+          height: 48,
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(
+              colors: [ColorTokens.primary, ColorTokens.accent],
+            ),
+          ),
+          child: Center(
+            child: Text(
+              name.characters.first.toUpperCase(),
+              style: AppTextStyles.h3,
+            ),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Good morning, $name', style: AppTextStyles.h2),
+              const SizedBox(height: 3),
+              Text(
+                'Your home is running intelligently',
+                style: AppTextStyles.caption,
+              ),
+            ],
+          ),
+        ),
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            IconButton(
+              tooltip: 'Notifications',
+              onPressed: () {},
+              icon: const Icon(
+                Icons.notifications_none,
+                color: ColorTokens.textPrimary,
+              ),
+            ),
+            if (alertCount > 0)
+              Positioned(
+                right: 8,
+                top: 8,
+                child: Container(
+                  width: 10,
+                  height: 10,
+                  decoration: const BoxDecoration(
+                    color: ColorTokens.danger,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
