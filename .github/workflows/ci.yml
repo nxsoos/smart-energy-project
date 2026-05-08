@@ -24,7 +24,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r seniorproject-backend/requirements.txt
-          pip install tuya-connector
+          pip install tuya-connector-python
 
       - name: Compile backend and Pi modules
         run: |
@@ -32,10 +32,6 @@ jobs:
             seniorproject-backend/api_server.py \
             seniorproject-backend/aws_cloud_store.py \
             seniorproject-backend/main.py \
-            seniorproject-backend/devices/dashboard_server.py \
-            seniorproject-backend/devices/esp32_sensor_receiver.py \
-            seniorproject-backend/devices/main.py \
-            seniorproject-backend/devices/schedule_runner.py \
             pi/agent/pi_agent.py \
             pi/agent/local_state_store.py \
             pi/agent/esp32_receiver.py \

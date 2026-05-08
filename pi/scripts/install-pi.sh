@@ -14,7 +14,7 @@ fi
 
 python3 -m venv "$REPO_DIR/.venv"
 "$REPO_DIR/.venv/bin/pip" install --upgrade pip
-"$REPO_DIR/.venv/bin/pip" install flask python-dotenv requests boto3 tuya-connector
+"$REPO_DIR/.venv/bin/pip" install flask python-dotenv requests boto3 tuya-connector-python
 
 sudo install -m 0644 "$REPO_DIR/pi/systemd/"*.service "$SERVICE_DIR/"
 sudo systemctl daemon-reload

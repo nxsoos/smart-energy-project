@@ -12,7 +12,7 @@ seniorproject-backend/
   home_assistant_controller.py  Shared Home Assistant integration
   occupancy_utils.py            Occupancy calculations
   timestamp_utils.py            Time helpers
-  devices/                      Legacy Pi dashboard reference code
+  devices/                      AI model artifacts and validation scripts
   docs/                         Deployment and AI reports
 ```
 
