@@ -105,6 +105,8 @@ class NetworkConfig {
   static const String awsIotEndpoint = AppConfig.awsIotEndpoint;
   static const String awsIotPolicyName = AppConfig.awsIotPolicyName;
   static const String awsIotLiveTopic = AppConfig.awsIotLiveTopic;
+  static const String awsDynamoDbSummariesTable =
+      AppConfig.awsDynamoDbSummariesTable;
   static const String cognitoAdminGroup = AppConfig.cognitoAdminGroup;
   static const String cognitoMemberGroup = AppConfig.cognitoMemberGroup;
   static const bool remoteLiveOnly = AppConfig.remoteLiveOnly;

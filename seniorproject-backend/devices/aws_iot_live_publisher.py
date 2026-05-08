@@ -131,11 +131,20 @@ def build_live_state() -> dict[str, Any]:
         for device_id, device in devices.items()
         if device_id.startswith("breaker_") or device_id.startswith("matter_")
     }
-    total_power = sum(
-        float(device.get("powerW") or 0)
+    total_power = sum(float(device.get("powerW") or 0) for device in live_devices.values())
+    total_energy = sum(float(device.get("energyKwh") or 0) for device in live_devices.values())
+    voltage_values = [
+        float(device.get("voltageV"))
         for device in live_devices.values()
-        if isinstance(device.get("powerW"), (int, float))
-    )
+        if isinstance(device.get("voltageV"), (int, float)) and float(device.get("voltageV")) > 0
+    ]
+    current_values = [
+        float(device.get("currentA"))
+        for device in live_devices.values()
+        if isinstance(device.get("currentA"), (int, float)) and float(device.get("currentA")) > 0
+    ]
+    average_voltage = sum(voltage_values) / len(voltage_values) if voltage_values else 0
+    total_current = sum(current_values)
     alerts = as_dict(as_dict(home.get("alerts")).get("active"))
     return {
         "schema": "smart_energy_live_state_v1",
@@ -148,6 +157,10 @@ def build_live_state() -> dict[str, Any]:
         "devices": live_devices,
         "energy": {
             "currentPowerW": round(total_power, 3),
+            "voltageV": round(average_voltage, 3),
+            "currentA": round(total_current, 3),
+            "energyTodayKwh": round(total_energy, 6),
+            "totalEnergyKwh": round(total_energy, 6),
         },
         "safety": as_dict(home.get("safety")),
         "alerts": [
