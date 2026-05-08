@@ -135,7 +135,7 @@ homes/home_001/live/state
 ```
 
 This is for live dashboard data outside the home network. It publishes only the
-latest compact state every few seconds, not raw history.
+latest compact state every 15 seconds, not raw history.
 
 Required `.env` values:
 
@@ -144,7 +144,7 @@ ENABLE_AWS_IOT_LIVE=true
 AWS_IOT_ENDPOINT=your-iot-endpoint-ats.iot.eu-west-1.amazonaws.com
 AWS_IOT_CLIENT_ID=smart-energy-pi-home_001
 AWS_IOT_LIVE_TOPIC=homes/home_001/live/state
-AWS_IOT_LIVE_INTERVAL_SECONDS=3
+AWS_IOT_LIVE_INTERVAL_SECONDS=15
 AWS_IOT_CERT_PATH=/home/ali/smart-energy-hub/certs/device.pem.crt
 AWS_IOT_KEY_PATH=/home/ali/smart-energy-hub/certs/private.pem.key
 AWS_IOT_CA_PATH=/home/ali/smart-energy-hub/certs/AmazonRootCA1.pem
