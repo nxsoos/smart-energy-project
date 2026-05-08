@@ -790,8 +790,31 @@ class KahrabaIqApiService {
   }
 
   SensorData _parseAwsIotLiveSensor(Map<String, dynamic> room) {
+    final timestampValue = _pick(room, [
+      'timestampMs',
+      'timestamp_ms',
+      'timestampIso',
+      'timestamp_iso',
+      'readable_time',
+      'timestamp',
+      'updatedAt',
+      'updated_at',
+    ]);
+    final sensorOnline = _asBool(
+      _pick(room, [
+        'sensorOnline',
+        'sensor_online',
+        'online',
+        'ahtOk',
+        'aht_ok',
+      ]),
+      fallback: timestampValue != null,
+    );
+
     return SensorData(
-      timestamp: _asDateTime(_pick(room, ['timestampMs', 'timestampIso'])),
+      timestamp: timestampValue == null
+          ? DateTime.fromMillisecondsSinceEpoch(0)
+          : _asDateTime(timestampValue),
       temperature: _asDouble(_pick(room, ['temperature'])),
       humidity: _asDouble(_pick(room, ['humidity'])),
       isOccupied: _asBool(_pick(room, ['motion', 'motionText'])),
@@ -810,6 +833,7 @@ class KahrabaIqApiService {
       ),
       ahtOk: _asBool(_pick(room, ['ahtOk']), fallback: true),
       ens160Ok: _asBool(_pick(room, ['ens160Ok']), fallback: true),
+      online: sensorOnline && !_asBool(_pick(room, ['stale'])),
     );
   }
 
@@ -817,17 +841,19 @@ class KahrabaIqApiService {
     final sensors = _asMap(raw['sensors']);
     final status = _asMap(raw['status']);
     final source = {...sensors, ...status};
+    final timestampValue =
+        _pick(sensors, [
+          'timestamp_ms',
+          'timestamp_iso',
+          'readable_time',
+          'timestamp',
+        ]) ??
+        _pick(status, ['lastSeenMs', 'last_seen_ms', 'readableTime']);
 
     return SensorData(
-      timestamp: _asDateTime(
-        _pick(sensors, [
-              'timestamp_ms',
-              'timestamp_iso',
-              'readable_time',
-              'timestamp',
-            ]) ??
-            _pick(status, ['lastSeenMs', 'last_seen_ms', 'readableTime']),
-      ),
+      timestamp: timestampValue == null
+          ? DateTime.fromMillisecondsSinceEpoch(0)
+          : _asDateTime(timestampValue),
       temperature: _asDouble(
         _pick(source, ['temperature', 'latest_temperature']),
       ),
@@ -856,6 +882,10 @@ class KahrabaIqApiService {
       ahtOk: _asBool(_pick(source, ['aht_ok', 'ahtOk']), fallback: true),
       ens160Ok: _asBool(
         _pick(source, ['ens160_ok', 'ens160Ok']),
+        fallback: true,
+      ),
+      online: _asBool(
+        _pick(source, ['sensor_online', 'sensorOnline', 'online']),
         fallback: true,
       ),
     );
@@ -968,10 +998,15 @@ class KahrabaIqApiService {
         ),
       ),
       sensors: SensorData(
-        timestamp: _asDateTime(
-          _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) ??
-              _pick(data, ['updated_at_ms', 'updated_at_iso']),
-        ),
+        timestamp:
+            (_pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) ??
+                    _pick(data, ['updated_at_ms', 'updated_at_iso'])) ==
+                null
+            ? DateTime.fromMillisecondsSinceEpoch(0)
+            : _asDateTime(
+                _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) ??
+                    _pick(data, ['updated_at_ms', 'updated_at_iso']),
+              ),
         temperature: _asDouble(_pick(room, ['temperature'])),
         humidity: _asDouble(_pick(room, ['humidity'])),
         isOccupied: _asBool(_pick(room, ['motion'])),
@@ -995,6 +1030,11 @@ class KahrabaIqApiService {
         ),
         ahtOk: _asBool(_pick(room, ['aht_ok'])),
         ens160Ok: _asBool(_pick(room, ['ens160_ok'])),
+        online: _asBool(
+          _pick(room, ['sensor_online', 'sensorOnline', 'online']),
+          fallback: _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) !=
+              null,
+        ),
       ),
       devices: parsedDevices,
       alerts: alerts
@@ -2358,19 +2398,20 @@ class KahrabaIqApiService {
       smokeDigital,
       smokeRaw,
     );
+    final timestampValue = _pick(source, [
+      'readable_time',
+      'sensorTimestamp',
+      'timestamp',
+      'timestamp_ms',
+      'updatedAt',
+      'updated_at',
+      'last_processed_at',
+    ]);
 
     return SensorData(
-      timestamp: _asDateTime(
-        _pick(source, [
-          'readable_time',
-          'sensorTimestamp',
-          'timestamp',
-          'timestamp_ms',
-          'updatedAt',
-          'updated_at',
-          'last_processed_at',
-        ]),
-      ),
+      timestamp: timestampValue == null
+          ? DateTime.fromMillisecondsSinceEpoch(0)
+          : _asDateTime(timestampValue),
       temperature: _asDouble(
         _pick(source, [
           'temperature',
@@ -2421,6 +2462,10 @@ class KahrabaIqApiService {
       ens160Ok: _asBool(
         _pick(source, ['ens160_ok', 'ens160Ok']),
         fallback: true,
+      ),
+      online: _asBool(
+        _pick(source, ['sensor_online', 'sensorOnline', 'online']),
+        fallback: timestampValue != null,
       ),
     );
   }

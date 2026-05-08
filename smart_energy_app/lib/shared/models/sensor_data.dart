@@ -16,6 +16,7 @@ class SensorData {
   final String smokeStatus;
   final bool ahtOk;
   final bool ens160Ok;
+  final bool online;
 
   SensorData({
     required this.timestamp,
@@ -34,6 +35,7 @@ class SensorData {
     this.smokeStatus = 'Unknown',
     this.ahtOk = false,
     this.ens160Ok = false,
+    this.online = true,
   });
 
   factory SensorData.fromJson(Map<String, dynamic> json) {
@@ -54,6 +56,7 @@ class SensorData {
       smokeStatus: (json['smokeStatus'] as String?) ?? 'Unknown',
       ahtOk: (json['ahtOk'] as bool?) ?? false,
       ens160Ok: (json['ens160Ok'] as bool?) ?? false,
+      online: (json['online'] as bool?) ?? true,
     );
   }
 
@@ -75,6 +78,7 @@ class SensorData {
       'smokeStatus': smokeStatus,
       'ahtOk': ahtOk,
       'ens160Ok': ens160Ok,
+      'online': online,
     };
   }
 

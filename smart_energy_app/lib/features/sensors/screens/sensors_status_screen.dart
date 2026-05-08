@@ -94,6 +94,9 @@ class SensorsStatusScreen extends StatelessWidget {
   bool get _isSafe => !sensorData.smokeStatus.toLowerCase().contains('alert');
 
   bool get _isOffline {
+    if (!sensorData.online) {
+      return true;
+    }
     if (sensorData.timestamp.year < 2024) {
       return true;
     }

@@ -33,6 +33,7 @@ AWS_IOT_RETAIN_LIVE_STATE = os.environ.get("AWS_IOT_RETAIN_LIVE_STATE", "false")
 }
 AWS_IOT_PUBLISH_LOG_EVERY = max(1, int(os.environ.get("AWS_IOT_PUBLISH_LOG_EVERY", "10")))
 ESP32_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
+SENSOR_STALE_AFTER_SECONDS = float(os.environ.get("SENSOR_STALE_AFTER_SECONDS", "45"))
 
 DEVICE_ORDER = (
     "matter_socket_switch",
@@ -141,8 +142,56 @@ def latest_sensor_payload(home: dict[str, Any]) -> dict[str, Any]:
     esp32 = as_dict(devices.get(ESP32_DEVICE_ID))
     sensors = as_dict(esp32.get("sensors"))
     if sensors:
-        return sensors
-    return latest_history("sensor_logs")
+        return annotate_sensor_freshness(sensors)
+    return annotate_sensor_freshness(latest_history("sensor_logs"))
+
+
+def sensor_timestamp_ms(payload: dict[str, Any]) -> int:
+    value = first_present(
+        payload.get("timestampMs"),
+        payload.get("timestamp_ms"),
+        payload.get("timestamp"),
+        payload.get("readable_time"),
+        payload.get("timestampIso"),
+        payload.get("timestamp_iso"),
+    )
+    if isinstance(value, (int, float)):
+        integer = int(value)
+        return integer if integer > 1000000000000 else integer * 1000
+    if isinstance(value, str):
+        maybe_int = value.strip()
+        if maybe_int.isdigit():
+            integer = int(maybe_int)
+            return integer if integer > 1000000000000 else integer * 1000
+        try:
+            parsed = datetime.fromisoformat(maybe_int.replace("Z", "+00:00"))
+            return int(parsed.timestamp() * 1000)
+        except ValueError:
+            return 0
+    return 0
+
+
+def annotate_sensor_freshness(payload: dict[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {
+            "online": False,
+            "sensorOnline": False,
+            "sensor_online": False,
+            "stale": True,
+            "ahtOk": False,
+            "ens160Ok": False,
+        }
+    timestamp_ms = sensor_timestamp_ms(payload)
+    stale = not timestamp_ms or now_ms() - timestamp_ms > SENSOR_STALE_AFTER_SECONDS * 1000
+    return {
+        **payload,
+        "timestampMs": timestamp_ms or payload.get("timestampMs"),
+        "timestamp_ms": timestamp_ms or payload.get("timestamp_ms"),
+        "online": not stale,
+        "sensorOnline": not stale,
+        "sensor_online": not stale,
+        "stale": stale,
+    }
 
 
 def normalize_device(device_id: str, raw_device: dict[str, Any]) -> dict[str, Any]:
@@ -345,6 +394,13 @@ def create_connection():
     return connection, mqtt
 
 
+def wait_for_publish(result: Any) -> None:
+    # awsiotsdk versions differ: some return a Future, others return (Future, packet_id).
+    future = result[0] if isinstance(result, tuple) else result
+    if hasattr(future, "result"):
+        future.result()
+
+
 def main() -> int:
     validate_config()
     log(
@@ -360,12 +416,14 @@ def main() -> int:
             started = time.time()
             payload = build_live_payload()
             encoded = json.dumps(payload, separators=(",", ":"), default=str)
-            connection.publish(
-                topic=AWS_IOT_LIVE_TOPIC,
-                payload=encoded,
-                qos=mqtt.QoS.AT_LEAST_ONCE,
-                retain=AWS_IOT_RETAIN_LIVE_STATE,
-            ).result()
+            wait_for_publish(
+                connection.publish(
+                    topic=AWS_IOT_LIVE_TOPIC,
+                    payload=encoded,
+                    qos=mqtt.QoS.AT_LEAST_ONCE,
+                    retain=AWS_IOT_RETAIN_LIVE_STATE,
+                )
+            )
             publish_count += 1
             if publish_count == 1 or publish_count % AWS_IOT_PUBLISH_LOG_EVERY == 0:
                 log(

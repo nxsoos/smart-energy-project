@@ -218,6 +218,23 @@ def find_remote_command(home_id: str, command_id: str) -> dict[str, Any]:
     return {}
 
 
+def update_remote_command(home_id: str, command_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    command = find_remote_command(home_id, command_id)
+    if not command:
+        return {}
+    timestamp_ms = now_ms()
+    updated = {
+        **command,
+        **updates,
+        "updatedAtMs": timestamp_ms,
+        "updated_at_ms": timestamp_ms,
+        "updatedAt": ms_to_iso(timestamp_ms),
+        "updated_at_iso": ms_to_iso(timestamp_ms),
+    }
+    _table().put_item(Item=_to_dynamodb(updated))
+    return updated
+
+
 def live_topic(home_id: str) -> str:
     return os.environ.get("AWS_IOT_LIVE_TOPIC", f"homes/{home_id}/live/state")
 

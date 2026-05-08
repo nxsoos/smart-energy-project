@@ -30,6 +30,9 @@ String piId = "";
 String deviceId = DEFAULT_DEVICE_ID;
 String esp32DeviceKey = DEFAULT_DEVICE_KEY;
 bool setupPortalActive = false;
+bool missingConfigLogged = false;
+unsigned long lastWifiReconnectAttempt = 0;
+const unsigned long wifiReconnectInterval = 10000;
 
 // =====================================
 // Pin definitions
@@ -129,6 +132,10 @@ void loadConfig() {
   prefs.end();
 }
 
+bool hasSavedConfig() {
+  return wifiSsid.length() > 0 && piSensorUrl.length() > 0;
+}
+
 void saveConfig(
   const String& ssid,
   const String& password,
@@ -181,7 +188,10 @@ String statusJson() {
 bool connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return true;
   if (wifiSsid.length() == 0) {
-    Serial.println("No saved Wi-Fi config");
+    if (!missingConfigLogged) {
+      Serial.println("No saved Wi-Fi config. Waiting in setup mode.");
+      missingConfigLogged = true;
+    }
     return false;
   }
 
@@ -267,6 +277,8 @@ void startHttpServer() {
 }
 
 void startSetupPortal() {
+  if (setupPortalActive) return;
+
   setupPortalActive = true;
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(SETUP_AP_SSID, SETUP_AP_PASSWORD);
@@ -582,6 +594,10 @@ String buildHistoryJson(
 // Upload data
 // =====================================
 void uploadData() {
+  if (setupPortalActive || !hasSavedConfig()) {
+    return;
+  }
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Wi-Fi disconnected, reconnecting...");
     connectWiFi();
@@ -672,6 +688,7 @@ void uploadData() {
   Serial.println("Sending sensor data to Raspberry Pi hub...");
   if (piSensorUrl.length() == 0) {
     Serial.println("Pi sensor URL is not configured. Start setup mode and provision this ESP32.");
+    startSetupPortal();
     return;
   }
   bool piOk = sendPostRequest(piSensorUrl, liveJson);
@@ -690,11 +707,15 @@ void setup() {
   Serial.println("Starting setup...");
 
   loadConfig();
-  bool wifiConnected = connectWiFi();
-  if (!wifiConnected) {
+  if (!hasSavedConfig()) {
     startSetupPortal();
   } else {
-    startHttpServer();
+    bool wifiConnected = connectWiFi();
+    if (!wifiConnected) {
+      startSetupPortal();
+    } else {
+      startHttpServer();
+    }
   }
   Serial.println("Wi-Fi step done");
 
@@ -714,7 +735,12 @@ void setup() {
 void loop() {
   setupServer.handleClient();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (setupPortalActive) {
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED && millis() - lastWifiReconnectAttempt >= wifiReconnectInterval) {
+    lastWifiReconnectAttempt = millis();
     connectWiFi();
   }
 

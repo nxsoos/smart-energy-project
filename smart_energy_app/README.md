@@ -15,6 +15,7 @@ lib/
 
 ```bash
 flutter pub get
+flutter emulators --launch Pixel_10_Pro
 flutter run
 ```
 

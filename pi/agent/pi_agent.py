@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify
 
 from local_state_store import get_path, home_snapshot, set_path
+try:
+    from aws_iot_live_publisher import build_live_payload
+except Exception:
+    build_live_payload = None
 
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
@@ -136,6 +140,22 @@ def send_heartbeat() -> None:
 
 def build_live_state() -> dict[str, Any]:
     home_id = HOME_ID or str(_agent_state.get("home_id") or "home_001")
+    if build_live_payload is not None:
+        payload = build_live_payload()
+        return {
+            "home_id": home_id,
+            "dashboard": payload.get("dashboard") if isinstance(payload.get("dashboard"), dict) else {},
+            "room": payload.get("room") if isinstance(payload.get("room"), dict) else {},
+            "devices": payload.get("devices") if isinstance(payload.get("devices"), dict) else {},
+            "energy": payload.get("energy") if isinstance(payload.get("energy"), dict) else {},
+            "commands": payload.get("commands") if isinstance(payload.get("commands"), dict) else {},
+            "alerts": list((payload.get("alerts") or {}).get("active", {}).values())
+            if isinstance(payload.get("alerts"), dict)
+            else payload.get("alerts", []),
+            "occupancy": payload.get("occupancy") if isinstance(payload.get("occupancy"), dict) else {},
+            "safety": payload.get("safety") if isinstance(payload.get("safety"), dict) else {},
+            "updated_at_ms": payload.get("timestamp_ms") or payload.get("timestampMs") or now_ms(),
+        }
     home = home_snapshot(home_id)
     devices = home.get("devices") if isinstance(home.get("devices"), dict) else {}
     esp32 = devices.get(ESP32_DEVICE_ID) if isinstance(devices.get(ESP32_DEVICE_ID), dict) else {}

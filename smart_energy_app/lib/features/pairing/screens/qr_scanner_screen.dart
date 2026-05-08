@@ -15,6 +15,7 @@ class QrScannerScreen extends StatefulWidget {
 class _QrScannerScreenState extends State<QrScannerScreen>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
+  final TextEditingController _manualController = TextEditingController();
   bool _handled = false;
 
   @override
@@ -29,6 +30,7 @@ class _QrScannerScreenState extends State<QrScannerScreen>
   @override
   void dispose() {
     _controller.dispose();
+    _manualController.dispose();
     super.dispose();
   }
 
@@ -65,7 +67,7 @@ class _QrScannerScreenState extends State<QrScannerScreen>
                   ),
                   const SizedBox(height: 14),
                   OutlinedButton(
-                    onPressed: () => Navigator.pop(context, 'manual'),
+                    onPressed: _showManualEntry,
                     child: const Text('Enter code manually'),
                   ),
                 ],
@@ -88,6 +90,39 @@ class _QrScannerScreenState extends State<QrScannerScreen>
         Navigator.pop(context, value);
         return;
       }
+    }
+  }
+
+  Future<void> _showManualEntry() async {
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: ColorTokens.surface,
+        title: const Text('Enter pairing code'),
+        content: TextField(
+          controller: _manualController,
+          autofocus: true,
+          minLines: 1,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: 'kahrabaiq://pair?... or pairing token',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _manualController.text),
+            child: const Text('Pair'),
+          ),
+        ],
+      ),
+    );
+    final trimmed = value?.trim();
+    if (trimmed != null && trimmed.isNotEmpty && mounted) {
+      Navigator.pop(context, trimmed);
     }
   }
 }

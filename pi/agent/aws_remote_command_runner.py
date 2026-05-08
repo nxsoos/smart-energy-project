@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import requests
 from local_command_controller import execute_local_command
 
 import sys
@@ -26,6 +27,10 @@ AWS_DYNAMODB_SUMMARIES_TABLE = os.environ.get(
 )
 REMOTE_COMMAND_POLL_SECONDS = float(os.environ.get("REMOTE_COMMAND_POLL_SECONDS", "5"))
 REMOTE_COMMAND_QUERY_LIMIT = int(os.environ.get("REMOTE_COMMAND_QUERY_LIMIT", "25"))
+REMOTE_COMMAND_SOURCE = os.environ.get("REMOTE_COMMAND_SOURCE", "dynamodb").strip().lower()
+KAHRABAIQ_API_URL = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
+PI_ID = os.environ.get("PI_ID", "pi_local_001")
+PI_DEVICE_TOKEN = os.environ.get("PI_DEVICE_TOKEN", "")
 ALLOWED_DEVICES = {"breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"}
 ALLOWED_COMMANDS = {"turn_on", "turn_off"}
 
@@ -38,6 +43,16 @@ def table():
     import boto3
 
     return boto3.resource("dynamodb", region_name=AWS_REGION).Table(AWS_DYNAMODB_SUMMARIES_TABLE)
+
+
+def pi_headers() -> dict[str, str]:
+    return {"X-Pi-Id": PI_ID, "X-Device-Token": PI_DEVICE_TOKEN}
+
+
+def api_request(method: str, path: str, **kwargs: Any) -> requests.Response:
+    if not KAHRABAIQ_API_URL:
+        raise RuntimeError("KAHRABAIQ_API_URL is required when REMOTE_COMMAND_SOURCE=ec2.")
+    return requests.request(method, f"{KAHRABAIQ_API_URL}{path}", timeout=15, **kwargs)
 
 
 def from_dynamodb(value: Any) -> Any:
@@ -67,6 +82,22 @@ def home_pk() -> str:
 
 
 def query_pending_commands() -> list[dict[str, Any]]:
+    if REMOTE_COMMAND_SOURCE == "ec2":
+        response = api_request(
+            "GET",
+            f"/api/pi/{PI_ID}/remote-commands",
+            headers=pi_headers(),
+            params={"limit": REMOTE_COMMAND_QUERY_LIMIT},
+        )
+        data = response.json()
+        if not response.ok or data.get("success") is False:
+            raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+        return [
+            item
+            for item in data.get("commands") or []
+            if isinstance(item, dict) and str(item.get("status")) == "pending"
+        ]
+
     response = table().query(
         KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
         ExpressionAttributeValues={
@@ -81,6 +112,8 @@ def query_pending_commands() -> list[dict[str, Any]]:
 
 
 def write_command(command: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    if REMOTE_COMMAND_SOURCE == "ec2":
+        return {**command, **updates}
     updated_at_ms = updates.get("updated_at_ms") or now_ms()
     updated = {
         **command,
@@ -94,6 +127,19 @@ def write_command(command: dict[str, Any], updates: dict[str, Any]) -> dict[str,
 
 def mark_processing(command: dict[str, Any]) -> dict[str, Any]:
     timestamp_ms = now_ms()
+    if REMOTE_COMMAND_SOURCE == "ec2":
+        command_id = str(command.get("command_id") or command.get("commandId") or "")
+        response = api_request(
+            "POST",
+            f"/api/pi/{PI_ID}/remote-commands/{command_id}/claim",
+            headers=pi_headers(),
+        )
+        data = response.json()
+        if not response.ok or data.get("success") is False:
+            raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+        claimed = data.get("command")
+        return claimed if isinstance(claimed, dict) else {**command, "status": "processing"}
+
     return write_command(
         command,
         {
@@ -111,6 +157,33 @@ def mark_processing(command: dict[str, Any]) -> dict[str, Any]:
 
 def mark_done(command: dict[str, Any], result: dict[str, Any]) -> None:
     timestamp_ms = now_ms()
+    payload = {
+        "success": bool(result.get("success")),
+        "message": result.get("message"),
+        "result": {
+            "success": bool(result.get("success")),
+            "actual_state": "on" if command.get("command") == "turn_on" else "off",
+            "error_code": result.get("error_code"),
+            "user_message": result.get("message"),
+            "command_id": result.get("command_id"),
+            "local_command_id": result.get("command_id"),
+            "status": result.get("status"),
+            "no_action": bool(result.get("no_action")),
+        },
+    }
+    if REMOTE_COMMAND_SOURCE == "ec2":
+        command_id = str(command.get("command_id") or command.get("commandId") or "")
+        response = api_request(
+            "POST",
+            f"/api/pi/{PI_ID}/remote-commands/{command_id}/complete",
+            headers=pi_headers(),
+            json=payload,
+        )
+        data = response.json()
+        if not response.ok or data.get("success") is False:
+            raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+        return
+
     write_command(
         command,
         {
@@ -138,6 +211,30 @@ def mark_done(command: dict[str, Any], result: dict[str, Any]) -> None:
 
 def mark_failed(command: dict[str, Any], error: Any) -> None:
     timestamp_ms = now_ms()
+    payload = {
+        "success": False,
+        "message": "The Raspberry Pi could not execute this remote command.",
+        "result": {
+            "success": False,
+            "actual_state": None,
+            "error_code": "PI_COMMAND_RUNNER_ERROR",
+            "user_message": "The Raspberry Pi could not execute this remote command.",
+            "raw_error": str(error),
+        },
+    }
+    if REMOTE_COMMAND_SOURCE == "ec2":
+        command_id = str(command.get("command_id") or command.get("commandId") or "")
+        response = api_request(
+            "POST",
+            f"/api/pi/{PI_ID}/remote-commands/{command_id}/complete",
+            headers=pi_headers(),
+            json=payload,
+        )
+        data = response.json()
+        if not response.ok or data.get("success") is False:
+            raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+        return
+
     write_command(
         command,
         {
@@ -193,7 +290,10 @@ def run_once() -> int:
 
 
 def main() -> int:
-    log(f"Started for {HOME_ID}; table={AWS_DYNAMODB_SUMMARIES_TABLE}; region={AWS_REGION}")
+    log(
+        "Started for "
+        f"{HOME_ID}; source={REMOTE_COMMAND_SOURCE}; table={AWS_DYNAMODB_SUMMARIES_TABLE}; region={AWS_REGION}"
+    )
     while True:
         started = time.time()
         try:

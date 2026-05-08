@@ -93,6 +93,7 @@ class NetworkConfig {
   static const int apiPort = 8000;
   static const int mqttPort = 1883;
   static const String defaultHomeId = AppConfig.defaultHomeId;
+  static const String defaultHomePiId = AppConfig.defaultHomePiId;
   static String get backendApiUrl => AppConfig.apiUrl;
   static const String cloudApiUrl = AppConfig.cloudApiUrl;
   static const bool useLocalPiApi = AppConfig.useLocalPiApi;

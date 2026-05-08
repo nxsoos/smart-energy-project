@@ -34,6 +34,7 @@ class _HomeScreenState extends State<HomeScreen> {
   DashboardData? _dashboard;
   StreamSubscription<DashboardData>? _liveSubscription;
   bool _isLoading = true;
+  bool _isPairing = false;
   String? _error;
   final Set<String> _localPendingCommands = {};
   final Map<String, String> _localCommandErrors = {};
@@ -190,6 +191,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     _DashboardActions(
                       onSensors: _openSensors,
                       onPair: _openQrScanner,
+                      isPairing: _isPairing,
                     ),
                   ],
                 ),
@@ -240,8 +242,73 @@ class _HomeScreenState extends State<HomeScreen> {
     context,
   ).push(fadeSlideRoute(SensorsStatusScreen(sensorData: _dashboard!.sensors)));
 
-  void _openQrScanner() =>
-      Navigator.of(context).push(fadeSlideRoute(const QrScannerScreen()));
+  Future<void> _openQrScanner() async {
+    final value = await Navigator.of(
+      context,
+    ).push<String>(fadeSlideRoute(const QrScannerScreen()));
+    final payload = value?.trim();
+    if (payload == null || payload.isEmpty) {
+      return;
+    }
+    final parsed = _parsePairingPayload(payload);
+    if (parsed == null) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid pairing code.')),
+      );
+      return;
+    }
+    setState(() => _isPairing = true);
+    try {
+      final result = await _api.claimPi(
+        piId: parsed.piId,
+        token: parsed.token,
+        homeName: 'KahrabaIQ Home',
+      );
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Paired ${result['pi_id'] ?? parsed.piId} successfully.'),
+        ),
+      );
+      await _loadDashboard();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Pairing failed: ${error.toString().replaceFirst('Exception: ', '')}',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isPairing = false);
+      }
+    }
+  }
+
+  _PairingPayload? _parsePairingPayload(String payload) {
+    final uri = Uri.tryParse(payload);
+    if (uri != null && uri.scheme == 'kahrabaiq' && uri.host == 'pair') {
+      final piId = uri.queryParameters['pi_id']?.trim();
+      final token = uri.queryParameters['token']?.trim();
+      if (piId != null && piId.isNotEmpty && token != null && token.isNotEmpty) {
+        return _PairingPayload(piId: piId, token: token);
+      }
+    }
+    final parts = payload.split(RegExp(r'\s+'));
+    if (parts.length >= 2) {
+      return _PairingPayload(piId: parts.first.trim(), token: parts.last.trim());
+    }
+    return _PairingPayload(piId: NetworkConfig.defaultHomePiId, token: payload);
+  }
 
   String _displayName() {
     final user = AuthService().currentUser;
@@ -303,10 +370,15 @@ class _DashboardLoading extends StatelessWidget {
 }
 
 class _DashboardActions extends StatelessWidget {
-  const _DashboardActions({required this.onSensors, required this.onPair});
+  const _DashboardActions({
+    required this.onSensors,
+    required this.onPair,
+    required this.isPairing,
+  });
 
   final VoidCallback onSensors;
   final VoidCallback onPair;
+  final bool isPairing;
 
   @override
   Widget build(BuildContext context) {
@@ -322,12 +394,25 @@ class _DashboardActions extends StatelessWidget {
         const SizedBox(width: 12),
         Expanded(
           child: OutlinedButton.icon(
-            onPressed: onPair,
-            icon: const Icon(Icons.qr_code_scanner),
-            label: const Text('Pair'),
+            onPressed: isPairing ? null : onPair,
+            icon: isPairing
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.qr_code_scanner),
+            label: Text(isPairing ? 'Pairing' : 'Pair'),
           ),
         ),
       ],
     );
   }
+}
+
+class _PairingPayload {
+  const _PairingPayload({required this.piId, required this.token});
+
+  final String piId;
+  final String token;
 }

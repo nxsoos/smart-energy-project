@@ -3,6 +3,11 @@ class AppConfig {
 
   static const String defaultHomeId = 'home_001';
 
+  static const String defaultHomePiId = String.fromEnvironment(
+    'PI_ID',
+    defaultValue: 'pi_home_001',
+  );
+
   static const String kahrabaIqApiUrl = String.fromEnvironment(
     'KAHRABAIQ_API_URL',
     defaultValue: '',

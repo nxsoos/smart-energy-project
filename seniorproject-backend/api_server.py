@@ -41,6 +41,7 @@ from aws_cloud_store import (
     create_iot_websocket_config,
     find_remote_command,
     query_recent_remote_commands,
+    update_remote_command,
 )
 
 
@@ -513,6 +514,8 @@ class PiSensorStateRequest(BaseModel):
     dashboard: dict[str, Any] = Field(default_factory=dict)
     room: dict[str, Any] = Field(default_factory=dict)
     devices: dict[str, Any] = Field(default_factory=dict)
+    energy: dict[str, Any] = Field(default_factory=dict)
+    commands: dict[str, Any] = Field(default_factory=dict)
     alerts: list[dict[str, Any]] = Field(default_factory=list)
     occupancy: dict[str, Any] = Field(default_factory=dict)
     safety: dict[str, Any] = Field(default_factory=dict)
@@ -1138,7 +1141,15 @@ def add_user_to_home(uid: str, email: str, display_name: str, home_id: str, role
 
 def create_home_for_pi(pi_id: str, uid: str, email: str, display_name: str, home_name: str | None) -> str:
     timestamp_ms = now_ms()
-    home_id = f"home_{timestamp_ms}_{secrets.token_hex(3)}"
+    preferred_home_id = os.environ.get("DEFAULT_HOME_ID", "").strip()
+    if preferred_home_id:
+        existing_home = as_dict(safe_get(f"/homes/{preferred_home_id}", {}))
+        if not existing_home or existing_home.get("pi_id") in {None, "", pi_id}:
+            home_id = preferred_home_id
+        else:
+            home_id = f"home_{timestamp_ms}_{secrets.token_hex(3)}"
+    else:
+        home_id = f"home_{timestamp_ms}_{secrets.token_hex(3)}"
     safe_set(
         f"/homes/{home_id}",
         {
@@ -1509,6 +1520,8 @@ def pi_sensor_state(
         "dashboard": request.dashboard,
         "room": request.room,
         "devices": request.devices,
+        "energy": request.energy,
+        "commands": request.commands,
         "alerts": request.alerts,
         "occupancy": request.occupancy,
         "safety": request.safety,
@@ -1516,6 +1529,18 @@ def pi_sensor_state(
         "updated_at_iso": iso_from_ms(timestamp_ms),
     }
     safe_set(f"/homes/{home_id}/latest_state", latest)
+    safe_set(f"/homes/{home_id}/dashboard/latest", latest)
+    if request.devices:
+        for device_id, device in request.devices.items():
+            if isinstance(device, dict):
+                safe_update(f"/homes/{home_id}/devices/{device_id}", device)
+    if request.alerts:
+        active_alerts = {
+            str(alert.get("id") or alert.get("alert_id") or f"alert_{index}"): alert
+            for index, alert in enumerate(request.alerts)
+            if isinstance(alert, dict)
+        }
+        safe_set(f"/homes/{home_id}/alerts/active", active_alerts)
     safe_update(
         f"/pis/{pi_id}",
         {"last_state_sync_at_ms": timestamp_ms, "last_state_sync_at_iso": iso_from_ms(timestamp_ms)},
@@ -1592,6 +1617,104 @@ def pi_command_complete(
     }
     safe_update(f"/pi_commands/{pi_id}/{command_id}", update)
     return {"success": True, "command": {**command, **update}}
+
+
+@app.get("/api/pi/{pi_id}/remote-commands")
+def pi_remote_commands(
+    pi_id: str,
+    limit: int = Query(25, ge=1, le=100),
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    try:
+        commands = [
+            command
+            for command in query_recent_remote_commands(home_id, limit=limit)
+            if str(command.get("status") or "") == "pending"
+        ]
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Remote command queue read failed: {error}") from error
+    return {"success": True, "pi_id": pi_id, "home_id": home_id, "commands": commands}
+
+
+@app.post("/api/pi/{pi_id}/remote-commands/{command_id}/claim")
+def pi_remote_command_claim(
+    pi_id: str,
+    command_id: str,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    command = find_remote_command(home_id, command_id)
+    if not command:
+        raise HTTPException(status_code=404, detail="Remote command not found.")
+    if str(command.get("status") or "") != "pending":
+        raise HTTPException(status_code=409, detail="Remote command is no longer pending.")
+    timestamp_ms = now_ms()
+    try:
+        updated = update_remote_command(
+            home_id,
+            command_id,
+            {
+                "status": "processing",
+                "claimedBy": pi_id,
+                "claimed_by": pi_id,
+                "claimedAtMs": timestamp_ms,
+                "claimed_at_ms": timestamp_ms,
+                "claimedAt": iso_from_ms(timestamp_ms),
+                "claimed_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Remote command claim failed: {error}") from error
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": updated}
+
+
+@app.post("/api/pi/{pi_id}/remote-commands/{command_id}/complete")
+def pi_remote_command_complete(
+    pi_id: str,
+    command_id: str,
+    payload: dict[str, Any],
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    result = as_dict(payload.get("result"))
+    success = payload.get("success")
+    if success is None:
+        success = result.get("success") is not False
+    timestamp_ms = now_ms()
+    updates = {
+        "status": "confirmed" if success else "failed",
+        "result": {
+            **result,
+            "success": bool(success),
+        },
+        "message": payload.get("message") or result.get("message") or result.get("user_message"),
+        "executedAtMs": timestamp_ms,
+        "executed_at_ms": timestamp_ms,
+        "executedAt": iso_from_ms(timestamp_ms),
+        "executed_at_iso": iso_from_ms(timestamp_ms),
+        "completedBy": pi_id,
+        "completed_by": pi_id,
+    }
+    try:
+        updated = update_remote_command(home_id, command_id, updates)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Remote command result write failed: {error}") from error
+    if not updated:
+        raise HTTPException(status_code=404, detail="Remote command not found.")
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": updated}
 
 
 @app.post("/api/pairing/claim-pi")
@@ -2465,9 +2588,11 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
     backend_dashboard = as_dict(backend.get("dashboard"))
     backend_energy = as_dict(backend.get("energy"))
     backend_ai = as_dict(backend.get("ai"))
+    latest_state = as_dict(home.get("latest_state"))
 
     return {
         "home": home,
+        "latest_state": latest_state,
         "devices": as_dict(home.get("devices")),
         "dashboard_latest": as_dict(as_dict(home.get("dashboard")).get("latest")),
         "alerts_active": as_dict(as_dict(home.get("alerts")).get("active")),
@@ -2495,6 +2620,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
 
 
 def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
+    latest_room = as_dict(bundle["latest_state"].get("room"))
     esp32 = as_dict(bundle["devices"].get("esp32_01"))
     sensors = as_dict(esp32.get("sensors"))
     status = as_dict(esp32.get("status"))
@@ -2507,12 +2633,15 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
         **dashboard_env,
         **sensors,
         **occupancy,
+        **latest_room,
     }
 
     motion_bool = normalize_bool(first_present(source.get("motion"), source.get("occupied")))
     smoke_bool = normalize_bool(source.get("smoke"))
     sensor_timestamp_ms = first_present(
         sensors.get("timestamp_ms"),
+        latest_room.get("timestamp_ms"),
+        latest_room.get("timestampMs"),
         status.get("lastSeenMs"),
         status.get("last_seen_ms"),
         dashboard_env.get("updated_at"),
@@ -2562,6 +2691,9 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
 
 def build_devices(bundle: dict[str, Any], home_id: str | None = None) -> dict[str, dict[str, Any]]:
     raw_devices = dict(bundle["devices"])
+    for device_id, device in as_dict(bundle["latest_state"].get("devices")).items():
+        if isinstance(device, dict):
+            raw_devices[device_id] = {**as_dict(raw_devices.get(device_id)), **device}
     branches = bundle["backend_branches"]
     health_devices = as_dict(bundle["backend_device_health"].get("devices"))
 
@@ -2591,8 +2723,9 @@ def build_energy(
     dashboard_energy = bundle["backend_dashboard_energy"]
     current_total = bundle["backend_current_total"]
     latest = bundle["dashboard_latest"]
+    latest_energy = as_dict(bundle["latest_state"].get("energy"))
 
-    source = {**latest, **dashboard_energy, **current_total}
+    source = {**latest, **dashboard_energy, **current_total, **latest_energy}
     branches = as_dict(first_present(source.get("branches"), current_total.get("branches")))
     highest_device = None
     highest_power = -1.0
@@ -2977,6 +3110,20 @@ def get_iot_live_config(home_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/api/home/{home_id}/state/current", dependencies=[Depends(require_home_permission("can_view"))])
+def get_current_state(home_id: str) -> dict[str, Any]:
+    latest = as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+    if not latest:
+        raise HTTPException(status_code=404, detail="No current state has been reported by the Pi yet.")
+    return {
+        "success": True,
+        "home_id": home_id,
+        "state": latest,
+        "updated_at_ms": latest.get("updated_at_ms"),
+        "updated_at_iso": latest.get("updated_at_iso"),
+    }
+
+
 @app.get("/api/home/{home_id}/dashboard", dependencies=[Depends(require_home_permission("can_view"))])
 def get_dashboard(home_id: str) -> dict[str, Any]:
     resolve_smoke_emergency_if_clear(home_id)
@@ -2990,6 +3137,11 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     alerts = active_only(
         object_to_list(bundle["alerts_active"])
         + object_to_list(bundle["backend_active_alerts"])
+        + [
+            item
+            for item in bundle["latest_state"].get("alerts", [])
+            if isinstance(item, dict)
+        ]
     )
     recommendations = active_only(
         object_to_list(bundle["recommendations_active"])
