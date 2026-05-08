@@ -6,9 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-import firebase_admin
 from dotenv import load_dotenv
-from firebase_admin import credentials, db
 from flask import Flask, jsonify, request
 from local_state_store import add_history, home_ref as local_home_ref
 
@@ -16,18 +14,6 @@ from local_state_store import add_history, home_ref as local_home_ref
 load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
 load_dotenv()
 
-SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
-DATABASE_URL = os.environ.get(
-    "FIREBASE_DATABASE_URL",
-    "https://seniorproject-energy-default-rtdb.asia-southeast1."
-    "firebasedatabase.app"
-)
-FIREBASE_ENABLED = os.environ.get("FIREBASE_ENABLED", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 LOCAL_RAW_HISTORY_ENABLED = os.environ.get(
     "LOCAL_RAW_HISTORY_ENABLED",
     "false",
@@ -68,25 +54,8 @@ def request_has_valid_device_key() -> bool:
     return False
 
 
-def initialize_firebase() -> None:
-    if not FIREBASE_ENABLED:
-        return
-    if firebase_admin._apps:
-        return
-
-    cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
-    firebase_admin.initialize_app(
-        cred,
-        {
-            "databaseURL": DATABASE_URL,
-        },
-    )
-
-
 def home_ref(path: str):
-    if not FIREBASE_ENABLED:
-        return local_home_ref(HOME_ID, path)
-    return db.reference(f"/homes/{HOME_ID}/{path}")
+    return local_home_ref(HOME_ID, path)
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -372,8 +341,8 @@ def save_sensor_payload(payload: dict[str, Any]) -> None:
     history_payload = build_history_payload(payload)
     timestamp_ms = int(payload["timestamp_ms"])
 
-    # Keep the original Firebase structure: latest ESP32 data lives inside
-    # devices/esp32_01. History is flattened so backend Firebase Functions can
+    # Keep the app data structure: latest ESP32 data lives inside
+    # devices/esp32_01. History is flattened so backend services can
     # read top-level fields like motion, noise, sound_raw, and light_status.
     home_ref(f"devices/{APP_DEVICE_ID}").set(payload)
     update_smoke_safety(history_payload, timestamp_ms)
@@ -396,7 +365,7 @@ def save_sensor_payload(payload: dict[str, Any]) -> None:
         settings,
         timestamp_ms,
     ):
-        if FIREBASE_ENABLED or LOCAL_RAW_HISTORY_ENABLED:
+        if LOCAL_RAW_HISTORY_ENABLED:
             home_ref(f"history/occupancy_logs/occ_{timestamp_ms}").set(occupancy)
         else:
             add_history(
@@ -406,7 +375,7 @@ def save_sensor_payload(payload: dict[str, Any]) -> None:
                 max_records=LOCAL_HISTORY_MAX_RECORDS,
             )
         home_ref("occupancy/room1_latest_history").set(occupancy)
-    if FIREBASE_ENABLED or LOCAL_RAW_HISTORY_ENABLED:
+    if LOCAL_RAW_HISTORY_ENABLED:
         home_ref(f"history/sensor_logs/{history_key}").set(history_payload)
     else:
         add_history(
@@ -499,5 +468,4 @@ def receive_room1_sensors():
 
 
 if __name__ == "__main__":
-    initialize_firebase()
     app.run(host="0.0.0.0", port=5000)

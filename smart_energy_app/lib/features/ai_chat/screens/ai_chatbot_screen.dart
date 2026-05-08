@@ -9,7 +9,7 @@ import '../../../core/utils/constants.dart';
 class AiChatbotScreen extends StatefulWidget {
   const AiChatbotScreen({
     super.key,
-    this.homeId = AppConfig.firebaseHomeId,
+    this.homeId = AppConfig.defaultHomeId,
     this.homeName = 'Home 1',
     this.scenarioId,
     this.scenarioName,

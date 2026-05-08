@@ -1,15 +1,20 @@
 class AppConfig {
   const AppConfig._();
 
-  static const String firebaseRealtimeDatabaseUrl =
-      'https://seniorproject-energy-default-rtdb.asia-southeast1.firebasedatabase.app';
+  static const String defaultHomeId = 'home_001';
 
-  static const String firebaseHomeId = 'home_001';
+  static const String kahrabaIqApiUrl = String.fromEnvironment(
+    'KAHRABAIQ_API_URL',
+    defaultValue: '',
+  );
 
   static const String backendApiUrl = String.fromEnvironment(
     'BACKEND_API_URL',
     defaultValue: 'https://smart-energy-api-qs7uzdqawq-as.a.run.app',
   );
+
+  static String get apiUrl =>
+      kahrabaIqApiUrl.isNotEmpty ? kahrabaIqApiUrl : backendApiUrl;
 
   static const String cloudApiUrl = String.fromEnvironment(
     'CLOUD_API_URL',

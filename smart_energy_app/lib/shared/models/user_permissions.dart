@@ -25,6 +25,7 @@ class UserPermissions {
 
   bool get isAdmin => role == 'home_admin' || role == 'admin';
   bool get isHomeAdmin => isAdmin;
+  bool get isPlatformAdmin => role == 'platform_admin';
   bool get isMember => role == 'member';
   bool get isViewer => role == 'viewer';
 
@@ -54,6 +55,19 @@ class UserPermissions {
     canGenerateInvites: true,
   );
 
+  static const platformAdmin = UserPermissions(
+    role: 'platform_admin',
+    canView: true,
+    canControlDevices: true,
+    canChangeSettings: true,
+    canManageUsers: true,
+    canManageSchedules: true,
+    canChangeControlMode: true,
+    canUseAiChat: true,
+    canAcknowledgeAlerts: true,
+    canGenerateInvites: true,
+  );
+
   static const member = UserPermissions(
     role: 'member',
     canView: true,
@@ -70,6 +84,9 @@ class UserPermissions {
   factory UserPermissions.fromHomeMap(Map<String, dynamic> data) {
     final rawRole = (data['role'] ?? 'viewer').toString().toLowerCase();
     final role = rawRole == 'admin' ? 'home_admin' : rawRole;
+    if (role == 'platform_admin') {
+      return platformAdmin;
+    }
     return UserPermissions(
       role: role,
       canView: _asBool(data['can_view'], true),

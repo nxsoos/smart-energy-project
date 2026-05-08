@@ -294,8 +294,8 @@ class DeviceCommandResult {
   final String? commandId;
 }
 
-class FirebaseRealtimeService {
-  FirebaseRealtimeService()
+class KahrabaIqApiService {
+  KahrabaIqApiService()
     : _dio = Dio(
         BaseOptions(
           baseUrl: NetworkConfig.apiBaseUrl,
@@ -346,7 +346,7 @@ class FirebaseRealtimeService {
 
   Stream<SensorData> watchLiveSensorData({required String homeId}) {
     if (!NetworkConfig.useAwsIotLive ||
-        homeId != NetworkConfig.firebaseHomeId) {
+        homeId != NetworkConfig.defaultHomeId) {
       return const Stream<SensorData>.empty();
     }
     return _watchAwsIotLivePayloads(homeId: homeId).map((data) {
@@ -360,7 +360,7 @@ class FirebaseRealtimeService {
 
   Stream<DashboardData> watchLiveDashboardData({required String homeId}) {
     if (!NetworkConfig.useAwsIotLive ||
-        homeId != NetworkConfig.firebaseHomeId) {
+        homeId != NetworkConfig.defaultHomeId) {
       return const Stream<DashboardData>.empty();
     }
     return _watchAwsIotLivePayloads(
@@ -865,7 +865,7 @@ class FirebaseRealtimeService {
     String? scenarioId,
     CancelToken? cancelToken,
   }) async {
-    if (usesLocalPiApi && homeId == NetworkConfig.firebaseHomeId) {
+    if (usesLocalPiApi && homeId == NetworkConfig.defaultHomeId) {
       final response = await _dio.get('/api/latest', cancelToken: cancelToken);
       final data = _asMap(response.data);
       final dashboard = _asMap(data['dashboard']).isNotEmpty
@@ -1175,12 +1175,12 @@ class FirebaseRealtimeService {
     );
   }
 
-  Future<DashboardData> _fetchDashboardDataFromFirebase({
+  Future<DashboardData> _fetchDashboardDataFromLegacyStore({
     required String homeId,
     String? scenarioId,
     CancelToken? cancelToken,
   }) async {
-    throw Exception('Firebase Realtime Database fallback is disabled.');
+    throw Exception('Legacy realtime database fallback is disabled.');
   }
 
   Future<List<DemoScenario>> fetchDemoScenarios({
@@ -1586,7 +1586,7 @@ class FirebaseRealtimeService {
         fallback: 'Action suggestion dismissed.',
       );
     } catch (_) {
-      await _dismissActionSuggestionInFirebase(
+      await _dismissActionSuggestionInLegacyStore(
         homeId: homeId,
         suggestionId: suggestionId,
       );
@@ -1594,11 +1594,11 @@ class FirebaseRealtimeService {
     }
   }
 
-  Future<void> _dismissActionSuggestionInFirebase({
+  Future<void> _dismissActionSuggestionInLegacyStore({
     required String homeId,
     required String suggestionId,
   }) async {
-    throw Exception('Firebase Realtime Database fallback is disabled.');
+    throw Exception('Legacy realtime database fallback is disabled.');
   }
 
   Future<DeviceCommandResult> sendDeviceCommand(
@@ -1607,7 +1607,7 @@ class FirebaseRealtimeService {
     required String homeId,
     bool emergency = false,
   }) async {
-    if (homeId != NetworkConfig.firebaseHomeId) {
+    if (homeId != NetworkConfig.defaultHomeId) {
       throw ArgumentError.value(
         homeId,
         'homeId',
@@ -1740,7 +1740,7 @@ class FirebaseRealtimeService {
 
   Stream<DeviceCommandState> watchLatestCommandStatus(String deviceId) {
     return watchLatestCommandStatusForHome(
-      NetworkConfig.firebaseHomeId,
+      NetworkConfig.defaultHomeId,
       deviceId,
     );
   }
@@ -1754,7 +1754,7 @@ class FirebaseRealtimeService {
 
   Stream<bool?> watchDeviceSwitchStatus(String deviceId) {
     return watchDeviceSwitchStatusForHome(
-      NetworkConfig.firebaseHomeId,
+      NetworkConfig.defaultHomeId,
       deviceId,
     );
   }

@@ -1,4 +1,4 @@
-const state = { lastData: null, smokeEmergencyDismissed: false, smokeClearStartedAt: null };
+const state = { lastData: null, smokeEmergencyDismissed: false, smokeClearStartedAt: null, showPairingQr: false };
 const SENSOR_STALE_AFTER_MS = 2 * 60 * 1000;
 
 const ids = {
@@ -10,6 +10,7 @@ const ids = {
   pairingPayload: document.getElementById("pairingPayload"),
   pairingQr: document.getElementById("pairingQr"),
   pairingQrFallback: document.getElementById("pairingQrFallback"),
+  showPairingQr: document.getElementById("showPairingQr"),
   lastUpdated: document.getElementById("lastUpdated"),
   commandMessage: document.getElementById("commandMessage"),
   suggestionText: document.getElementById("suggestionText"),
@@ -81,7 +82,7 @@ function isSensorOnline(room) {
 function updateKioskState(data) {
   ids.piIdentity.textContent = `${data.pi_id || "Pi"} · ${data.home_id || "unpaired"}`;
   setStatus(ids.cloudStatus, data.cloud_enabled ? "online" : "muted", data.cloud_status || "Local");
-  if (data.paired) {
+  if (data.paired && !state.showPairingQr) {
     ids.pairingScreen.classList.add("hidden");
     ids.dashboardScreen.classList.remove("hidden");
   } else {
@@ -97,6 +98,7 @@ function updateKioskState(data) {
       ids.pairingQrFallback.classList.remove("hidden");
     }
   }
+  if (ids.showPairingQr) ids.showPairingQr.textContent = state.showPairingQr ? "Hide QR" : "Pair QR";
 }
 
 async function fetchKioskState() {
@@ -227,6 +229,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
 document.querySelectorAll("[data-device-id][data-action]").forEach((button) => button.addEventListener("click", () => sendCommand(button.dataset.deviceId, button.dataset.action)));
 document.getElementById("emergencyAllOff").addEventListener("click", () => { state.smokeEmergencyDismissed = true; ids.emergencyOverlay.classList.add("hidden"); postAction("/api/safety/smoke/actions/turn-off-safe-devices").catch((error) => { ids.commandMessage.textContent = error.message; }); });
 document.getElementById("emergencyMarkSafe").addEventListener("click", () => { state.smokeEmergencyDismissed = true; ids.emergencyOverlay.classList.add("hidden"); postAction("/api/safety/smoke/actions/mark-safe").catch((error) => { ids.commandMessage.textContent = error.message; }); });
+if (ids.showPairingQr) ids.showPairingQr.addEventListener("click", () => { state.showPairingQr = !state.showPairingQr; fetchKioskState().catch(() => {}); });
 
 let adminTapCount = 0;
 document.getElementById("adminHotspot").addEventListener("click", () => {

@@ -92,10 +92,8 @@ class NetworkConfig {
   static const String defaultRaspberryPiIP = '192.168.1.100';
   static const int apiPort = 8000;
   static const int mqttPort = 1883;
-  static const String firebaseRealtimeDatabaseUrl =
-      AppConfig.firebaseRealtimeDatabaseUrl;
-  static const String firebaseHomeId = AppConfig.firebaseHomeId;
-  static const String backendApiUrl = AppConfig.backendApiUrl;
+  static const String defaultHomeId = AppConfig.defaultHomeId;
+  static String get backendApiUrl => AppConfig.apiUrl;
   static const String cloudApiUrl = AppConfig.cloudApiUrl;
   static const bool useLocalPiApi = AppConfig.useLocalPiApi;
   static const String awsRegion = AppConfig.awsRegion;

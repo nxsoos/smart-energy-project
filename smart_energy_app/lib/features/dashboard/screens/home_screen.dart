@@ -14,7 +14,7 @@ import '../../ai_chat/screens/ai_chatbot_screen.dart';
 import '../../pairing/screens/qr_scanner_screen.dart';
 import '../../sensors/screens/sensors_status_screen.dart';
 import '../../../shared/services/auth_service.dart';
-import '../../../shared/services/firebase_realtime_service.dart';
+import '../../../shared/services/kahrabaiq_api_service.dart';
 import '../../../core/widgets/metric_card.dart';
 import '../../../core/widgets/device_card.dart';
 
@@ -49,8 +49,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const int _sensorFeedStaleThresholdMs = 2 * 60 * 1000;
   static const int _deviceCommandPendingTimeoutMs = 45 * 1000;
 
-  final FirebaseRealtimeService _firebaseRealtimeService =
-      FirebaseRealtimeService();
+  final KahrabaIqApiService _apiService = KahrabaIqApiService();
   final AuthService _authService = AuthService();
 
   late EnergyReading _currentReading;
@@ -134,7 +133,7 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   bool get _isDemoHome => _selectedHomeId == 'home_test';
-  bool get _usesLocalPiApi => _firebaseRealtimeService.usesLocalPiApi;
+  bool get _usesLocalPiApi => _apiService.usesLocalPiApi;
   _HomeChoice get _selectedHome => _homeChoices.firstWhere(
     (home) => home.id == _selectedHomeId,
     orElse: () => _homeChoices.first,
@@ -227,7 +226,7 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    _liveSensorSubscription = _firebaseRealtimeService
+    _liveSensorSubscription = _apiService
         .watchLiveDashboardData(homeId: _selectedHomeId)
         .listen(
           (dashboardData) {
@@ -298,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadUserContext() async {
     if (NetworkConfig.useLocalPiApi || !NetworkConfig.useCognitoAuth) {
       setState(() {
-        _selectedHomeId = NetworkConfig.firebaseHomeId;
+        _selectedHomeId = NetworkConfig.defaultHomeId;
         _permissions = UserPermissions.admin;
       });
       if (widget.enableRealtimeSync) {
@@ -334,7 +333,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _selectedHomeId = selected.homeId;
         _permissions = selected.homeId.isEmpty
             ? (profile.isPlatformAdmin
-                  ? UserPermissions.admin
+                  ? UserPermissions.platformAdmin
                   : UserPermissions.viewer)
             : selected.permissions;
         _isLoading = false;
@@ -367,7 +366,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       _alertsListenerStartedAtMs = DateTime.now().millisecondsSinceEpoch;
 
-      _alertsSubscription = _firebaseRealtimeService
+      _alertsSubscription = _apiService
           .watchAlerts(
             homeId: _selectedHomeId,
             sinceTimestampMs: _alertsListenerStartedAtMs,
@@ -557,7 +556,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final result = await _firebaseRealtimeService.sendDeviceCommand(
+      final result = await _apiService.sendDeviceCommand(
         deviceId,
         action,
         homeId: _selectedHomeId,
@@ -590,8 +589,12 @@ class _HomeScreenState extends State<HomeScreen> {
       ).showSnackBar(SnackBar(content: Text(result.message)));
 
       if (result.success &&
-          !{'pending', 'processing', 'sent', 'command_already_in_progress'}
-              .contains(result.status.toLowerCase())) {
+          !{
+            'pending',
+            'processing',
+            'sent',
+            'command_already_in_progress',
+          }.contains(result.status.toLowerCase())) {
         setState(() {
           _pendingDeviceCommands.remove(deviceId);
           _pendingDeviceTargets.remove(deviceId);
@@ -655,7 +658,7 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final deviceId in activeDeviceIds) {
       _commandStatusSubscriptions.putIfAbsent(
         deviceId,
-        () => _firebaseRealtimeService
+        () => _apiService
             .watchLatestCommandStatusForHome(_selectedHomeId, deviceId)
             .listen(
               (state) => _handleCommandStateChanged(deviceId, state),
@@ -677,7 +680,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       _deviceSubscriptions.putIfAbsent(
         deviceId,
-        () => _firebaseRealtimeService
+        () => _apiService
             .watchDeviceForHome(_selectedHomeId, deviceId)
             .listen((device) => _updateDeviceRealtimeState(device)),
       );
@@ -850,14 +853,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _activeRequestToken = cancelToken;
 
     try {
-      final dashboardData = await _firebaseRealtimeService.fetchDashboardData(
+      final dashboardData = await _apiService.fetchDashboardData(
         homeId: _selectedHomeId,
         scenarioId: _isDemoHome ? _selectedScenarioId : null,
         cancelToken: cancelToken,
       );
 
       final demoScenarios = _isDemoHome
-          ? await _firebaseRealtimeService.fetchDemoScenarios(
+          ? await _apiService.fetchDemoScenarios(
               cancelToken: cancelToken,
             )
           : const <DemoScenario>[];
@@ -933,7 +936,7 @@ class _HomeScreenState extends State<HomeScreen> {
       try {
         _syncDeviceListeners(mergedDevices);
       } catch (_) {
-        // The dashboard data is loaded through REST. Native Firebase listeners
+        // The dashboard data is loaded through REST. Native realtime listeners
         // can be unavailable on local/dev builds without breaking the dashboard.
       }
     } catch (error) {
@@ -1188,11 +1191,11 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final results = await Future.wait<dynamic>([
-      _firebaseRealtimeService.fetchControlModes(homeId: _selectedHomeId),
-      _firebaseRealtimeService.fetchSettings(homeId: _selectedHomeId),
-      _firebaseRealtimeService.fetchSchedules(homeId: _selectedHomeId),
+      _apiService.fetchControlModes(homeId: _selectedHomeId),
+      _apiService.fetchSettings(homeId: _selectedHomeId),
+      _apiService.fetchSchedules(homeId: _selectedHomeId),
       _permissions.canManageUsers
-          ? _firebaseRealtimeService.fetchMembers(homeId: _selectedHomeId)
+          ? _apiService.fetchMembers(homeId: _selectedHomeId)
           : Future.value(<HomeMember>[]),
     ]);
     final options = results[0] as List<ControlModeOption>;
@@ -1449,7 +1452,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           onPressed: () async {
                             final created = await _showCreateScheduleDialog();
                             if (created == true) {
-                              final next = await _firebaseRealtimeService
+                              final next = await _apiService
                                   .fetchSchedules(homeId: _selectedHomeId);
                               setSheetState(() => schedules = next);
                               await _refreshData(
@@ -1467,12 +1470,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       (schedule) => _buildScheduleTile(
                         schedule,
                         onChanged: (enabled) async {
-                          await _firebaseRealtimeService.updateScheduleEnabled(
+                          await _apiService.updateScheduleEnabled(
                             homeId: _selectedHomeId,
                             scheduleId: schedule.id,
                             enabled: enabled,
                           );
-                          final next = await _firebaseRealtimeService
+                          final next = await _apiService
                               .fetchSchedules(homeId: _selectedHomeId);
                           setSheetState(() => schedules = next);
                           await _refreshData(
@@ -1481,7 +1484,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           );
                         },
                         onRunNow: () async {
-                          final message = await _firebaseRealtimeService
+                          final message = await _apiService
                               .runScheduleNow(
                                 homeId: _selectedHomeId,
                                 scheduleId: schedule.id,
@@ -1494,11 +1497,11 @@ class _HomeScreenState extends State<HomeScreen> {
                           );
                         },
                         onDelete: () async {
-                          await _firebaseRealtimeService.deleteSchedule(
+                          await _apiService.deleteSchedule(
                             homeId: _selectedHomeId,
                             scheduleId: schedule.id,
                           );
-                          final next = await _firebaseRealtimeService
+                          final next = await _apiService
                               .fetchSchedules(homeId: _selectedHomeId);
                           setSheetState(() => schedules = next);
                           await _refreshData(
@@ -1526,7 +1529,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           onPressed: () async {
                             final added = await _showAddMemberDialog();
                             if (added == true) {
-                              final next = await _firebaseRealtimeService
+                              final next = await _apiService
                                   .fetchMembers(homeId: _selectedHomeId);
                               setSheetState(() => members = next);
                             }
@@ -1546,21 +1549,21 @@ class _HomeScreenState extends State<HomeScreen> {
                       (member) => _buildMemberTile(
                         member,
                         onRoleChanged: (role) async {
-                          await _firebaseRealtimeService.updateMemberRole(
+                          await _apiService.updateMemberRole(
                             homeId: _selectedHomeId,
                             uid: member.uid,
                             role: role,
                           );
-                          final next = await _firebaseRealtimeService
+                          final next = await _apiService
                               .fetchMembers(homeId: _selectedHomeId);
                           setSheetState(() => members = next);
                         },
                         onRemove: () async {
-                          await _firebaseRealtimeService.removeMember(
+                          await _apiService.removeMember(
                             homeId: _selectedHomeId,
                             uid: member.uid,
                           );
-                          final next = await _firebaseRealtimeService
+                          final next = await _apiService
                               .fetchMembers(homeId: _selectedHomeId);
                           setSheetState(() => members = next);
                         },
@@ -1578,7 +1581,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _changeControlMode(String mode) async {
     try {
-      final message = await _firebaseRealtimeService.updateControlMode(
+      final message = await _apiService.updateControlMode(
         homeId: _selectedHomeId,
         mode: mode,
         updatedBy: 'flutter_app',
@@ -1633,7 +1636,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     try {
-      final updated = await _firebaseRealtimeService.updateSettings(
+      final updated = await _apiService.updateSettings(
         homeId: _selectedHomeId,
         values: {
           'cost_per_kwh': double.tryParse(costController.text) ?? 0.029,
@@ -1793,7 +1796,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPressed: selectedDays.isEmpty
                     ? null
                     : () async {
-                        await _firebaseRealtimeService.createSchedule(
+                        await _apiService.createSchedule(
                           homeId: _selectedHomeId,
                           values: {
                             'name': nameController.text.trim(),
@@ -1861,7 +1864,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               ElevatedButton(
                 onPressed: () async {
-                  await _firebaseRealtimeService.addMember(
+                  await _apiService.addMember(
                     homeId: _selectedHomeId,
                     email: emailController.text.trim(),
                     role: role,
@@ -1886,7 +1889,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _approveSuggestion(ActionSuggestion suggestion) async {
     _removeMatchingSuggestions(suggestion);
     try {
-      final message = await _firebaseRealtimeService.approveActionSuggestion(
+      final message = await _apiService.approveActionSuggestion(
         homeId: _selectedHomeId,
         suggestionId: suggestion.id,
       );
@@ -1908,7 +1911,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _dismissSuggestion(ActionSuggestion suggestion) async {
     _removeMatchingSuggestions(suggestion);
     try {
-      final message = await _firebaseRealtimeService.dismissActionSuggestion(
+      final message = await _apiService.dismissActionSuggestion(
         homeId: _selectedHomeId,
         suggestionId: suggestion.id,
       );
@@ -1999,10 +2002,19 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: Icon(Icons.settings, color: textPrimary),
               onPressed: _showSettingsSheet,
             ),
+          IconButton(
+            tooltip: 'Scan KahrabaIQ QR',
+            icon: Icon(Icons.qr_code_scanner, color: textPrimary),
+            onPressed: _scanPairingQr,
+          ),
           PopupMenuButton<String>(
             icon: Icon(Icons.account_circle_outlined, color: textPrimary),
             onSelected: (value) {
-              if (value == 'logout') {
+              if (value == 'scan_qr') {
+                _scanPairingQr();
+              } else if (value == 'invite_qr') {
+                _showInviteQrDialog();
+              } else if (value == 'logout') {
                 _authService.signOut();
               }
             },
@@ -2011,6 +2023,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 enabled: false,
                 child: Text('Role: ${_permissions.role}'),
               ),
+              const PopupMenuItem(
+                value: 'scan_qr',
+                child: Text('Scan pairing/invite QR'),
+              ),
+              if (_permissions.canGenerateInvites)
+                const PopupMenuItem(
+                  value: 'invite_qr',
+                  child: Text('Create member invite QR'),
+                ),
               const PopupMenuItem(value: 'logout', child: Text('Logout')),
             ],
           ),
@@ -2865,20 +2886,30 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _claimPairingPayload(String payload) async {
     try {
       final uri = Uri.parse(payload);
-      final isInvite = uri.host == 'invite' || uri.path.contains('invite');
-      final isPair = uri.host == 'pair' || uri.path.contains('pair');
+      if (uri.scheme != 'kahrabaiq') {
+        throw Exception('Invalid KahrabaIQ QR code.');
+      }
+      final isInvite = uri.host == 'invite';
+      final isPair = uri.host == 'pair';
       if (isInvite) {
-        await _firebaseRealtimeService.claimHomeInvite(
-          inviteId: uri.queryParameters['invite_id'] ?? '',
-          token: uri.queryParameters['token'] ?? '',
+        final inviteId = uri.queryParameters['invite_id'] ?? '';
+        final token = uri.queryParameters['token'] ?? '';
+        if (inviteId.isEmpty || token.isEmpty) {
+          throw Exception('Invite QR code is missing required fields.');
+        }
+        await _apiService.claimHomeInvite(
+          inviteId: inviteId,
+          token: token,
         );
       } else if (isPair) {
-        await _firebaseRealtimeService.claimPi(
-          piId: uri.queryParameters['pi_id'] ?? '',
-          token: uri.queryParameters['token'] ?? '',
-        );
+        final piId = uri.queryParameters['pi_id'] ?? '';
+        final token = uri.queryParameters['token'] ?? '';
+        if (piId.isEmpty || token.isEmpty) {
+          throw Exception('Pairing QR code is missing required fields.');
+        }
+        await _apiService.claimPi(piId: piId, token: token);
       } else {
-        throw Exception('Unsupported QR code.');
+        throw Exception('Unsupported KahrabaIQ QR code.');
       }
       await _loadUserContext();
       if (mounted) {
@@ -2896,7 +2927,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showPlatformAdminSummary() async {
-    final data = await _firebaseRealtimeService.fetchPlatformAdminSummary();
+    final data = await _apiService.fetchPlatformAdminSummary();
     if (!mounted) {
       return;
     }
@@ -2927,7 +2958,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _showInviteQrDialog() async {
     try {
-      final invite = await _firebaseRealtimeService.createHomeInvite(
+      final invite = await _apiService.createHomeInvite(
         homeId: _selectedHomeId,
       );
       if (!mounted) {
@@ -3405,8 +3436,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(height: 4),
                   Text(
                     _loadError == null
-                        ? 'Waiting for breaker data from Firebase.'
-                        : 'Breaker cards will appear after Firebase loads successfully.',
+                        ? 'Waiting for breaker data from AWS.'
+                        : 'Breaker cards will appear after AWS data loads successfully.',
                     style: const TextStyle(color: AppColors.textSecondary),
                   ),
                 ],
@@ -4380,7 +4411,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _sendEmergencyDeviceCommand(String deviceId) async {
     try {
-      final result = await _firebaseRealtimeService.sendDeviceCommand(
+      final result = await _apiService.sendDeviceCommand(
         deviceId,
         'turn_off',
         homeId: _selectedHomeId,
@@ -4580,7 +4611,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               onPressed: () async {
                 Navigator.of(dialogContext).pop();
-                final result = await _firebaseRealtimeService
+                final result = await _apiService
                     .turnOffSafeDevices(homeId: _selectedHomeId);
                 if (!mounted) {
                   return;
@@ -4602,7 +4633,7 @@ class _HomeScreenState extends State<HomeScreen> {
             OutlinedButton(
               onPressed: () async {
                 Navigator.of(dialogContext).pop();
-                final result = await _firebaseRealtimeService.markSmokeSafe(
+                final result = await _apiService.markSmokeSafe(
                   homeId: _selectedHomeId,
                 );
                 if (!mounted) {

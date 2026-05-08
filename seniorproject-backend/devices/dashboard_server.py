@@ -6,10 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import firebase_admin
 import requests
 from dotenv import load_dotenv
-from firebase_admin import credentials, db
 from flask import Flask, jsonify, render_template, request
 from local_command_controller import execute_local_command, sync_home_assistant_device_states
 from local_state_store import home_ref as local_home_ref, home_snapshot
@@ -18,18 +16,6 @@ from local_state_store import home_ref as local_home_ref, home_snapshot
 load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
 load_dotenv()
 
-SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
-DATABASE_URL = os.environ.get(
-    "FIREBASE_DATABASE_URL",
-    "https://seniorproject-energy-default-rtdb.asia-southeast1."
-    "firebasedatabase.app",
-)
-FIREBASE_ENABLED = os.environ.get("FIREBASE_ENABLED", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 CLOUD_BACKEND_ENABLED = os.environ.get(
     "CLOUD_BACKEND_ENABLED",
     "false",
@@ -106,29 +92,12 @@ def qr_data_url(payload: str) -> str | None:
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def initialize_firebase() -> None:
-    if not FIREBASE_ENABLED:
-        return
-    if firebase_admin._apps:
-        return
-
-    cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
-    firebase_admin.initialize_app(
-        cred,
-        {
-            "databaseURL": DATABASE_URL,
-        },
-    )
-
-
 def api_headers() -> dict[str, str]:
     return {"X-Device-Token": PI_DASHBOARD_TOKEN} if PI_DASHBOARD_TOKEN else {}
 
 
 def home_ref(path: str):
-    if not FIREBASE_ENABLED:
-        return local_home_ref(HOME_ID, path)
-    return db.reference(f"/homes/{HOME_ID}/{path}")
+    return local_home_ref(HOME_ID, path)
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -325,11 +294,8 @@ def format_live_device(device_id: str, device: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def local_firebase_dashboard(message: str) -> dict[str, Any]:
-    if FIREBASE_ENABLED:
-        home = as_dict(db.reference(f"/homes/{HOME_ID}").get())
-    else:
-        home = home_snapshot(HOME_ID)
+def local_dashboard(message: str) -> dict[str, Any]:
+    home = home_snapshot(HOME_ID)
     esp32 = as_dict(as_dict(home.get("devices")).get("esp32_01"))
     live_devices = as_dict(home.get("devices"))
     room = format_live_room(esp32) if esp32 else {}
@@ -524,12 +490,12 @@ def latest():
                 if not response.ok:
                     message = data.get("detail", "Backend API request failed")
                     print(f"[DASHBOARD FALLBACK] API returned {response.status_code}: {message}", flush=True)
-                    data = local_firebase_dashboard(str(message))
+                    data = local_dashboard(str(message))
             except Exception as api_error:
                 print(f"[DASHBOARD FALLBACK] API unavailable: {api_error}", flush=True)
-                data = local_firebase_dashboard(str(api_error))
+                data = local_dashboard(str(api_error))
         else:
-            data = local_firebase_dashboard("Local Pi mode: cloud backend disabled.")
+            data = local_dashboard("Local Pi mode: cloud backend disabled.")
 
         esp32 = as_dict(home_ref("devices/esp32_01").get())
         live_devices = as_dict(home_ref("devices").get())
@@ -1021,5 +987,4 @@ def delete_schedule(schedule_id: str):
 
 
 if __name__ == "__main__":
-    initialize_firebase()
     app.run(host="0.0.0.0", port=5001)

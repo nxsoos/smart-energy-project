@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import firebase_admin
+import jwt
 import requests
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from firebase_admin import auth, credentials, db, messaging
+from jwt import PyJWKClient
 from pydantic import BaseModel, Field
 
 from occupancy_utils import DEFAULT_OCCUPANCY_SETTINGS
@@ -34,6 +34,9 @@ from home_assistant_controller import (
     is_home_assistant_configured,
 )
 from aws_cloud_store import (
+    app_get_path,
+    app_set_path,
+    app_update_path,
     create_remote_command,
     create_iot_websocket_config,
     find_remote_command,
@@ -45,6 +48,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
 load_dotenv()
 
 SERVICE_NAME = "smart_energy_api"
+STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "aws").strip().lower()
 BAHRAIN_TZ = ZoneInfo(TIMEZONE)
 DEFAULT_HOME_ID = "home_001"
 HOME_MEMBER_LIMIT = int(os.environ.get("HOME_MEMBER_LIMIT", "3"))
@@ -74,6 +78,19 @@ SMOKE_CLEAR_DELAY_MS = 15 * 1000
 VALID_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 PY_WEEKDAY_TO_DAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+AWS_REGION = os.environ.get("AWS_REGION", "eu-west-1")
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
+COGNITO_APP_CLIENT_ID = os.environ.get("COGNITO_APP_CLIENT_ID", "")
+COGNITO_ISSUER = (
+    f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+    if COGNITO_USER_POOL_ID
+    else ""
+)
+COGNITO_JWKS_CLIENT = (
+    PyJWKClient(f"{COGNITO_ISSUER}/.well-known/jwks.json")
+    if COGNITO_ISSUER
+    else None
+)
 
 DEFAULT_DEVICE_NAMES = {
     "esp32_01": "Room Sensor",
@@ -541,59 +558,43 @@ def iso_from_ms(timestamp_ms: Any) -> str | None:
     return ms_to_iso(timestamp_ms)
 
 
-def initialize_firebase() -> None:
-    """Initialize Firebase Admin using a service account file or ADC."""
-    if firebase_admin._apps:
-        return
-
-    database_url = os.environ.get("FIREBASE_DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("FIREBASE_DATABASE_URL environment variable is required.")
-
-    service_account_path = os.environ.get("SERVICE_ACCOUNT_PATH") or os.environ.get(
-        "GOOGLE_APPLICATION_CREDENTIALS"
-    )
-
-    if service_account_path:
-        cred = credentials.Certificate(service_account_path)
-        firebase_admin.initialize_app(cred, {"databaseURL": database_url})
-    else:
-        firebase_admin.initialize_app(options={"databaseURL": database_url})
+def initialize_storage() -> None:
+    if STORAGE_BACKEND != "aws":
+        raise RuntimeError("Only AWS storage is supported. Set STORAGE_BACKEND=aws.")
 
 
 @app.on_event("startup")
 def startup() -> None:
-    initialize_firebase()
+    initialize_storage()
     ensure_matter_devices(DEFAULT_HOME_ID)
     start_home_assistant_sync_thread(DEFAULT_HOME_ID)
 
 
 def safe_get(path: str, default: Any = None) -> Any:
-    """Read Firebase safely so one missing/broken path does not break the UI."""
+    """Read app storage safely so one missing path does not break the UI."""
     try:
-        value = db.reference(path).get()
-        return default if value is None else value
+        return app_get_path(path, default)
     except Exception:
         return default
 
 
 def safe_set(path: str, value: Any) -> None:
     try:
-        db.reference(path).set(value)
+        app_set_path(path, value)
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to write Firebase path {path}: {error}",
+            detail=f"Failed to write DynamoDB path {path}: {error}",
         ) from error
 
 
 def safe_update(path: str, value: dict[str, Any]) -> None:
     try:
-        db.reference(path).update(value)
+        app_update_path(path, value)
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to update Firebase path {path}: {error}",
+            detail=f"Failed to update DynamoDB path {path}: {error}",
         ) from error
 
 
@@ -844,19 +845,75 @@ def home_exists(home_id: str) -> bool:
     return safe_get(f"/homes/{home_id}") is not None
 
 
+def verify_cognito_id_token(token: str) -> dict[str, Any]:
+    if not COGNITO_JWKS_CLIENT or not COGNITO_APP_CLIENT_ID or not COGNITO_ISSUER:
+        raise ValueError("Cognito authentication is not configured.")
+    signing_key = COGNITO_JWKS_CLIENT.get_signing_key_from_jwt(token)
+    decoded = jwt.decode(
+        token,
+        signing_key.key,
+        algorithms=["RS256"],
+        audience=COGNITO_APP_CLIENT_ID,
+        issuer=COGNITO_ISSUER,
+    )
+    if decoded.get("token_use") != "id":
+        raise ValueError("Cognito token is not an ID token.")
+    return decoded
+
+
+def ensure_user_profile(uid: str, email: str, display_name: str) -> dict[str, Any]:
+    profile = as_dict(safe_get(f"/users/{uid}", {}))
+    timestamp_ms = now_ms()
+    timestamp_iso = iso_from_ms(timestamp_ms)
+    platform_role = platform_role_for_email(email)
+    if profile:
+        updates: dict[str, Any] = {
+            "email": profile.get("email") or email,
+            "display_name": profile.get("display_name") or display_name or email or uid,
+            "platform_role": platform_role,
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": timestamp_iso,
+        }
+        safe_update(f"/users/{uid}", updates)
+        return {**profile, **updates}
+    profile = {
+        "uid": uid,
+        "email": email,
+        "display_name": display_name or email or uid,
+        "platform_role": platform_role,
+        "default_home_id": None,
+        "homes": {},
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": timestamp_iso,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": timestamp_iso,
+    }
+    safe_set(f"/users/{uid}", profile)
+    return profile
+
+
+def find_user_profile_by_email(email: str) -> dict[str, Any]:
+    normalized = email.strip().lower()
+    for uid, raw_profile in as_dict(safe_get("/users", {})).items():
+        profile = as_dict(raw_profile)
+        if str(profile.get("email") or "").strip().lower() == normalized:
+            return {"uid": str(profile.get("uid") or uid), **profile}
+    return {}
+
+
 def authenticate_user_token(token: str) -> AuthContext:
     try:
-        decoded = auth.verify_id_token(token)
+        decoded = verify_cognito_id_token(token)
     except Exception as error:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.") from error
+        raise HTTPException(status_code=401, detail="Invalid Cognito ID token.") from error
 
-    uid = str(decoded.get("uid") or "")
+    uid = str(decoded.get("uid") or decoded.get("sub") or "")
     if not uid:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.")
-    profile = as_dict(safe_get(f"/users/{uid}", {}))
-    if not profile:
-        raise HTTPException(status_code=403, detail="User profile does not exist.")
-    email = str(decoded.get("email") or profile.get("email") or "")
+        raise HTTPException(status_code=401, detail="Invalid user ID token.")
+    email = str(decoded.get("email") or "")
+    display_name = str(decoded.get("name") or email or uid)
+    profile = ensure_user_profile(uid, email, display_name)
+    email = str(email or profile.get("email") or "")
     platform_role = platform_role_for_email(email)
     if profile.get("platform_role") != platform_role:
         safe_update(f"/users/{uid}", {"platform_role": platform_role, "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
@@ -1089,14 +1146,14 @@ def complete_signup_profile(
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization bearer token.")
     try:
-        decoded = auth.verify_id_token(token)
+        decoded = verify_cognito_id_token(token)
     except Exception as error:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.") from error
+        raise HTTPException(status_code=401, detail="Invalid Cognito ID token.") from error
 
-    uid = str(decoded.get("uid") or "")
+    uid = str(decoded.get("uid") or decoded.get("sub") or "")
     email = str(decoded.get("email") or "")
     if not uid:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.")
+        raise HTTPException(status_code=401, detail="Invalid user ID token.")
     display_name = request.display_name.strip() or email or uid
     existing_profile = as_dict(safe_get(f"/users/{uid}", {}))
     requested_home_id = (request.home_id or "").strip()
@@ -1160,7 +1217,11 @@ def object_to_list(value: Any) -> list[dict[str, Any]]:
 def get_me(actor: AuthContext = Depends(require_authenticated_user)) -> dict[str, Any]:
     profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
     homes = []
-    for home_id, raw_access in as_dict(profile.get("homes")).items():
+    profile_homes = {
+        **as_dict(profile.get("homes")),
+        **as_dict(safe_get(f"/users/{actor.uid}/homes", {})),
+    }
+    for home_id, raw_access in profile_homes.items():
         access = as_dict(raw_access)
         home = as_dict(safe_get(f"/homes/{home_id}", {}))
         role = validate_role(str(access.get("role", "viewer")))
@@ -1620,36 +1681,8 @@ def create_notification_record(home_id: str, title: str, body: str) -> dict[str,
 
 
 def send_push_notifications(home_id: str, notification_id: str, title: str, body: str) -> None:
-    tokens = [
-        as_dict(item)
-        for item in object_to_list(safe_get(f"/homes/{home_id}/notification_tokens", {}))
-    ]
-    active_tokens = [item.get("token") for item in tokens if item.get("active") is True and item.get("token")]
-    if not active_tokens:
-        return
-    delivered = False
-    for token in active_tokens:
-        try:
-            messaging.send(
-                messaging.Message(
-                    token=str(token),
-                    notification=messaging.Notification(title=title, body=body),
-                    data={
-                        "home_id": home_id,
-                        "notification_id": notification_id,
-                        "alert_type": "smoke_detected",
-                        "severity": "critical",
-                    },
-                )
-            )
-            delivered = True
-        except Exception:
-            continue
-    if delivered:
-        safe_update(
-            f"/homes/{home_id}/notifications/{notification_id}",
-            {"delivered": True, "delivered_at_ms": now_ms(), "delivered_at_iso": iso_from_ms(now_ms())},
-        )
+    # Mobile push delivery is intentionally disabled until AWS SNS/Pinpoint is wired.
+    return
 
 
 def default_settings_record(updated_by: str = "system_default") -> dict[str, Any]:
@@ -3359,9 +3392,10 @@ def add_member(
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email is required.")
 
-    try:
-        user = auth.get_user_by_email(email)
-    except Exception:
+    profile = find_user_profile_by_email(email)
+    user_uid = str(profile.get("uid") or "")
+    user_display_name = str(profile.get("display_name") or email)
+    if not user_uid:
         timestamp_ms = now_ms()
         invitation_id = re.sub(r"[^A-Za-z0-9_-]", "_", email)
         safe_set(
@@ -3383,9 +3417,9 @@ def add_member(
             "message": "User must sign up first. Invitation record created.",
         }
 
-    uid = user.uid
+    uid = user_uid
     profile = as_dict(safe_get(f"/users/{uid}", {}))
-    display_name = str(profile.get("display_name") or user.display_name or email)
+    display_name = str(profile.get("display_name") or user_display_name or email)
     record = member_record(uid, email, display_name, role)
     safe_set(f"/homes/{home_id}/members/{uid}", record)
     safe_update(
@@ -3427,8 +3461,13 @@ def update_member_role(
         "updated_at_iso": iso_from_ms(timestamp_ms),
     }
     safe_update(f"/homes/{home_id}/members/{uid}", update)
+    user_profile = as_dict(safe_get(f"/users/{uid}", {}))
+    user_homes = {**as_dict(user_profile.get("homes")), home_id: {"role": role, **permissions}}
     safe_update(f"/users/{uid}/homes/{home_id}", {"role": role, **permissions})
-    safe_update(f"/users/{uid}", {"updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+    safe_update(
+        f"/users/{uid}",
+        {"homes": user_homes, "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)},
+    )
     audit_log(home_id, actor, "member_role_changed", "member", uid, {"role": role})
     return {"success": True, "home_id": home_id, "uid": uid, "role": role, "permissions": permissions}
 
@@ -3446,7 +3485,10 @@ def remove_member(
         raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
     safe_set(f"/homes/{home_id}/members/{uid}", None)
     safe_set(f"/users/{uid}/homes/{home_id}", None)
-    safe_update(f"/users/{uid}", {"updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
+    user_profile = as_dict(safe_get(f"/users/{uid}", {}))
+    user_homes = as_dict(user_profile.get("homes"))
+    user_homes.pop(home_id, None)
+    safe_update(f"/users/{uid}", {"homes": user_homes, "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
     audit_log(home_id, actor, "member_removed", "member", uid)
     return {"success": True, "home_id": home_id, "uid": uid}
 

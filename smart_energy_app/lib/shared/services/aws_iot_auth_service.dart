@@ -184,7 +184,7 @@ class AuthService {
     required String name,
     required String email,
     required String password,
-    String homeId = NetworkConfig.firebaseHomeId,
+    String homeId = NetworkConfig.defaultHomeId,
   }) async {
     final normalizedEmail = email.trim().toLowerCase();
     final result = await _pool.signUp(
@@ -249,7 +249,7 @@ class AuthService {
   }
 
   Future<UserPermissions> loadPermissions({
-    String homeId = NetworkConfig.firebaseHomeId,
+    String homeId = NetworkConfig.defaultHomeId,
   }) async {
     final session = await _validSession();
     if (_currentUser == null || session == null) {
@@ -274,6 +274,10 @@ class AuthService {
       throw StateError('User is not signed in.');
     }
 
+    if (!NetworkConfig.useLocalPiApi) {
+      return _loadCurrentUserProfileFromApi(session, user);
+    }
+
     final permissions = await loadPermissions();
     final groups = _groupsFromSession(session);
     final platformRole = _containsGroup(groups, NetworkConfig.cognitoAdminGroup)
@@ -284,15 +288,68 @@ class AuthService {
       email: user.email,
       displayName: user.displayName ?? user.email,
       platformRole: platformRole,
-      defaultHomeId: NetworkConfig.firebaseHomeId,
+      defaultHomeId: NetworkConfig.defaultHomeId,
       homes: [
         UserHomeAccess(
-          homeId: NetworkConfig.firebaseHomeId,
+          homeId: NetworkConfig.defaultHomeId,
           name: 'KahrabaIQ Home',
           role: permissions.role,
           permissions: permissions,
         ),
       ],
+    );
+  }
+
+  Future<CurrentUserProfile> _loadCurrentUserProfileFromApi(
+    CognitoUserSession session,
+    AppUser user,
+  ) async {
+    final token = session.getIdToken().getJwtToken();
+    if (token == null || token.isEmpty) {
+      throw StateError('Cognito did not return an ID token.');
+    }
+    final dio = Dio(
+      BaseOptions(
+        baseUrl: NetworkConfig.apiBaseUrl,
+        connectTimeout: Duration(seconds: NetworkConfig.piApiTimeoutSeconds),
+        receiveTimeout: Duration(seconds: NetworkConfig.piApiTimeoutSeconds),
+        headers: {'Authorization': 'Bearer $token'},
+      ),
+    );
+    final response = await dio.get('/api/me');
+    final data = _asMap(response.data);
+    final homes = _asList(data['homes'])
+        .map((item) {
+          final home = _asMap(item);
+          final role = _normalizeRole(
+            _asString(home['role'], fallback: 'viewer'),
+          );
+          final permissions = UserPermissions.fromHomeMap({
+            'role': role,
+            ..._asMap(home['permissions']),
+          });
+          return UserHomeAccess(
+            homeId: _asString(home['home_id']),
+            name: _asString(home['name'], fallback: 'KahrabaIQ Home'),
+            role: role,
+            permissions: permissions,
+            piId: _nullableString(home['pi_id']),
+            status: _asString(home['status'], fallback: 'active'),
+          );
+        })
+        .where((home) => home.homeId.isNotEmpty)
+        .toList();
+    final platformRole = _asString(data['platform_role'], fallback: 'user');
+    return CurrentUserProfile(
+      uid: _asString(data['uid'], fallback: user.uid),
+      email: _asString(data['email'], fallback: user.email),
+      displayName: _asString(
+        data['display_name'],
+        fallback: user.displayName ?? user.email,
+      ),
+      platformRole: platformRole,
+      defaultHomeId: _nullableString(data['default_home_id']),
+      homes: homes,
     );
   }
 
@@ -305,7 +362,7 @@ class AuthService {
         'values with --dart-define.',
       );
     }
-    if (homeId != NetworkConfig.firebaseHomeId) {
+    if (homeId != NetworkConfig.defaultHomeId) {
       throw ArgumentError.value(homeId, 'homeId', 'Unsupported home ID');
     }
 
@@ -584,6 +641,31 @@ class AuthService {
 
   bool _containsGroup(Set<String> groups, String expected) {
     return groups.any((group) => group.toLowerCase() == expected.toLowerCase());
+  }
+
+  Map<String, dynamic> _asMap(dynamic value) {
+    return value is Map
+        ? value.map((key, val) => MapEntry(key.toString(), val))
+        : <String, dynamic>{};
+  }
+
+  List<dynamic> _asList(dynamic value) {
+    return value is List ? value : const <dynamic>[];
+  }
+
+  String _asString(dynamic value, {String fallback = ''}) {
+    final text = value?.toString() ?? '';
+    return text.isEmpty ? fallback : text;
+  }
+
+  String? _nullableString(dynamic value) {
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? null : text;
+  }
+
+  String _normalizeRole(String role) {
+    final normalized = role.trim().toLowerCase();
+    return normalized == 'admin' ? 'home_admin' : normalized;
   }
 
   String _buildAwsIotWebSocketUrl(CognitoCredentials credentials) {
