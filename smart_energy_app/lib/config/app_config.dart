@@ -51,6 +51,11 @@ class AppConfig {
     defaultValue: 'homes/home_001/live/state',
   );
 
+  static const String awsDynamoDbSummariesTable = String.fromEnvironment(
+    'AWS_DYNAMODB_SUMMARIES_TABLE',
+    defaultValue: 'SmartEnergySummaries',
+  );
+
   static const String cognitoAdminGroup = String.fromEnvironment(
     'COGNITO_ADMIN_GROUP',
     defaultValue: 'SmartEnergyAdmins',

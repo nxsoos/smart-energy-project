@@ -46,6 +46,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const int _alertDedupCooldownMs = 5 * 60 * 1000;
   static const int _historicalAlertMaxAgeMs = 10 * 60 * 1000;
   static const int _sensorFeedStaleThresholdMs = 2 * 60 * 1000;
+  static const int _deviceCommandPendingTimeoutMs = 45 * 1000;
 
   final FirebaseRealtimeService _firebaseRealtimeService =
       FirebaseRealtimeService();
@@ -86,6 +87,8 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<String> _seenAlertIds = <String>{};
   final Map<String, int> _lastShownAlertBySignature = <String, int>{};
   final Set<String> _pendingDeviceCommands = <String>{};
+  final Map<String, bool> _pendingDeviceTargets = <String, bool>{};
+  final Map<String, int> _pendingDeviceStartedAtMs = <String, int>{};
   final Map<String, String> _deviceCommandErrors = <String, String>{};
   final Map<String, StreamSubscription<DeviceCommandState>>
   _commandStatusSubscriptions =
@@ -93,9 +96,10 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<String, StreamSubscription<Device>> _deviceSubscriptions =
       <String, StreamSubscription<Device>>{};
   StreamSubscription<Alert>? _alertsSubscription;
-  StreamSubscription<SensorData>? _liveSensorSubscription;
+  StreamSubscription<DashboardData>? _liveSensorSubscription;
   Timer? _sensorFreshnessTimer;
   Timer? _dashboardRefreshTimer;
+  Timer? _liveReconnectTimer;
   late int _alertsListenerStartedAtMs;
   double _currentTariff = ElectricityPricing.costPerKWh;
   bool _isLoading = false;
@@ -136,10 +140,11 @@ class _HomeScreenState extends State<HomeScreen> {
       ? 'Local Pi API data'
       : 'Live backend data';
 
-  bool get _canUseRemoteLiveSensors =>
-      !_isDemoHome && _remoteLiveOnly;
+  bool get _canUseRemoteLiveSensors => !_isDemoHome && _remoteLiveOnly;
   bool get _remoteLiveOnly =>
-      !_isDemoHome && NetworkConfig.remoteLiveOnly && NetworkConfig.useAwsIotLive;
+      !_isDemoHome &&
+      NetworkConfig.remoteLiveOnly &&
+      NetworkConfig.useAwsIotLive;
 
   @override
   void initState() {
@@ -151,6 +156,7 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
+      _expirePendingDeviceCommands();
       setState(() {});
       _showEmergencyPopupIfNeeded();
     });
@@ -184,6 +190,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _activeRequestToken?.cancel('Screen disposed');
+    _liveReconnectTimer?.cancel();
     _liveSensorSubscription?.cancel();
     _alertsSubscription?.cancel();
     for (final subscription in _commandStatusSubscriptions.values) {
@@ -198,6 +205,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _startLiveSensorListener() {
+    _liveReconnectTimer?.cancel();
     _liveSensorSubscription?.cancel();
     final canUseAwsIotLive = _remoteLiveOnly;
     if (canUseAwsIotLive) {
@@ -213,16 +221,31 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     _liveSensorSubscription = _firebaseRealtimeService
-        .watchLiveSensorData(homeId: _selectedHomeId)
+        .watchLiveDashboardData(homeId: _selectedHomeId)
         .listen(
-          (sensorData) {
+          (dashboardData) {
             if (!mounted || _isDemoHome) {
               return;
             }
 
             setState(() {
-              _updateSmokeClearTimer(sensorData);
-              _sensorData = sensorData;
+              final mergedDevices = _sortDevices(
+                _mergeRealtimeDevices(dashboardData.devices),
+              );
+              _clearCompletedPendingCommands(mergedDevices);
+              _currentReading = dashboardData.reading;
+              _updateSmokeClearTimer(dashboardData.sensors);
+              _sensorData = dashboardData.sensors;
+              _devices = mergedDevices;
+              _alerts
+                ..clear()
+                ..addAll(dashboardData.alerts);
+              _controlMode = dashboardData.control;
+              _safety = dashboardData.safety;
+              _deviceControlEnabled =
+                  !_isDemoHome &&
+                  dashboardData.deviceControlEnabled &&
+                  _permissions.canControlDevices;
               _hasLiveData = true;
               _liveSensorError = null;
               _liveSensorStatus = 'Receiving AWS IoT live messages';
@@ -233,15 +256,36 @@ class _HomeScreenState extends State<HomeScreen> {
             if (!mounted) {
               return;
             }
+            final message = error.toString().replaceFirst('Exception: ', '');
+            if (_hasLiveData && message.toLowerCase().contains('closed')) {
+              setState(() {
+                _liveSensorError = null;
+                _liveSensorStatus = 'Reconnecting to AWS IoT live topic...';
+              });
+              _scheduleLiveReconnect();
+              return;
+            }
             setState(() {
-              _liveSensorError = error.toString().replaceFirst(
-                'Exception: ',
-                '',
-              );
-              _liveSensorStatus = 'AWS IoT live connection has no data';
+              _liveSensorError = message;
+              _liveSensorStatus = _hasLiveData
+                  ? 'Receiving AWS IoT live messages'
+                  : 'AWS IoT live connection has no data';
             });
+            _scheduleLiveReconnect();
           },
         );
+  }
+
+  void _scheduleLiveReconnect() {
+    if (!_remoteLiveOnly || !mounted) {
+      return;
+    }
+    _liveReconnectTimer?.cancel();
+    _liveReconnectTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && _remoteLiveOnly) {
+        _startLiveSensorListener();
+      }
+    });
   }
 
   void _startAlertsListener() {
@@ -435,6 +479,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _sendDeviceCommand(String deviceId, String action) async {
     setState(() {
       _pendingDeviceCommands.add(deviceId);
+      _pendingDeviceTargets[deviceId] = action == 'turn_on';
+      _pendingDeviceStartedAtMs[deviceId] =
+          DateTime.now().millisecondsSinceEpoch;
       _deviceCommandErrors.remove(deviceId);
     });
 
@@ -454,6 +501,8 @@ class _HomeScreenState extends State<HomeScreen> {
             _pendingDeviceCommands.add(deviceId);
           } else {
             _pendingDeviceCommands.remove(deviceId);
+            _pendingDeviceTargets.remove(deviceId);
+            _pendingDeviceStartedAtMs.remove(deviceId);
           }
         });
         if (result.message.trim().isNotEmpty &&
@@ -468,6 +517,19 @@ class _HomeScreenState extends State<HomeScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(result.message)));
+
+      if (result.success &&
+          !{'pending', 'processing', 'sent', 'command_already_in_progress'}
+              .contains(result.status.toLowerCase())) {
+        setState(() {
+          _pendingDeviceCommands.remove(deviceId);
+          _pendingDeviceTargets.remove(deviceId);
+          _pendingDeviceStartedAtMs.remove(deviceId);
+          _deviceCommandErrors.remove(deviceId);
+          _applyOptimisticDeviceState(deviceId, action == 'turn_on');
+        });
+        await _refreshData(showErrorSnackBar: false, updateLoading: false);
+      }
     } catch (error) {
       if (!mounted) {
         return;
@@ -475,6 +537,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _pendingDeviceCommands.remove(deviceId);
+        _pendingDeviceTargets.remove(deviceId);
+        _pendingDeviceStartedAtMs.remove(deviceId);
         _deviceCommandErrors[deviceId] = _friendlyActionError(
           error,
           'Could not send command. Please try again.',
@@ -531,6 +595,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 setState(() {
                   _pendingDeviceCommands.remove(deviceId);
+                  _pendingDeviceTargets.remove(deviceId);
+                  _pendingDeviceStartedAtMs.remove(deviceId);
                   _deviceCommandErrors[deviceId] =
                       'Command status listener failed.';
                 });
@@ -555,6 +621,10 @@ class _HomeScreenState extends State<HomeScreen> {
     if (state.isPending) {
       setState(() {
         _pendingDeviceCommands.add(deviceId);
+        _pendingDeviceStartedAtMs.putIfAbsent(
+          deviceId,
+          () => DateTime.now().millisecondsSinceEpoch,
+        );
         _deviceCommandErrors.remove(deviceId);
       });
       return;
@@ -568,6 +638,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (state.isDone) {
       setState(() {
         _pendingDeviceCommands.remove(deviceId);
+        _pendingDeviceTargets.remove(deviceId);
+        _pendingDeviceStartedAtMs.remove(deviceId);
         _deviceCommandErrors.remove(deviceId);
       });
       _refreshData(showErrorSnackBar: false, updateLoading: false);
@@ -581,6 +653,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _pendingDeviceCommands.remove(deviceId);
+        _pendingDeviceTargets.remove(deviceId);
+        _pendingDeviceStartedAtMs.remove(deviceId);
         _deviceCommandErrors[deviceId] = error;
       });
 
@@ -604,6 +678,8 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() {
           if (!updatedDevice.online || !updatedDevice.localOnline) {
             _pendingDeviceCommands.remove(updatedDevice.id);
+            _pendingDeviceTargets.remove(updatedDevice.id);
+            _pendingDeviceStartedAtMs.remove(updatedDevice.id);
             _deviceCommandErrors.remove(updatedDevice.id);
           }
           _devices[index] = _devices[index].copyWith(
@@ -625,6 +701,8 @@ class _HomeScreenState extends State<HomeScreen> {
             controlMethod: updatedDevice.controlMethod,
             lastCommandMessage: updatedDevice.lastCommandMessage,
           );
+          _clearCompletedPendingCommands(_devices);
+          _devices = _sortDevices(_devices);
         });
       }
       return;
@@ -637,6 +715,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _devices[index] = updatedDevice.copyWith(
         type: _stableDeviceType(updatedDevice.id, _devices[index].type),
       );
+      _clearCompletedPendingCommands(_devices);
+      _devices = _sortDevices(_devices);
     });
   }
 
@@ -712,9 +792,12 @@ class _HomeScreenState extends State<HomeScreen> {
           ? demoScenarios.first.id
           : dashboardData.scenarioId;
 
-      final mergedDevices = _mergeRealtimeDevices(dashboardData.devices);
+      final mergedDevices = _sortDevices(
+        _mergeRealtimeDevices(dashboardData.devices),
+      );
 
       setState(() {
+        _clearCompletedPendingCommands(mergedDevices);
         _currentReading = dashboardData.reading;
         _updateSmokeClearTimer(dashboardData.sensors);
         if (_isDemoHome || _usesLocalPiApi || _isSensorFeedStale()) {
@@ -735,6 +818,18 @@ class _HomeScreenState extends State<HomeScreen> {
         _pendingDeviceCommands
           ..clear()
           ..addAll(dashboardData.pendingDeviceCommands);
+        for (final deviceId in dashboardData.pendingDeviceCommands) {
+          _pendingDeviceStartedAtMs.putIfAbsent(
+            deviceId,
+            () => DateTime.now().millisecondsSinceEpoch,
+          );
+        }
+        _pendingDeviceTargets.removeWhere(
+          (deviceId, _) => !_pendingDeviceCommands.contains(deviceId),
+        );
+        _pendingDeviceStartedAtMs.removeWhere(
+          (deviceId, _) => !_pendingDeviceCommands.contains(deviceId),
+        );
         _deviceCommandErrors
           ..clear()
           ..addAll(dashboardData.deviceCommandErrors);
@@ -801,31 +896,105 @@ class _HomeScreenState extends State<HomeScreen> {
 
   List<Device> _mergeRealtimeDevices(List<Device> refreshedDevices) {
     if (_isDemoHome || _devices.isEmpty || _deviceSubscriptions.isEmpty) {
-      return refreshedDevices;
+      return _sortDevices(refreshedDevices);
     }
 
     final currentById = {for (final device in _devices) device.id: device};
 
-    return refreshedDevices.map((device) {
-      final current = currentById[device.id];
-      if (current == null) {
-        return device;
+    return _sortDevices(
+      refreshedDevices.map((device) {
+        final current = currentById[device.id];
+        if (current == null) {
+          return device;
+        }
+        return device.copyWith(
+          type: _stableDeviceType(device.id, device.type),
+          isOn: current.isOn,
+          currentPower: current.currentPower,
+          online: current.online,
+          localOnline: current.localOnline,
+          cloudOnline: current.cloudOnline,
+          controllable: current.controllable,
+          commandInProgress: current.commandInProgress,
+          energySupported: current.energySupported,
+          controlMethod: current.controlMethod,
+          pendingTargetState: current.pendingTargetState,
+          lastCommandMessage: current.lastCommandMessage,
+        );
+      }).toList(),
+    );
+  }
+
+  List<Device> _sortDevices(List<Device> devices) {
+    const order = {
+      'breaker_01': 0,
+      'breaker_02': 1,
+      'matter_socket_switch': 2,
+      'matter_ac_switch': 3,
+    };
+    final sorted = [...devices];
+    sorted.sort((a, b) {
+      final aOrder = order[a.id] ?? 100;
+      final bOrder = order[b.id] ?? 100;
+      if (aOrder != bOrder) {
+        return aOrder.compareTo(bOrder);
       }
-      return device.copyWith(
-        type: _stableDeviceType(device.id, device.type),
-        isOn: current.isOn,
-        currentPower: current.currentPower,
-        online: current.online,
-        localOnline: current.localOnline,
-        cloudOnline: current.cloudOnline,
-        controllable: current.controllable,
-        commandInProgress: current.commandInProgress,
-        energySupported: current.energySupported,
-        controlMethod: current.controlMethod,
-        pendingTargetState: current.pendingTargetState,
-        lastCommandMessage: current.lastCommandMessage,
-      );
-    }).toList();
+      return a.name.compareTo(b.name);
+    });
+    return sorted;
+  }
+
+  void _clearCompletedPendingCommands(List<Device> devices) {
+    for (final device in devices) {
+      final target = _pendingDeviceTargets[device.id];
+      if (target == null) {
+        continue;
+      }
+      if (device.online && device.localOnline && device.isOn == target) {
+        _pendingDeviceCommands.remove(device.id);
+        _pendingDeviceTargets.remove(device.id);
+        _pendingDeviceStartedAtMs.remove(device.id);
+        _deviceCommandErrors.remove(device.id);
+      }
+    }
+  }
+
+  void _expirePendingDeviceCommands() {
+    if (_pendingDeviceStartedAtMs.isEmpty || !mounted) {
+      return;
+    }
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final expiredDeviceIds = _pendingDeviceStartedAtMs.entries
+        .where((entry) => nowMs - entry.value > _deviceCommandPendingTimeoutMs)
+        .map((entry) => entry.key)
+        .toList();
+    if (expiredDeviceIds.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      for (final deviceId in expiredDeviceIds) {
+        _pendingDeviceCommands.remove(deviceId);
+        _pendingDeviceTargets.remove(deviceId);
+        _pendingDeviceStartedAtMs.remove(deviceId);
+        _deviceCommandErrors[deviceId] =
+            'Command is taking too long. Pull to refresh.';
+      }
+    });
+  }
+
+  void _applyOptimisticDeviceState(String deviceId, bool isOn) {
+    final index = _devices.indexWhere((device) => device.id == deviceId);
+    if (index == -1) {
+      return;
+    }
+    _devices[index] = _devices[index].copyWith(
+      isOn: isOn,
+      commandInProgress: false,
+      pendingTargetState: null,
+    );
+    _devices = _sortDevices(_devices);
   }
 
   DeviceType _stableDeviceType(String deviceId, DeviceType fallback) {
@@ -886,6 +1055,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _alerts.clear();
       _seenAlertIds.clear();
       _pendingDeviceCommands.clear();
+      _pendingDeviceTargets.clear();
+      _pendingDeviceStartedAtMs.clear();
       _deviceCommandErrors.clear();
       _commandStatusSubscriptions.clear();
       _deviceSubscriptions.clear();
@@ -913,6 +1084,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _liveSensorError = null;
       _liveSensorStatus = 'Not connected';
       _pendingDeviceCommands.clear();
+      _pendingDeviceTargets.clear();
+      _pendingDeviceStartedAtMs.clear();
       _deviceCommandErrors.clear();
       _hasLiveData = false;
       _devices = const [];
@@ -1711,6 +1884,14 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: RefreshIndicator(
         onRefresh: () async {
+          if (_remoteLiveOnly) {
+            setState(() {
+              _liveSensorError = null;
+              _liveSensorStatus = 'Reconnecting to AWS IoT live topic...';
+            });
+            _startLiveSensorListener();
+            return;
+          }
           await _refreshData();
         },
         child: SingleChildScrollView(
@@ -1776,7 +1957,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
               if (_remoteLiveOnly) ...[
                 Card(
-                  color: _hasLiveData ? Colors.green.shade50 : Colors.blue.shade50,
+                  color: _hasLiveData
+                      ? Colors.green.shade50
+                      : Colors.blue.shade50,
                   child: Padding(
                     padding: const EdgeInsets.all(12),
                     child: Row(
@@ -1785,8 +1968,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           _hasLiveData
                               ? Icons.sensors_outlined
                               : Icons.sync_outlined,
-                          color:
-                              _hasLiveData ? AppColors.primary : Colors.blue,
+                          color: _hasLiveData ? AppColors.primary : Colors.blue,
                         ),
                         const SizedBox(width: 8),
                         Expanded(
@@ -2308,6 +2490,7 @@ class _HomeScreenState extends State<HomeScreen> {
               else
                 ..._devices.map(
                   (device) => Padding(
+                    key: ValueKey('device-card-${device.id}'),
                     padding: const EdgeInsets.only(bottom: 12.0),
                     child: DeviceCard(
                       device: device,

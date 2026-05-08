@@ -331,14 +331,33 @@ class FirebaseRealtimeService {
   }
 
   Stream<SensorData> watchLiveSensorData({required String homeId}) {
-    if (!NetworkConfig.useAwsIotLive || homeId != NetworkConfig.firebaseHomeId) {
+    if (!NetworkConfig.useAwsIotLive ||
+        homeId != NetworkConfig.firebaseHomeId) {
       return const Stream<SensorData>.empty();
     }
-    return _watchAwsIotLiveSensors(homeId: homeId);
+    return _watchAwsIotLivePayloads(homeId: homeId).map((data) {
+      final room = _asMap(data['room']);
+      if (room.isEmpty) {
+        throw const FormatException('AWS IoT live message has no room data.');
+      }
+      return _parseAwsIotLiveSensor(room);
+    });
   }
 
-  Stream<SensorData> _watchAwsIotLiveSensors({required String homeId}) {
-    final controller = StreamController<SensorData>();
+  Stream<DashboardData> watchLiveDashboardData({required String homeId}) {
+    if (!NetworkConfig.useAwsIotLive ||
+        homeId != NetworkConfig.firebaseHomeId) {
+      return const Stream<DashboardData>.empty();
+    }
+    return _watchAwsIotLivePayloads(
+      homeId: homeId,
+    ).map((data) => _parseAwsIotLiveDashboard(data, homeId: homeId));
+  }
+
+  Stream<Map<String, dynamic>> _watchAwsIotLivePayloads({
+    required String homeId,
+  }) {
+    final controller = StreamController<Map<String, dynamic>>();
     WebSocket? socket;
     StreamSubscription<dynamic>? subscription;
     Timer? firstMessageTimer;
@@ -346,27 +365,28 @@ class FirebaseRealtimeService {
 
     Future<void> connect() async {
       try {
-        final config = await AuthService().createAwsIotConnectionConfig(
-          homeId: homeId,
-        ).timeout(
-          const Duration(seconds: 25),
-          onTimeout: () => throw TimeoutException(
-            'Timed out while preparing AWS IoT connection config. '
-            'Check Cognito Identity Pool and IoT policy permissions.',
-          ),
-        );
+        final config = await AuthService()
+            .createAwsIotConnectionConfig(homeId: homeId)
+            .timeout(
+              const Duration(seconds: 25),
+              onTimeout: () => throw TimeoutException(
+                'Timed out while preparing AWS IoT connection config. '
+                'Check Cognito Identity Pool and IoT policy permissions.',
+              ),
+            );
 
         final connack = Completer<void>();
-        socket = await WebSocket.connect(
-          config.signedUrl,
-          protocols: const ['mqtt'],
-        ).timeout(
-          const Duration(seconds: 15),
-          onTimeout: () => throw TimeoutException(
-            'Timed out while opening the AWS IoT WebSocket. '
-            'Check the IoT endpoint, client policy, and phone internet.',
-          ),
-        );
+        socket =
+            await WebSocket.connect(
+              config.signedUrl,
+              protocols: const ['mqtt'],
+            ).timeout(
+              const Duration(seconds: 15),
+              onTimeout: () => throw TimeoutException(
+                'Timed out while opening the AWS IoT WebSocket. '
+                'Check the IoT endpoint, client policy, and phone internet.',
+              ),
+            );
 
         subscription = socket!.listen(
           (event) {
@@ -396,10 +416,9 @@ class FirebaseRealtimeService {
                 }
                 final decoded = jsonDecode(publish.payload);
                 final data = _asMap(decoded);
-                final room = _asMap(data['room']);
-                if (room.isNotEmpty && !controller.isClosed) {
+                if (data.isNotEmpty && !controller.isClosed) {
                   firstMessageTimer?.cancel();
-                  controller.add(_parseAwsIotLiveSensor(room));
+                  controller.add(data);
                 }
                 return;
               }
@@ -608,6 +627,151 @@ class FirebaseRealtimeService {
           'policy, and signed WebSocket URL.';
     }
     return text.replaceFirst('Exception: ', '');
+  }
+
+  DashboardData _parseAwsIotLiveDashboard(
+    Map<String, dynamic> data, {
+    required String homeId,
+  }) {
+    final room = _asMap(data['room']);
+    final energy = _asMap(data['energy']);
+    final devicesMap = _asMap(data['devices']);
+    final devices = devicesMap.entries
+        .map((entry) => _parseAwsIotLiveDevice(entry.key, _asMap(entry.value)))
+        .where(
+          (device) =>
+              device.controllable ||
+              device.id.startsWith('breaker_') ||
+              device.id.startsWith('matter_'),
+        )
+        .toList();
+    final totalDevicePower = devices.fold<double>(
+      0,
+      (sum, device) => sum + device.currentPower,
+    );
+    final voltageValues = devices
+        .map((device) => device.voltage)
+        .where((value) => value > 0)
+        .toList();
+    final currentValues = devices
+        .map((device) => device.current)
+        .where((value) => value > 0)
+        .toList();
+    final energyToday = _asDouble(
+      _pick(energy, [
+        'energyToday',
+        'energyTodayKwh',
+        'todayKwh',
+        'today_kwh',
+        'totalEnergyKwh',
+      ]),
+      fallback: devices.fold<double>(
+        0,
+        (sum, device) => sum + device.energyToday,
+      ),
+    );
+
+    return DashboardData(
+      reading: EnergyReading(
+        timestamp: _asDateTime(
+          _pick(data, ['timestampMs', 'timestampIso']) ??
+              _pick(energy, ['timestampMs', 'timestampIso']),
+        ),
+        voltage: _asDouble(
+          _pick(energy, ['voltage', 'voltageV', 'voltage_v']),
+          fallback: voltageValues.isEmpty
+              ? 0
+              : voltageValues.reduce((a, b) => a + b) / voltageValues.length,
+        ),
+        current: _asDouble(
+          _pick(energy, ['current', 'currentA', 'current_a']),
+          fallback: currentValues.isEmpty
+              ? 0
+              : currentValues.reduce((a, b) => a + b) / currentValues.length,
+        ),
+        power: _asDouble(
+          _pick(energy, ['currentPowerW', 'powerW', 'power_w', 'power']),
+          fallback: totalDevicePower,
+        ),
+        energyToday: energyToday,
+        energyTotal: _asDouble(
+          _pick(energy, ['energyTotal', 'totalEnergyKwh', 'energyTotalKwh']),
+          fallback: energyToday,
+        ),
+        costToday: _asDouble(_pick(energy, ['costToday', 'costTodayBhd'])),
+      ),
+      sensors: _parseAwsIotLiveSensor(room),
+      devices: devices,
+      alerts: _asList(data['alerts'])
+          .map((alert) => _alertFromBackend(_asString(alert['id']), alert))
+          .toList(),
+      tariffBhdPerKwh: ElectricityPricing.costPerKWh,
+      control: _parseControl(_asMap(data['control'])),
+      safety: _asMap(data['safety']),
+      deviceControlEnabled: homeId != 'home_test',
+    );
+  }
+
+  Device _parseAwsIotLiveDevice(String deviceId, Map<String, dynamic> data) {
+    final state = _asString(
+      _pick(data, ['state', 'displayState']),
+    ).toLowerCase();
+    final name = _asString(_pick(data, ['name']), fallback: deviceId);
+    final rawType = _asString(_pick(data, ['type']));
+    final online = _asBool(_pick(data, ['online']), fallback: true);
+    final localOnline = _asBool(
+      _pick(data, ['localOnline', 'local_online']),
+      fallback: online,
+    );
+    final isOn =
+        online &&
+        localOnline &&
+        (state == 'on' ||
+            _asBool(_pick(data, ['switch', 'isOn']), fallback: false));
+    return Device(
+      id: _asString(
+        _pick(data, ['deviceId', 'device_id', 'id']),
+        fallback: deviceId,
+      ),
+      name: name,
+      type: _parseApiDeviceType(deviceId, name, rawType),
+      isOn: isOn,
+      currentPower: online
+          ? _asDouble(_pick(data, ['powerW', 'power_w', 'currentPower']))
+          : 0,
+      branch: _asString(
+        _pick(data, ['branch', 'zone']),
+        fallback: _branchFromDeviceId(deviceId),
+      ),
+      online: online,
+      localOnline: localOnline,
+      cloudOnline: _asBool(
+        _pick(data, ['cloudOnline', 'cloud_online']),
+        fallback: true,
+      ),
+      controllable: _asBool(_pick(data, ['controllable']), fallback: true),
+      commandInProgress: _asBool(
+        _pick(data, ['commandInProgress', 'command_in_progress']),
+      ),
+      energySupported: _asBool(
+        _pick(data, ['energySupported', 'energy_supported']),
+        fallback: true,
+      ),
+      voltage: _asDouble(_pick(data, ['voltageV', 'voltage_v', 'voltage'])),
+      current: _asDouble(_pick(data, ['currentA', 'current_a', 'current'])),
+      energyToday: _asDouble(
+        _pick(data, ['energyKwh', 'energy_kwh', 'energyToday', 'today_kwh']),
+      ),
+      controlMethod: _asNullableString(
+        _pick(data, ['controlMethod', 'control_method']),
+      ),
+      pendingTargetState: _asNullableString(
+        _pick(data, ['pendingTargetState', 'pending_target_state']),
+      ),
+      lastCommandMessage: _asNullableString(
+        _pick(data, ['lastCommandMessage', 'last_command_message']),
+      ),
+    );
   }
 
   SensorData _parseAwsIotLiveSensor(Map<String, dynamic> room) {
@@ -880,7 +1044,9 @@ class FirebaseRealtimeService {
       type: _parseApiDeviceType(deviceId, name, rawType),
       isOn: visualIsOn,
       currentPower: online
-          ? _asDouble(_pick(data, ['power_w', 'currentPower', 'power_W']))
+          ? _asDouble(
+              _pick(data, ['power_w', 'currentPower', 'power_W', 'powerW']),
+            )
           : 0.0,
       branch: _asString(
         _pick(data, ['branch', 'zone']),
@@ -895,10 +1061,10 @@ class FirebaseRealtimeService {
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: _asBool(_pick(data, ['command_in_progress'])),
       energySupported: energySupported,
-      voltage: _asDouble(_pick(data, ['voltage_v', 'voltage_V'])),
-      current: _asDouble(_pick(data, ['current_a', 'current_A'])),
+      voltage: _asDouble(_pick(data, ['voltage_v', 'voltage_V', 'voltageV'])),
+      current: _asDouble(_pick(data, ['current_a', 'current_A', 'currentA'])),
       energyToday: _asDouble(
-        _pick(data, ['energy_kwh', 'energy_kWh', 'today_kwh']),
+        _pick(data, ['energy_kwh', 'energy_kWh', 'energyKwh', 'today_kwh']),
       ),
       controlMethod: _asNullableString(
         _pick(data, ['control_method', 'controlMethod']),
@@ -1387,6 +1553,15 @@ class FirebaseRealtimeService {
     }
 
     try {
+      if (NetworkConfig.remoteLiveOnly && NetworkConfig.useAwsIotLive) {
+        return _sendCloudDeviceCommand(
+          deviceId,
+          action,
+          homeId: homeId,
+          emergency: emergency,
+        );
+      }
+
       if (usesLocalPiApi) {
         final response = await _dio.post(
           '/api/command',
@@ -1438,12 +1613,20 @@ class FirebaseRealtimeService {
         throw Exception(message);
       }
 
-      if (deviceId.startsWith('matter_')) {
-        throw Exception('Local controller command requires the backend API.');
+      if (usesLocalPiApi) {
+        if (NetworkConfig.useAwsIotLive) {
+          return _sendCloudDeviceCommand(
+            deviceId,
+            action,
+            homeId: homeId,
+            emergency: emergency,
+          );
+        }
+        throw Exception('Local Pi API command failed.');
       }
 
-      if (usesLocalPiApi) {
-        throw Exception('Local Pi API command failed.');
+      if (deviceId.startsWith('matter_')) {
+        throw Exception('Local controller command requires the backend API.');
       }
 
       throw Exception('Backend API command failed.');
@@ -1456,7 +1639,32 @@ class FirebaseRealtimeService {
     required String homeId,
     bool emergency = false,
   }) async {
-    throw UnsupportedError('Cloud command queue is not enabled.');
+    try {
+      final data = await AuthService().queueAwsRemoteDeviceCommand(
+        homeId: homeId,
+        deviceId: deviceId,
+        command: action,
+        emergency: emergency,
+      );
+      return DeviceCommandResult(
+        success: _asBool(_pick(data, ['success']), fallback: true),
+        noAction: false,
+        status: _asString(_pick(data, ['status']), fallback: 'pending'),
+        message: _asString(
+          _pick(data, ['message']),
+          fallback: 'Command queued for the Raspberry Pi.',
+        ),
+        commandId: _asNullableString(_pick(data, ['command_id', 'commandId'])),
+      );
+    } catch (error) {
+      if (error is DioException && error.response != null) {
+        final body = error.response?.data;
+        throw Exception(
+          'Cloud command queue failed (${error.response?.statusCode}): $body',
+        );
+      }
+      throw Exception('Cloud command queue failed: $error');
+    }
   }
 
   Stream<DeviceCommandState> watchLatestCommandStatus(String deviceId) {
