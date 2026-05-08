@@ -32,3 +32,7 @@ The Pi runs local hardware services only. The touchscreen opens the deployed AWS
 The Pi hosts Home Assistant and the Matter server locally. KahrabaIQ device commands that require local control are queued by AWS and executed by `kahrabaiq-command-runner` on the Pi.
 
 See `pi/docs/home-assistant-matter.md`.
+
+## Tuya Breakers
+
+Tuya breaker credentials belong in `/etc/kahrabaiq/pi.env`, not in committed files. See `pi/docs/tuya-setup.md`.

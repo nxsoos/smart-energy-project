@@ -13,11 +13,8 @@ firebase-debug.*.log
 
 # Environment and secrets
 
-!.env.sample
 serviceAccountKey.json
 **/serviceAccountKey.json
-*firebase-adminsdk*.json
-**/*firebase-adminsdk*.json
 
 *.sqlite3
 *.sqlite3-journal
