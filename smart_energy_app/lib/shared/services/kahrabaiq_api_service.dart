@@ -484,7 +484,7 @@ class KahrabaIqApiService {
             // The stream listener will surface the connection failure.
           }
         });
-        firstMessageTimer = Timer(const Duration(seconds: 15), () {
+        firstMessageTimer = Timer(const Duration(seconds: 35), () {
           if (!controller.isClosed) {
             controller.addError(
               'Connected to AWS IoT, but no live message arrived yet. '
@@ -658,7 +658,8 @@ class KahrabaIqApiService {
               device.id.startsWith('breaker_') ||
               device.id.startsWith('matter_'),
         )
-        .toList();
+        .toList()
+      ..sort(_compareDevices);
     final totalDevicePower = devices.fold<double>(
       0,
       (sum, device) => sum + device.currentPower,
@@ -928,7 +929,8 @@ class KahrabaIqApiService {
               device.id.startsWith('breaker_') ||
               device.id.startsWith('matter_'),
         )
-        .toList();
+        .toList()
+      ..sort(_compareDevices);
 
     final pendingCommands = <String>{};
     for (final entry in devicesMap.entries) {
@@ -2646,6 +2648,30 @@ class KahrabaIqApiService {
       return 'Branch 3';
     }
     return 'Main';
+  }
+
+  int _compareDevices(Device left, Device right) {
+    final leftRank = _deviceSortRank(left.id);
+    final rightRank = _deviceSortRank(right.id);
+    if (leftRank != rightRank) {
+      return leftRank.compareTo(rightRank);
+    }
+    return left.name.toLowerCase().compareTo(right.name.toLowerCase());
+  }
+
+  int _deviceSortRank(String deviceId) {
+    switch (deviceId) {
+      case 'matter_socket_switch':
+        return 10;
+      case 'matter_ac_switch':
+        return 20;
+      case 'breaker_01':
+        return 30;
+      case 'breaker_02':
+        return 40;
+      default:
+        return 100;
+    }
   }
 
   bool _isCommandEnabledDeviceId(String deviceId) {

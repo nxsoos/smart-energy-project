@@ -25,7 +25,10 @@ class DeviceCard extends StatelessWidget {
   final bool isCommandPending;
   final String? commandError;
 
-  bool get _isActive => device.isOn && device.online && device.localOnline;
+  bool get _isActive =>
+      device.isOn &&
+      device.online &&
+      (device.localOnline || (NetworkConfig.useAwsIotLive && device.cloudOnline));
 
   @override
   Widget build(BuildContext context) {
@@ -95,6 +98,17 @@ class DeviceCard extends StatelessWidget {
                     color: ColorTokens.primary,
                   ),
                 ],
+                if (commandError != null && commandError!.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    commandError!,
+                    style: AppTextStyles.caption.copyWith(
+                      color: ColorTokens.danger,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ],
             ),
           ),
@@ -103,11 +117,12 @@ class DeviceCard extends StatelessWidget {
     );
   }
 
-  bool get _canToggle =>
-      !isCommandPending &&
-      device.controllable &&
-      device.online &&
-      device.localOnline;
+  bool get _canToggle {
+    final hasCommandPath = NetworkConfig.useAwsIotLive
+        ? true
+        : device.localOnline || device.cloudOnline;
+    return !isCommandPending && device.controllable && hasCommandPath;
+  }
 
   Color _deviceColor() {
     switch (device.type) {

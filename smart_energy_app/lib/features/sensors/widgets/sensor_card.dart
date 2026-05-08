@@ -14,6 +14,8 @@ class SensorCard extends StatelessWidget {
     required this.unit,
     required this.isHealthy,
     required this.points,
+    this.statusLabel,
+    this.showChart = true,
   });
 
   final IconData icon;
@@ -22,6 +24,8 @@ class SensorCard extends StatelessWidget {
   final String unit;
   final bool isHealthy;
   final List<double> points;
+  final String? statusLabel;
+  final bool showChart;
 
   @override
   Widget build(BuildContext context) {
@@ -40,7 +44,10 @@ class SensorCard extends StatelessWidget {
             children: [
               Icon(icon, color: color),
               const Spacer(),
-              _Badge(text: isHealthy ? 'Normal' : 'Alert', color: color),
+              _Badge(
+                text: statusLabel ?? (isHealthy ? 'Normal' : 'Alert'),
+                color: color,
+              ),
             ],
           ),
           const Spacer(),
@@ -54,8 +61,10 @@ class SensorCard extends StatelessWidget {
               Text(unit, style: AppTextStyles.caption),
             ],
           ),
-          const SizedBox(height: 12),
-          SizedBox(height: 34, child: LineChart(_chartData(color))),
+          if (showChart) ...[
+            const SizedBox(height: 12),
+            SizedBox(height: 34, child: LineChart(_chartData(color))),
+          ],
         ],
       ),
     );

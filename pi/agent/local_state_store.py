@@ -9,7 +9,11 @@ from typing import Any
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get("SMART_ENERGY_LOCAL_DB", BASE_DIR / "smart_energy_local.sqlite3"))
+DB_PATH = Path(
+    os.environ.get("LOCAL_STATE_DB_PATH")
+    or os.environ.get("SMART_ENERGY_LOCAL_DB")
+    or BASE_DIR / "smart_energy_local.sqlite3"
+)
 _LOCK = threading.RLock()
 
 

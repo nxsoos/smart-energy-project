@@ -12,10 +12,14 @@ class DevicesSection extends StatelessWidget {
     super.key,
     required this.devices,
     required this.onToggle,
+    this.pendingDeviceCommands = const {},
+    this.deviceCommandErrors = const {},
   });
 
   final List<Device> devices;
   final void Function(Device device, bool value) onToggle;
+  final Set<String> pendingDeviceCommands;
+  final Map<String, String> deviceCommandErrors;
 
   @override
   Widget build(BuildContext context) {
@@ -53,6 +57,10 @@ class DevicesSection extends StatelessWidget {
                 device: device,
                 onToggle: (value) => onToggle(device, value),
                 onLongPress: () => _showDetails(context, device),
+                isCommandPending:
+                    pendingDeviceCommands.contains(device.id) ||
+                    device.commandInProgress,
+                commandError: deviceCommandErrors[device.id],
               );
             },
           ),

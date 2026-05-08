@@ -7,10 +7,9 @@ import '../../../core/utils/app_routes.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/widgets/alert_banner.dart';
 import '../../../core/widgets/app_state_widgets.dart';
-import '../../../shared/models/alert.dart';
 import '../../../shared/models/device.dart';
-import '../../../shared/models/energy_reading.dart';
-import '../../../shared/models/sensor_data.dart';
+import '../../../shared/services/auth_service.dart';
+import '../../../shared/services/kahrabaiq_api_service.dart';
 import '../../ai_chat/screens/ai_chatbot_screen.dart';
 import '../../pairing/screens/qr_scanner_screen.dart';
 import '../../sensors/screens/sensors_status_screen.dart';
@@ -31,117 +30,162 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  late EnergyReading _reading;
-  late SensorData _sensorData;
-  late List<Device> _devices;
-  late List<Alert> _alerts;
-  Timer? _pulseTimer;
+  final KahrabaIqApiService _api = KahrabaIqApiService();
+  DashboardData? _dashboard;
+  StreamSubscription<DashboardData>? _liveSubscription;
   bool _isLoading = true;
   String? _error;
+  final Set<String> _localPendingCommands = {};
+  final Map<String, String> _localCommandErrors = {};
 
   @override
   void initState() {
     super.initState();
     _loadDashboard();
-    _pulseTimer = Timer.periodic(
-      const Duration(seconds: 6),
-      (_) => _simulateLiveUpdate(),
-    );
   }
 
   @override
   void dispose() {
-    _pulseTimer?.cancel();
+    _liveSubscription?.cancel();
     super.dispose();
   }
 
   Future<void> _loadDashboard() async {
+    await _liveSubscription?.cancel();
     setState(() {
-      _isLoading = true;
+      _isLoading = _dashboard == null;
       _error = null;
     });
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    if (widget.enableRealtimeSync && NetworkConfig.useAwsIotLive) {
+      _liveSubscription = _api
+          .watchLiveDashboardData(homeId: NetworkConfig.defaultHomeId)
+          .listen(_applyDashboardData, onError: _handleLiveError);
+    }
+
+    if (!NetworkConfig.remoteLiveOnly || !NetworkConfig.useAwsIotLive) {
+      try {
+        final dashboard = await _api.fetchDashboardData(
+          homeId: NetworkConfig.defaultHomeId,
+        );
+        _applyDashboardData(dashboard);
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        if (_dashboard == null && !NetworkConfig.useAwsIotLive) {
+          setState(() {
+            _isLoading = false;
+            _error = 'Dashboard connection failed. Pull to retry.';
+          });
+        }
+      }
+    }
+  }
+
+  void _applyDashboardData(DashboardData dashboard) {
     if (!mounted) {
       return;
     }
+    final liveDeviceIds = dashboard.devices.map((device) => device.id).toSet();
     setState(() {
-      _reading = EnergyReading(
-        timestamp: DateTime.now(),
-        voltage: 232.4,
-        current: 8.9,
-        power: 2140,
-        energyToday: 7.8,
-        energyTotal: 1428,
-        costToday: 0.023,
-      );
-      _sensorData = SensorData(
-        timestamp: DateTime.now(),
-        temperature: 23.4,
-        humidity: 46,
-        isOccupied: true,
-        smokeRaw: 120,
-        lightRaw: 670,
-        soundRaw: 28,
-        noiseStatus: 'Quiet',
-        lightStatus: 'Bright',
-        smokeStatus: 'Clear',
-        ahtOk: true,
-        ens160Ok: true,
-      );
-      _devices = _initialDevices();
-      _alerts = [
-        Alert(
-          id: 'usage-warning',
-          type: AlertType.highConsumption,
-          backendType: 'high_consumption',
-          message: 'AC usage is trending above the evening baseline.',
-          timestamp: DateTime.now(),
-          severity: 'medium',
-          affectedBranch: 'Matter AC Switch',
-        ),
-      ];
+      _dashboard = dashboard;
+      _localPendingCommands.removeWhere((deviceId) {
+        Device? device;
+        for (final item in dashboard.devices) {
+          if (item.id == deviceId) {
+            device = item;
+            break;
+          }
+        }
+        return device == null || !device.commandInProgress;
+      });
+      _localCommandErrors.removeWhere((deviceId, _) => liveDeviceIds.contains(deviceId));
       _isLoading = false;
+      _error = null;
     });
+  }
+
+  void _handleLiveError(Object error) {
+    if (!mounted) {
+      return;
+    }
+    if (_dashboard == null) {
+      setState(() {
+        _isLoading = false;
+        _error = 'Live dashboard data is unavailable. Pull to retry.';
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final dashboard = _dashboard;
     return Scaffold(
       body: SafeArea(
         child: _isLoading
-            ? _DashboardLoading(onRetry: _loadDashboard)
+            ? _DashboardLoading(onRetry: () => _loadDashboard())
             : _error != null
-            ? AppErrorState(message: _error!, onRetry: _loadDashboard)
+            ? AppErrorState(
+                message: _error!,
+                onRetry: () => _loadDashboard(),
+              )
+            : dashboard == null
+            ? AppEmptyState(
+                icon: Icons.dashboard_outlined,
+                title: 'Waiting for live data',
+                message: NetworkConfig.useAwsIotLive
+                    ? 'AWS IoT is connected, but no dashboard message has arrived yet.'
+                    : 'Connect to the Pi or enable AWS IoT live data.',
+              )
             : RefreshIndicator(
                 color: ColorTokens.primary,
                 onRefresh: _loadDashboard,
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
                   children: [
-                    DashboardHeader(name: 'Ali', alertCount: _alerts.length),
+                    DashboardHeader(
+                      name: _displayName(),
+                      alertCount: dashboard.alerts.length,
+                    ),
                     const SizedBox(height: 24),
                     EnergyHeroCard(
-                      reading: _reading,
-                      costToday: _reading.calculateCost(
-                        ElectricityPricing.costPerKWh,
-                      ),
+                      reading: dashboard.reading,
+                      costToday: dashboard.reading.costToday > 0
+                          ? dashboard.reading.costToday
+                          : dashboard.reading.calculateCost(
+                              dashboard.tariffBhdPerKwh,
+                            ),
                     ),
                     const SizedBox(height: 16),
-                    QuickStatsRow(reading: _reading, sensorData: _sensorData),
+                    QuickStatsRow(
+                      reading: dashboard.reading,
+                      sensorData: dashboard.sensors,
+                    ),
                     const SizedBox(height: 16),
-                    if (_alerts.isNotEmpty)
+                    if (dashboard.alerts.isNotEmpty)
                       AlertBanner(
-                        alert: _alerts.first,
-                        onDismiss: () => setState(() => _alerts.removeAt(0)),
+                        alert: dashboard.alerts.first,
+                        onDismiss: () {},
                       ),
                     const SizedBox(height: 16),
                     AiInsightsBanner(
-                      text:
-                          'AI suggests turning off AC for 30 minutes, saving about 0.8 kWh.',
+                      text: _aiInsightText(dashboard),
                       onTap: _openChat,
                     ),
                     const SizedBox(height: 22),
-                    DevicesSection(devices: _devices, onToggle: _toggleDevice),
+                    DevicesSection(
+                      devices: dashboard.devices,
+                      onToggle: _toggleDevice,
+                      pendingDeviceCommands: {
+                        ...dashboard.pendingDeviceCommands,
+                        ..._localPendingCommands,
+                      },
+                      deviceCommandErrors: {
+                        ...dashboard.deviceCommandErrors,
+                        ..._localCommandErrors,
+                      },
+                    ),
                     const SizedBox(height: 22),
                     _DashboardActions(
                       onSensors: _openSensors,
@@ -154,31 +198,39 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _simulateLiveUpdate() {
-    if (!mounted || _isLoading) {
-      return;
-    }
+  Future<void> _toggleDevice(Device device, bool value) async {
+    final action = value ? 'turn_on' : 'turn_off';
     setState(() {
-      _reading = EnergyReading(
-        timestamp: DateTime.now(),
-        voltage: _reading.voltage,
-        current: _reading.current,
-        power: _reading.power == 2140 ? 2380 : 2140,
-        energyToday: _reading.energyToday + 0.02,
-        energyTotal: _reading.energyTotal + 0.02,
-        costToday: _reading.costToday + 0.001,
+      _localPendingCommands.add(device.id);
+      _localCommandErrors.remove(device.id);
+    });
+    try {
+      final result = await _api.sendDeviceCommand(
+        device.id,
+        action,
+        homeId: NetworkConfig.defaultHomeId,
       );
-    });
-  }
-
-  void _toggleDevice(Device device, bool value) {
-    setState(() {
-      _devices = _devices
-          .map(
-            (item) => item.id == device.id ? item.copyWith(isOn: value) : item,
-          )
-          .toList();
-    });
+      if (!mounted) {
+        return;
+      }
+      if (!result.success) {
+        setState(() {
+          _localCommandErrors[device.id] = result.message;
+        });
+      }
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _localCommandErrors[device.id] =
+            error.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _localPendingCommands.remove(device.id));
+      }
+    }
   }
 
   void _openChat() =>
@@ -186,38 +238,42 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _openSensors() => Navigator.of(
     context,
-  ).push(fadeSlideRoute(SensorsStatusScreen(sensorData: _sensorData)));
+  ).push(fadeSlideRoute(SensorsStatusScreen(sensorData: _dashboard!.sensors)));
 
   void _openQrScanner() =>
       Navigator.of(context).push(fadeSlideRoute(const QrScannerScreen()));
 
-  List<Device> _initialDevices() => [
-    Device(
-      id: 'breaker_01',
-      name: 'Kitchen Breaker',
-      type: DeviceType.socket,
-      isOn: true,
-      currentPower: 420,
-      branch: 'Branch 1',
-    ),
-    Device(
-      id: 'breaker_02',
-      name: 'Living Room',
-      type: DeviceType.light,
-      isOn: true,
-      currentPower: 180,
-      branch: 'Branch 2',
-    ),
-    Device(
-      id: 'matter_ac_switch',
-      name: 'AC Switch',
-      type: DeviceType.airConditioner,
-      isOn: false,
-      currentPower: 0,
-      branch: 'Matter',
-      controlMethod: 'home_assistant',
-    ),
-  ];
+  String _displayName() {
+    final user = AuthService().currentUser;
+    final name = user?.displayName?.trim();
+    if (name != null && name.isNotEmpty) {
+      return name.split(' ').first;
+    }
+    final email = user?.email ?? '';
+    if (email.contains('@')) {
+      return email.split('@').first;
+    }
+    return 'there';
+  }
+
+  String _aiInsightText(DashboardData dashboard) {
+    final recommendation = dashboard.aiRecommendation;
+    if (recommendation != null && recommendation.message.trim().isNotEmpty) {
+      return recommendation.message;
+    }
+    final aiDashboard = dashboard.aiDashboard;
+    if (aiDashboard != null && aiDashboard.statusSummary.trim().isNotEmpty) {
+      return aiDashboard.statusSummary;
+    }
+    final dailySummary = dashboard.aiDailySummary;
+    if (dailySummary != null && dailySummary.summary.trim().isNotEmpty) {
+      return dailySummary.summary;
+    }
+    if (dashboard.reading.power > 0) {
+      return 'Live energy data is active. AI recommendations will appear when a useful action is detected.';
+    }
+    return 'AI analysis is waiting for enough live energy data.';
+  }
 }
 
 class _DashboardLoading extends StatelessWidget {
