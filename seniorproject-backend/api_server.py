@@ -7,7 +7,7 @@ import hmac
 import secrets
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +54,10 @@ DEFAULT_HOME_ID = "home_001"
 HOME_MEMBER_LIMIT = int(os.environ.get("HOME_MEMBER_LIMIT", "3"))
 PAIRING_TOKEN_TTL_MS = int(os.environ.get("PAIRING_TOKEN_TTL_SECONDS", "900")) * 1000
 HOME_INVITE_TTL_MS = int(os.environ.get("HOME_INVITE_TTL_SECONDS", str(7 * 24 * 60 * 60))) * 1000
+KIOSK_SESSION_TTL_SECONDS = int(os.environ.get("KIOSK_SESSION_TTL_SECONDS", "600"))
+KIOSK_COMMAND_TTL_SECONDS = int(os.environ.get("KIOSK_COMMAND_TTL_SECONDS", "300"))
+KIOSK_SESSION_SECRET = os.environ.get("KIOSK_SESSION_SECRET") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "dev-kiosk-session-secret"
+KIOSK_ALLOWED_COMMANDS = {"provision_esp32", "discover_esp32", "reset_esp32"}
 MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch"}
 CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *MATTER_DEVICE_IDS}
 VALID_COMMANDS = {"turn_on", "turn_off"}
@@ -493,6 +497,38 @@ class HomeInviteCreateRequest(BaseModel):
 class HomeInviteClaimRequest(BaseModel):
     invite_id: str
     token: str
+
+
+class PiHeartbeatRequest(BaseModel):
+    status: str = "online"
+    agent_version: str | None = None
+    local_ip: str | None = None
+    wifi_ssid: str | None = None
+    esp32: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+
+
+class PiSensorStateRequest(BaseModel):
+    home_id: str | None = None
+    dashboard: dict[str, Any] = Field(default_factory=dict)
+    room: dict[str, Any] = Field(default_factory=dict)
+    devices: dict[str, Any] = Field(default_factory=dict)
+    alerts: list[dict[str, Any]] = Field(default_factory=list)
+    occupancy: dict[str, Any] = Field(default_factory=dict)
+    safety: dict[str, Any] = Field(default_factory=dict)
+    updated_at_ms: int | None = None
+
+
+class PiEsp32LinkRequest(BaseModel):
+    device_id: str = "esp32_01"
+    ip: str | None = None
+    base_url: str | None = None
+    status: dict[str, Any] = Field(default_factory=dict)
+
+
+class KioskCommandCreateRequest(BaseModel):
+    command: str
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class MemberCreateRequest(BaseModel):
@@ -1269,6 +1305,111 @@ def authenticate_pi_request(pi_id: str, device_token: str) -> dict[str, Any]:
     return {**pi, "pi_id": pi_id}
 
 
+def pi_auth_context(
+    pi_id: str,
+    x_pi_id: str | None,
+    x_device_token: str | None,
+) -> dict[str, Any]:
+    if x_pi_id and x_pi_id != pi_id:
+        raise HTTPException(status_code=401, detail="Pi header does not match route.")
+    return authenticate_pi_request(pi_id, x_device_token or "")
+
+
+def create_kiosk_token(pi: dict[str, Any]) -> dict[str, Any]:
+    timestamp = int(time.time())
+    expires_at = timestamp + KIOSK_SESSION_TTL_SECONDS
+    pi_id = str(pi.get("pi_id") or "")
+    home_id = str(pi.get("home_id") or "")
+    session_id = f"kiosk_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+    payload = {
+        "iss": "kahrabaiq-api",
+        "aud": "kahrabaiq-kiosk",
+        "scope": "kiosk",
+        "session_id": session_id,
+        "pi_id": pi_id,
+        "home_id": home_id,
+        "iat": timestamp,
+        "exp": expires_at,
+    }
+    token = jwt.encode(payload, KIOSK_SESSION_SECRET, algorithm="HS256")
+    safe_set(
+        f"/kiosk_sessions/{session_id}",
+        {
+            "session_id": session_id,
+            "pi_id": pi_id,
+            "home_id": home_id,
+            "scope": "kiosk",
+            "expires_at_ms": expires_at * 1000,
+            "created_at_ms": timestamp * 1000,
+            "created_at_iso": iso_from_ms(timestamp * 1000),
+            "active": True,
+        },
+    )
+    return {"token": token, "session_id": session_id, "expires_at_ms": expires_at * 1000}
+
+
+def require_kiosk_session(authorization: str | None = Header(default=None)) -> AuthContext:
+    token = bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing kiosk session token.")
+    try:
+        claims = jwt.decode(
+            token,
+            KIOSK_SESSION_SECRET,
+            algorithms=["HS256"],
+            audience="kahrabaiq-kiosk",
+            issuer="kahrabaiq-api",
+        )
+    except Exception as error:
+        raise HTTPException(status_code=401, detail="Invalid kiosk session token.") from error
+    if claims.get("scope") != "kiosk":
+        raise HTTPException(status_code=403, detail="Invalid kiosk token scope.")
+    session_id = str(claims.get("session_id") or "")
+    session = as_dict(safe_get(f"/kiosk_sessions/{session_id}", {}))
+    if session.get("active") is not True:
+        raise HTTPException(status_code=401, detail="Kiosk session is not active.")
+    if as_number(session.get("expires_at_ms")) < now_ms():
+        raise HTTPException(status_code=401, detail="Kiosk session expired.")
+    pi_id = str(claims.get("pi_id") or "")
+    home_id = str(claims.get("home_id") or "")
+    return AuthContext(
+        actor_type="kiosk",
+        actor_id=session_id,
+        actor_role="kiosk",
+        permissions={"can_view": True, "can_create_kiosk_commands": True},
+        uid=None,
+        email=None,
+        claims={"pi_id": pi_id, "home_id": home_id, **claims},
+    )
+
+
+def kiosk_pi_and_home(actor: AuthContext) -> tuple[str, str]:
+    claims = actor.claims or {}
+    pi_id = str(claims.get("pi_id") or "")
+    home_id = str(claims.get("home_id") or "")
+    if not pi_id:
+        raise HTTPException(status_code=403, detail="Kiosk token is missing Pi scope.")
+    return pi_id, home_id
+
+
+@app.post("/api/pi/kiosk-session")
+def create_pi_kiosk_session(
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = authenticate_pi_request(x_pi_id or "", x_device_token or "")
+    session = create_kiosk_token(pi)
+    return {
+        "success": True,
+        "pi_id": pi["pi_id"],
+        "home_id": pi.get("home_id"),
+        "paired": bool(pi.get("home_id")) and pi.get("status") == "paired",
+        "kiosk_token": session["token"],
+        "session_id": session["session_id"],
+        "expires_at_ms": session["expires_at_ms"],
+    }
+
+
 @app.post("/api/pairing/pi-token")
 def create_pi_pairing_token(
     request: PiPairingTokenRequest,
@@ -1320,6 +1461,137 @@ def get_pi_pairing_status(pi_id: str) -> dict[str, Any]:
     if not pi:
         raise HTTPException(status_code=404, detail="Pi does not exist.")
     return {"success": True, "pi": {"pi_id": pi_id, **pi}}
+
+
+@app.post("/api/pi/{pi_id}/heartbeat")
+def pi_heartbeat(
+    pi_id: str,
+    request: PiHeartbeatRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    timestamp_ms = now_ms()
+    updates = {
+        "status": pi.get("status") or "unpaired",
+        "online_status": request.status,
+        "agent_version": request.agent_version,
+        "local_ip": request.local_ip,
+        "wifi_ssid": request.wifi_ssid,
+        "esp32": request.esp32 or {},
+        "metrics": request.metrics or {},
+        "last_heartbeat_at_ms": timestamp_ms,
+        "last_heartbeat_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(f"/pis/{pi_id}", updates)
+    return {"success": True, "pi_id": pi_id, "home_id": pi.get("home_id"), "heartbeat": updates}
+
+
+@app.post("/api/pi/{pi_id}/sensor-state")
+def pi_sensor_state(
+    pi_id: str,
+    request: PiSensorStateRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = request.home_id or str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    if pi.get("home_id") and home_id != pi.get("home_id"):
+        raise HTTPException(status_code=403, detail="Pi cannot write to this home.")
+    timestamp_ms = request.updated_at_ms or now_ms()
+    latest = {
+        "home_id": home_id,
+        "pi_id": pi_id,
+        "dashboard": request.dashboard,
+        "room": request.room,
+        "devices": request.devices,
+        "alerts": request.alerts,
+        "occupancy": request.occupancy,
+        "safety": request.safety,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/latest_state", latest)
+    safe_update(
+        f"/pis/{pi_id}",
+        {"last_state_sync_at_ms": timestamp_ms, "last_state_sync_at_iso": iso_from_ms(timestamp_ms)},
+    )
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "updated_at_ms": timestamp_ms}
+
+
+@app.post("/api/pi/{pi_id}/esp32/link")
+def pi_esp32_link(
+    pi_id: str,
+    request: PiEsp32LinkRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    timestamp_ms = now_ms()
+    record = {
+        "device_id": request.device_id,
+        "pi_id": pi_id,
+        "home_id": home_id,
+        "ip": request.ip,
+        "base_url": request.base_url,
+        "status": request.status,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/devices/{request.device_id}/link", record)
+    safe_set(f"/pis/{pi_id}/esp32/{request.device_id}", record)
+    return {"success": True, "esp32": record}
+
+
+@app.get("/api/pi/{pi_id}/commands")
+def pi_commands(
+    pi_id: str,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi_auth_context(pi_id, x_pi_id, x_device_token)
+    commands = []
+    for item in object_to_list(safe_get(f"/pi_commands/{pi_id}", {})):
+        if item.get("status") != "pending":
+            continue
+        if as_number(item.get("expires_at_ms")) and as_number(item.get("expires_at_ms")) < now_ms():
+            safe_update(f"/pi_commands/{pi_id}/{item['id']}", {"status": "expired", "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
+            continue
+        commands.append(item)
+    return {"success": True, "pi_id": pi_id, "commands": commands}
+
+
+@app.post("/api/pi/{pi_id}/commands/{command_id}/complete")
+def pi_command_complete(
+    pi_id: str,
+    command_id: str,
+    payload: dict[str, Any],
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi_auth_context(pi_id, x_pi_id, x_device_token)
+    command = as_dict(safe_get(f"/pi_commands/{pi_id}/{command_id}", {}))
+    if not command:
+        raise HTTPException(status_code=404, detail="Command does not exist.")
+    timestamp_ms = now_ms()
+    success = payload.get("success") is not False
+    update = {
+        "status": "completed" if success else "failed",
+        "result": payload,
+        "completed_at_ms": timestamp_ms,
+        "completed_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(f"/pi_commands/{pi_id}/{command_id}", update)
+    return {"success": True, "command": {**command, **update}}
 
 
 @app.post("/api/pairing/claim-pi")
@@ -1387,6 +1659,78 @@ def create_home_invite(
         "expires_at_ms": timestamp_ms + HOME_INVITE_TTL_MS,
         "qr_payload": f"kahrabaiq://invite?invite_id={invite_id}&token={raw_token}",
     }
+
+
+@app.get("/api/kiosk/session-state")
+def kiosk_session_state(actor: AuthContext = Depends(require_kiosk_session)) -> dict[str, Any]:
+    pi_id, home_id = kiosk_pi_and_home(actor)
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    pairing_payload = None
+    expires_at_ms = None
+    if not home_id:
+        timestamp_ms = now_ms()
+        raw_token = secrets.token_urlsafe(24)
+        token_id = f"pair_{timestamp_ms}_{secrets.token_hex(3)}"
+        safe_set(
+            f"/pi_pairing_tokens/{token_id}",
+            {
+                "token_id": token_id,
+                "pi_id": pi_id,
+                "token_hash": hash_secret(raw_token),
+                "expires_at_ms": timestamp_ms + PAIRING_TOKEN_TTL_MS,
+                "created_at_ms": timestamp_ms,
+                "created_at_iso": iso_from_ms(timestamp_ms),
+                "used": False,
+            },
+        )
+        safe_update(f"/pis/{pi_id}", {"latest_pairing_token_id": token_id, "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+        expires_at_ms = timestamp_ms + PAIRING_TOKEN_TTL_MS
+        pairing_payload = f"kahrabaiq://pair?pi_id={pi_id}&token={raw_token}"
+    return {
+        "success": True,
+        "pi": {"pi_id": pi_id, **pi},
+        "pi_id": pi_id,
+        "home_id": home_id or None,
+        "paired": bool(home_id),
+        "pairing_payload": pairing_payload,
+        "pairing_expires_at_ms": expires_at_ms,
+    }
+
+
+@app.get("/api/kiosk/dashboard")
+def kiosk_dashboard(actor: AuthContext = Depends(require_kiosk_session)) -> dict[str, Any]:
+    pi_id, home_id = kiosk_pi_and_home(actor)
+    if not home_id:
+        return {"success": True, "pi_id": pi_id, "home_id": None, "paired": False, "dashboard": {}}
+    latest = as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+    return {"success": True, "pi_id": pi_id, "home_id": home_id, "paired": True, "dashboard": latest}
+
+
+@app.post("/api/kiosk/commands")
+def kiosk_create_command(
+    request: KioskCommandCreateRequest,
+    actor: AuthContext = Depends(require_kiosk_session),
+) -> dict[str, Any]:
+    pi_id, home_id = kiosk_pi_and_home(actor)
+    command_name = request.command.strip().lower()
+    if command_name not in KIOSK_ALLOWED_COMMANDS:
+        raise HTTPException(status_code=400, detail="Unsupported kiosk command.")
+    timestamp_ms = now_ms()
+    command_id = f"kcmd_{timestamp_ms}_{secrets.token_hex(4)}"
+    command = {
+        "command_id": command_id,
+        "pi_id": pi_id,
+        "home_id": home_id,
+        "command": command_name,
+        "payload": request.payload,
+        "status": "pending",
+        "created_by": actor.actor_id,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+        "expires_at_ms": timestamp_ms + (KIOSK_COMMAND_TTL_SECONDS * 1000),
+    }
+    safe_set(f"/pi_commands/{pi_id}/{command_id}", command)
+    return {"success": True, "command": command}
 
 
 @app.post("/api/home-invites/claim")

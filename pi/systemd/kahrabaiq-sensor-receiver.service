@@ -1,0 +1,16 @@
+[Unit]
+Description=KahrabaIQ ESP32 local sensor receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kahrabaiq/pi/agent
+EnvironmentFile=/etc/kahrabaiq/pi.env
+ExecStart=/opt/kahrabaiq/.venv/bin/python /opt/kahrabaiq/pi/agent/esp32_receiver.py
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target

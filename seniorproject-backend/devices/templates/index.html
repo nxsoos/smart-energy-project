@@ -29,6 +29,7 @@
           </div>
         </div>
         <div class="top-status">
+          <button id="pairEsp32" class="status-chip muted" type="button">Pair ESP32</button>
           <button id="showPairingQr" class="status-chip muted" type="button">Pair QR</button>
           <span id="cloudStatus" class="status-chip muted">Cloud</span>
           <span id="systemStatus" class="status-chip warning">Starting</span>
@@ -116,6 +117,30 @@
         <div class="button-row">
           <button class="btn secondary" type="button" id="adminCancel">Cancel</button>
           <button class="btn primary" type="submit">Unlock</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="esp32Modal" class="admin-modal hidden">
+      <form id="esp32Form" class="admin-panel">
+        <h2>Pair ESP32 Sensor</h2>
+        <p id="esp32Message">Put the ESP32 in setup mode, then send this Wi-Fi network to it.</p>
+        <label>
+          Wi-Fi SSID
+          <input id="esp32Ssid" type="text" autocomplete="off" placeholder="Home Wi-Fi">
+        </label>
+        <label>
+          Wi-Fi Password
+          <input id="esp32Password" type="password" autocomplete="current-password" placeholder="Password">
+        </label>
+        <label>
+          ESP32 Setup URL
+          <input id="esp32SetupUrl" type="text" autocomplete="off" value="http://192.168.4.1">
+        </label>
+        <div class="button-row three-actions">
+          <button class="btn secondary" type="button" id="esp32Cancel">Cancel</button>
+          <button class="btn secondary" type="button" id="esp32Discover">Discover</button>
+          <button class="btn primary" type="submit">Send Wi-Fi</button>
         </div>
       </form>
     </div>

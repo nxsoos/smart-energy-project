@@ -11,6 +11,15 @@ const ids = {
   pairingQr: document.getElementById("pairingQr"),
   pairingQrFallback: document.getElementById("pairingQrFallback"),
   showPairingQr: document.getElementById("showPairingQr"),
+  pairEsp32: document.getElementById("pairEsp32"),
+  esp32Modal: document.getElementById("esp32Modal"),
+  esp32Form: document.getElementById("esp32Form"),
+  esp32Message: document.getElementById("esp32Message"),
+  esp32Ssid: document.getElementById("esp32Ssid"),
+  esp32Password: document.getElementById("esp32Password"),
+  esp32SetupUrl: document.getElementById("esp32SetupUrl"),
+  esp32Cancel: document.getElementById("esp32Cancel"),
+  esp32Discover: document.getElementById("esp32Discover"),
   lastUpdated: document.getElementById("lastUpdated"),
   commandMessage: document.getElementById("commandMessage"),
   suggestionText: document.getElementById("suggestionText"),
@@ -99,6 +108,12 @@ function updateKioskState(data) {
     }
   }
   if (ids.showPairingQr) ids.showPairingQr.textContent = state.showPairingQr ? "Hide QR" : "Pair QR";
+  if (ids.esp32Ssid && data.wifi_ssid && !ids.esp32Ssid.value) ids.esp32Ssid.value = data.wifi_ssid;
+  if (ids.pairEsp32) {
+    const linked = data.esp32 && (data.esp32.ip || data.esp32.base_url);
+    ids.pairEsp32.textContent = linked ? "ESP32 Linked" : "Pair ESP32";
+    ids.pairEsp32.className = `status-chip ${linked ? "online" : "muted"}`;
+  }
 }
 
 async function fetchKioskState() {
@@ -213,6 +228,13 @@ async function postAction(path, body = null) {
   await fetchLatest();
 }
 
+async function postJson(path, body = {}) {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok || data.success === false) throw new Error(data.message || data.detail || "Action failed");
+  return data;
+}
+
 async function sendCommand(deviceId, action) {
   ids.commandMessage.textContent = "Processing command...";
   try { await postAction("/api/command", { device_id: deviceId, action }); }
@@ -230,6 +252,29 @@ document.querySelectorAll("[data-device-id][data-action]").forEach((button) => b
 document.getElementById("emergencyAllOff").addEventListener("click", () => { state.smokeEmergencyDismissed = true; ids.emergencyOverlay.classList.add("hidden"); postAction("/api/safety/smoke/actions/turn-off-safe-devices").catch((error) => { ids.commandMessage.textContent = error.message; }); });
 document.getElementById("emergencyMarkSafe").addEventListener("click", () => { state.smokeEmergencyDismissed = true; ids.emergencyOverlay.classList.add("hidden"); postAction("/api/safety/smoke/actions/mark-safe").catch((error) => { ids.commandMessage.textContent = error.message; }); });
 if (ids.showPairingQr) ids.showPairingQr.addEventListener("click", () => { state.showPairingQr = !state.showPairingQr; fetchKioskState().catch(() => {}); });
+if (ids.pairEsp32) ids.pairEsp32.addEventListener("click", () => { ids.esp32Modal.classList.remove("hidden"); fetchKioskState().catch(() => {}); });
+if (ids.esp32Cancel) ids.esp32Cancel.addEventListener("click", () => ids.esp32Modal.classList.add("hidden"));
+if (ids.esp32Discover) ids.esp32Discover.addEventListener("click", async () => {
+  ids.esp32Message.textContent = "Searching for ESP32 on this network...";
+  try {
+    const data = await postJson("/api/esp32/discover");
+    ids.esp32Message.textContent = data.message || "ESP32 linked.";
+    await fetchKioskState();
+  } catch (error) { ids.esp32Message.textContent = error.message; }
+});
+if (ids.esp32Form) ids.esp32Form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  ids.esp32Message.textContent = "Sending Wi-Fi credentials to ESP32...";
+  try {
+    const data = await postJson("/api/esp32/provision", {
+      ssid: ids.esp32Ssid.value,
+      password: ids.esp32Password.value,
+      setup_url: ids.esp32SetupUrl.value,
+    });
+    ids.esp32Password.value = "";
+    ids.esp32Message.textContent = data.message || "Credentials sent. Wait 10 seconds, then tap Discover.";
+  } catch (error) { ids.esp32Message.textContent = error.message; }
+});
 
 let adminTapCount = 0;
 document.getElementById("adminHotspot").addEventListener("click", () => {

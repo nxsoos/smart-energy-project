@@ -2,6 +2,7 @@ import os
 import time
 import base64
 import io
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,18 @@ KAHRABAIQ_API_URL = os.environ.get(
     ),
 ).rstrip("/")
 PI_DASHBOARD_TOKEN = os.environ.get("PI_DASHBOARD_TOKEN", "")
+ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "http://192.168.4.1").rstrip("/")
+ESP32_DEFAULT_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
+ESP32_DISCOVERY_CANDIDATES = [
+    item.strip().rstrip("/")
+    for item in os.environ.get(
+        "ESP32_DISCOVERY_CANDIDATES",
+        "http://kahrabaiq-esp32.local,http://192.168.4.1",
+    ).split(",")
+    if item.strip()
+]
+PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "http://kahrabaiq-pi.local:5001").rstrip("/")
+PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "http://kahrabaiq-pi.local:5000").rstrip("/")
 ALLOWED_DEVICES = {"breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"}
 ALLOWED_ACTIONS = {"turn_on", "turn_off"}
 ALLOWED_CONTROL_MODES = {"assist", "auto", "manual"}
@@ -102,6 +115,105 @@ def home_ref(path: str):
 
 def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def current_wifi_ssid() -> str:
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["iwgetid", "-r"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def normalize_url(value: str) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    if not text.startswith(("http://", "https://")):
+        text = f"http://{text}"
+    return text
+
+
+def esp32_status_from_url(base_url: str, timeout: float = 2.5) -> dict[str, Any]:
+    base = normalize_url(base_url)
+    if not base:
+        return {}
+    response = requests.get(f"{base}/status", timeout=timeout)
+    data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+    if not response.ok:
+        return {}
+    return {
+        "device_id": str(data.get("device_id") or data.get("id") or ESP32_DEFAULT_DEVICE_ID),
+        "ip": base.replace("http://", "").replace("https://", "").split(":")[0],
+        "base_url": base,
+        "status": data,
+        "last_seen_at_ms": now_ms(),
+        "last_seen_at_iso": iso_now(),
+    }
+
+
+def esp32_record() -> dict[str, Any]:
+    return as_dict(home_ref(f"devices/{ESP32_DEFAULT_DEVICE_ID}/link").get())
+
+
+def save_esp32_link(record: dict[str, Any]) -> None:
+    device_id = str(record.get("device_id") or ESP32_DEFAULT_DEVICE_ID)
+    home_ref(f"devices/{device_id}/link").set(record)
+    home_ref(f"devices/{device_id}").update(
+        {
+            "device_id": device_id,
+            "name": "Room Sensor",
+            "type": "sensor_hub",
+            "control_method": "local_http",
+            "linked_to_pi_id": PI_ID,
+            "ip": record.get("ip"),
+            "base_url": record.get("base_url"),
+            "online": True,
+            "updated_at_ms": now_ms(),
+            "updated_at_iso": iso_now(),
+        }
+    )
+
+
+def discover_esp32() -> dict[str, Any]:
+    candidates = []
+    linked = esp32_record()
+    if linked.get("base_url"):
+        candidates.append(str(linked["base_url"]))
+    candidates.extend(ESP32_DISCOVERY_CANDIDATES)
+    hostname = socket.gethostname()
+    if hostname:
+        candidates.append(f"http://kahrabaiq-esp32.local")
+    seen: set[str] = set()
+    for candidate in candidates:
+        base = normalize_url(candidate)
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        try:
+            record = esp32_status_from_url(base)
+            if record:
+                save_esp32_link(record)
+                return record
+        except Exception:
+            continue
+    return {}
 
 
 def object_to_list(value: Any) -> list[dict[str, Any]]:
@@ -460,7 +572,98 @@ def kiosk_state():
             "pairing_payload": pairing_payload,
             "pairing_qr_data_url": qr_data_url(pairing_payload),
             "pairing_expires_at_ms": token_expires_at_ms,
+            "wifi_ssid": current_wifi_ssid(),
+            "esp32": esp32_record(),
             "admin_unlock_configured": bool(KIOSK_ADMIN_PASSWORD_HASH or KIOSK_ADMIN_PASSWORD),
+        }
+    )
+
+
+@app.get("/api/esp32/status")
+def esp32_status():
+    linked = esp32_record()
+    live = {}
+    if linked.get("base_url"):
+        try:
+            live = esp32_status_from_url(str(linked["base_url"]))
+            if live:
+                save_esp32_link(live)
+        except Exception:
+            live = {}
+    return jsonify({"success": True, "linked": linked, "live": live})
+
+
+@app.post("/api/esp32/discover")
+def esp32_discover():
+    record = discover_esp32()
+    if not record:
+        return jsonify({"success": False, "message": "ESP32 was not found on this network."}), 404
+    return jsonify({"success": True, "esp32": record, "message": "ESP32 linked to this Pi."})
+
+
+@app.post("/api/esp32/provision")
+def esp32_provision():
+    data = request.get_json(silent=True) or {}
+    ssid = str(data.get("ssid") or current_wifi_ssid()).strip()
+    password = str(data.get("password") or "")
+    setup_url = normalize_url(str(data.get("setup_url") or ESP32_SETUP_URL))
+    device_id = str(data.get("device_id") or ESP32_DEFAULT_DEVICE_ID).strip() or ESP32_DEFAULT_DEVICE_ID
+    if not ssid:
+        return jsonify({"success": False, "message": "Wi-Fi SSID is required."}), 400
+    if not password:
+        return jsonify({"success": False, "message": "Wi-Fi password is required."}), 400
+    if not setup_url:
+        return jsonify({"success": False, "message": "ESP32 setup URL is required."}), 400
+
+    payload = {
+        "ssid": ssid,
+        "password": password,
+        "home_id": HOME_ID,
+        "pi_id": PI_ID,
+        "pi_base_url": PI_LOCAL_BASE_URL,
+        "pi_sensor_url": f"{PI_SENSOR_BASE_URL}/api/sensors/room1",
+        "device_id": device_id,
+    }
+    timestamp_ms = now_ms()
+    home_ref(f"devices/{device_id}/provisioning").set(
+        {
+            "device_id": device_id,
+            "setup_url": setup_url,
+            "ssid": ssid,
+            "status": "sending_credentials",
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_now(),
+        }
+    )
+    try:
+        response = requests.post(f"{setup_url}/provision", json=payload, timeout=12)
+        response_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        if not response.ok:
+            raise RuntimeError(response_data.get("message") or response.text or "ESP32 rejected provisioning.")
+    except Exception as error:
+        home_ref(f"devices/{device_id}/provisioning").update(
+            {
+                "status": "failed",
+                "message": str(error),
+                "updated_at_ms": now_ms(),
+                "updated_at_iso": iso_now(),
+            }
+        )
+        return jsonify({"success": False, "message": f"ESP32 provisioning failed: {error}"}), 502
+
+    home_ref(f"devices/{device_id}/provisioning").update(
+        {
+            "status": "credentials_sent",
+            "message": "Credentials sent. Waiting for ESP32 to join Wi-Fi.",
+            "updated_at_ms": now_ms(),
+            "updated_at_iso": iso_now(),
+        }
+    )
+    return jsonify(
+        {
+            "success": True,
+            "message": "Wi-Fi credentials sent to ESP32. Run discovery after it reconnects.",
+            "setup_response": response_data,
         }
     )
 

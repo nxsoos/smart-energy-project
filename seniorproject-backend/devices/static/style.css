@@ -114,7 +114,9 @@ h1 { font-size: 20px; line-height: 1; }
 .emergency-panel p { font-size: 22px; }
 .emergency-actions { display: grid; gap: 10px; margin-top: 18px; }
 .admin-panel { display: grid; gap: 12px; background: var(--surface); }
+.admin-panel label { display: grid; gap: 6px; color: var(--muted); font-weight: 800; }
 .admin-panel input { min-height: 48px; padding: 0 12px; border-radius: 12px; border: 1px solid var(--line); color: var(--text); background: var(--surface-2); }
+.three-actions { grid-template-columns: .8fr 1fr 1fr; }
 
 @media (max-width: 700px) {
   .kiosk-shell { padding: 6px; gap: 6px; }
