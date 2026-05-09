@@ -9,10 +9,12 @@ class DashboardHeader extends StatelessWidget {
     super.key,
     required this.name,
     required this.alertCount,
+    this.onLogout,
   });
 
   final String name;
   final int alertCount;
+  final VoidCallback? onLogout;
 
   @override
   Widget build(BuildContext context) {
@@ -73,6 +75,12 @@ class DashboardHeader extends StatelessWidget {
                 ),
               ),
           ],
+        ),
+        const SizedBox(width: 2),
+        IconButton(
+          tooltip: 'Log out',
+          onPressed: onLogout,
+          icon: const Icon(Icons.logout, color: ColorTokens.textPrimary),
         ),
       ],
     );

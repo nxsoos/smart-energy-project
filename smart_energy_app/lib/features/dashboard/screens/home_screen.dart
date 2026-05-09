@@ -13,6 +13,7 @@ import '../../../shared/services/kahrabaiq_api_service.dart';
 import '../../ai_chat/screens/ai_chatbot_screen.dart';
 import '../../pairing/screens/qr_scanner_screen.dart';
 import '../../sensors/screens/sensors_status_screen.dart';
+import 'breakers_screen.dart';
 import '../widgets/ai_insights_banner.dart';
 import '../widgets/dashboard_header.dart';
 import '../widgets/devices_section.dart';
@@ -31,6 +32,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final KahrabaIqApiService _api = KahrabaIqApiService();
+  String? _homeId;
   DashboardData? _dashboard;
   StreamSubscription<DashboardData>? _liveSubscription;
   bool _isLoading = true;
@@ -58,17 +60,44 @@ class _HomeScreenState extends State<HomeScreen> {
       _error = null;
     });
 
+    String? pairedHomeId;
+    try {
+      final profile = await AuthService().loadCurrentUserProfile();
+      pairedHomeId = _selectPairedHome(profile)?.homeId;
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _homeId = pairedHomeId;
+      });
+      if (pairedHomeId == null || pairedHomeId.isEmpty) {
+        setState(() {
+          _dashboard = null;
+          _isLoading = false;
+          _error = null;
+        });
+        return;
+      }
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoading = false;
+        _error = 'Could not load your home pairing. Pull to retry.';
+      });
+      return;
+    }
+
     if (widget.enableRealtimeSync && NetworkConfig.useAwsIotLive) {
       _liveSubscription = _api
-          .watchLiveDashboardData(homeId: NetworkConfig.defaultHomeId)
+          .watchLiveDashboardData(homeId: pairedHomeId)
           .listen(_applyDashboardData, onError: _handleLiveError);
     }
 
     if (!NetworkConfig.remoteLiveOnly || !NetworkConfig.useAwsIotLive) {
       try {
-        final dashboard = await _api.fetchDashboardData(
-          homeId: NetworkConfig.defaultHomeId,
-        );
+        final dashboard = await _api.fetchDashboardData(homeId: pairedHomeId);
         _applyDashboardData(dashboard);
       } catch (error) {
         if (!mounted) {
@@ -101,7 +130,9 @@ class _HomeScreenState extends State<HomeScreen> {
         }
         return device == null || !device.commandInProgress;
       });
-      _localCommandErrors.removeWhere((deviceId, _) => liveDeviceIds.contains(deviceId));
+      _localCommandErrors.removeWhere(
+        (deviceId, _) => liveDeviceIds.contains(deviceId),
+      );
       _isLoading = false;
       _error = null;
     });
@@ -122,14 +153,19 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final dashboard = _dashboard;
+    final isPaired = _homeId != null && _homeId!.isNotEmpty;
     return Scaffold(
       body: SafeArea(
         child: _isLoading
             ? _DashboardLoading(onRetry: () => _loadDashboard())
             : _error != null
-            ? AppErrorState(
-                message: _error!,
-                onRetry: () => _loadDashboard(),
+            ? AppErrorState(message: _error!, onRetry: () => _loadDashboard())
+            : !isPaired
+            ? _UnpairedHomeState(
+                name: _displayName(),
+                onPair: _openQrScanner,
+                onLogout: _logout,
+                isPairing: _isPairing,
               )
             : dashboard == null
             ? AppEmptyState(
@@ -148,6 +184,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     DashboardHeader(
                       name: _displayName(),
                       alertCount: dashboard.alerts.length,
+                      onLogout: _logout,
                     ),
                     const SizedBox(height: 24),
                     EnergyHeroCard(
@@ -161,7 +198,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 16),
                     QuickStatsRow(
                       reading: dashboard.reading,
-                      sensorData: dashboard.sensors,
+                      devices: dashboard.devices,
+                      onBreakersTap: () => _openBreakers(dashboard.devices),
                     ),
                     const SizedBox(height: 16),
                     if (dashboard.alerts.isNotEmpty)
@@ -192,6 +230,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       onSensors: _openSensors,
                       onPair: _openQrScanner,
                       isPairing: _isPairing,
+                      showPair: false,
                     ),
                   ],
                 ),
@@ -210,7 +249,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final result = await _api.sendDeviceCommand(
         device.id,
         action,
-        homeId: NetworkConfig.defaultHomeId,
+        homeId: _homeId ?? NetworkConfig.defaultHomeId,
       );
       if (!mounted) {
         return;
@@ -225,8 +264,10 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
       setState(() {
-        _localCommandErrors[device.id] =
-            error.toString().replaceFirst('Exception: ', '');
+        _localCommandErrors[device.id] = error.toString().replaceFirst(
+          'Exception: ',
+          '',
+        );
       });
     } finally {
       if (mounted) {
@@ -238,9 +279,29 @@ class _HomeScreenState extends State<HomeScreen> {
   void _openChat() =>
       Navigator.of(context).push(fadeSlideRoute(const AiChatbotScreen()));
 
+  void _openBreakers(List<Device> devices) {
+    Navigator.of(
+      context,
+    ).push(fadeSlideRoute(BreakersScreen(devices: devices)));
+  }
+
   void _openSensors() => Navigator.of(
     context,
   ).push(fadeSlideRoute(SensorsStatusScreen(sensorData: _dashboard!.sensors)));
+
+  Future<void> _logout() async {
+    await _liveSubscription?.cancel();
+    _liveSubscription = null;
+    if (mounted) {
+      setState(() {
+        _dashboard = null;
+        _homeId = null;
+        _localPendingCommands.clear();
+        _localCommandErrors.clear();
+      });
+    }
+    await AuthService().signOut();
+  }
 
   Future<void> _openQrScanner() async {
     final value = await Navigator.of(
@@ -255,9 +316,9 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Invalid pairing code.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Invalid pairing code.')));
       return;
     }
     setState(() => _isPairing = true);
@@ -272,7 +333,9 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Paired ${result['pi_id'] ?? parsed.piId} successfully.'),
+          content: Text(
+            'Paired ${result['pi_id'] ?? parsed.piId} successfully.',
+          ),
         ),
       );
       await _loadDashboard();
@@ -294,18 +357,42 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  UserHomeAccess? _selectPairedHome(CurrentUserProfile profile) {
+    final activeHomes = profile.homes
+        .where((home) => home.status.toLowerCase() != 'unpaired')
+        .toList();
+    if (activeHomes.isEmpty) {
+      return null;
+    }
+    final defaultHomeId = profile.defaultHomeId;
+    if (defaultHomeId != null && defaultHomeId.isNotEmpty) {
+      for (final home in activeHomes) {
+        if (home.homeId == defaultHomeId) {
+          return home;
+        }
+      }
+    }
+    return activeHomes.first;
+  }
+
   _PairingPayload? _parsePairingPayload(String payload) {
     final uri = Uri.tryParse(payload);
     if (uri != null && uri.scheme == 'kahrabaiq' && uri.host == 'pair') {
       final piId = uri.queryParameters['pi_id']?.trim();
       final token = uri.queryParameters['token']?.trim();
-      if (piId != null && piId.isNotEmpty && token != null && token.isNotEmpty) {
+      if (piId != null &&
+          piId.isNotEmpty &&
+          token != null &&
+          token.isNotEmpty) {
         return _PairingPayload(piId: piId, token: token);
       }
     }
     final parts = payload.split(RegExp(r'\s+'));
     if (parts.length >= 2) {
-      return _PairingPayload(piId: parts.first.trim(), token: parts.last.trim());
+      return _PairingPayload(
+        piId: parts.first.trim(),
+        token: parts.last.trim(),
+      );
     }
     return _PairingPayload(piId: NetworkConfig.defaultHomePiId, token: payload);
   }
@@ -369,16 +456,61 @@ class _DashboardLoading extends StatelessWidget {
   }
 }
 
+class _UnpairedHomeState extends StatelessWidget {
+  const _UnpairedHomeState({
+    required this.name,
+    required this.onPair,
+    required this.onLogout,
+    required this.isPairing,
+  });
+
+  final String name;
+  final VoidCallback onPair;
+  final VoidCallback onLogout;
+  final bool isPairing;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+      children: [
+        DashboardHeader(name: name, alertCount: 0, onLogout: onLogout),
+        const SizedBox(height: 28),
+        AppEmptyState(
+          icon: Icons.home_work_outlined,
+          title: 'Pair your home',
+          message:
+              'Scan or enter the Pi pairing code to unlock live energy, breakers, and sensors.',
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: isPairing ? null : onPair,
+          icon: isPairing
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.qr_code_scanner),
+          label: Text(isPairing ? 'Pairing' : 'Pair home'),
+        ),
+      ],
+    );
+  }
+}
+
 class _DashboardActions extends StatelessWidget {
   const _DashboardActions({
     required this.onSensors,
     required this.onPair,
     required this.isPairing,
+    this.showPair = true,
   });
 
   final VoidCallback onSensors;
   final VoidCallback onPair;
   final bool isPairing;
+  final bool showPair;
 
   @override
   Widget build(BuildContext context) {
@@ -391,20 +523,22 @@ class _DashboardActions extends StatelessWidget {
             label: const Text('Sensors'),
           ),
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: isPairing ? null : onPair,
-            icon: isPairing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.qr_code_scanner),
-            label: Text(isPairing ? 'Pairing' : 'Pair'),
+        if (showPair) ...[
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: isPairing ? null : onPair,
+              icon: isPairing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.qr_code_scanner),
+              label: Text(isPairing ? 'Pairing' : 'Pair'),
+            ),
           ),
-        ),
+        ],
       ],
     );
   }

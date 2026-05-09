@@ -274,7 +274,7 @@ class AuthService {
       throw StateError('User is not signed in.');
     }
 
-    if (!NetworkConfig.useLocalPiApi) {
+    if (NetworkConfig.useCognitoAuth && NetworkConfig.apiBaseUrl.isNotEmpty) {
       return _loadCurrentUserProfileFromApi(session, user);
     }
 

@@ -345,8 +345,7 @@ class KahrabaIqApiService {
   }
 
   Stream<SensorData> watchLiveSensorData({required String homeId}) {
-    if (!NetworkConfig.useAwsIotLive ||
-        homeId != NetworkConfig.defaultHomeId) {
+    if (!NetworkConfig.useAwsIotLive || homeId != NetworkConfig.defaultHomeId) {
       return const Stream<SensorData>.empty();
     }
     return _watchAwsIotLivePayloads(homeId: homeId).map((data) {
@@ -359,8 +358,7 @@ class KahrabaIqApiService {
   }
 
   Stream<DashboardData> watchLiveDashboardData({required String homeId}) {
-    if (!NetworkConfig.useAwsIotLive ||
-        homeId != NetworkConfig.defaultHomeId) {
+    if (!NetworkConfig.useAwsIotLive || homeId != NetworkConfig.defaultHomeId) {
       return const Stream<DashboardData>.empty();
     }
     return _watchAwsIotLivePayloads(
@@ -650,16 +648,20 @@ class KahrabaIqApiService {
     final room = _asMap(data['room']);
     final energy = _asMap(data['energy']);
     final devicesMap = _asMap(data['devices']);
-    final devices = devicesMap.entries
-        .map((entry) => _parseAwsIotLiveDevice(entry.key, _asMap(entry.value)))
-        .where(
-          (device) =>
-              device.controllable ||
-              device.id.startsWith('breaker_') ||
-              device.id.startsWith('matter_'),
-        )
-        .toList()
-      ..sort(_compareDevices);
+    final devices =
+        devicesMap.entries
+            .map(
+              (entry) => _parseAwsIotLiveDevice(entry.key, _asMap(entry.value)),
+            )
+            .where(
+              (device) =>
+                  _isDisplayDevice(device) &&
+                  (device.controllable ||
+                      device.id.startsWith('breaker_') ||
+                      device.id.startsWith('matter_')),
+            )
+            .toList()
+          ..sort(_compareDevices);
     final totalDevicePower = devices.fold<double>(
       0,
       (sum, device) => sum + device.currentPower,
@@ -951,16 +953,18 @@ class KahrabaIqApiService {
             root: data,
           );
 
-    final parsedDevices = devicesMap.entries
-        .map((entry) => _parseApiDevice(entry.key, _asMap(entry.value)))
-        .where(
-          (device) =>
-              device.controllable ||
-              device.id.startsWith('breaker_') ||
-              device.id.startsWith('matter_'),
-        )
-        .toList()
-      ..sort(_compareDevices);
+    final parsedDevices =
+        devicesMap.entries
+            .map((entry) => _parseApiDevice(entry.key, _asMap(entry.value)))
+            .where(
+              (device) =>
+                  _isDisplayDevice(device) &&
+                  (device.controllable ||
+                      device.id.startsWith('breaker_') ||
+                      device.id.startsWith('matter_')),
+            )
+            .toList()
+          ..sort(_compareDevices);
 
     final pendingCommands = <String>{};
     for (final entry in devicesMap.entries) {
@@ -1032,7 +1036,8 @@ class KahrabaIqApiService {
         ens160Ok: _asBool(_pick(room, ['ens160_ok'])),
         online: _asBool(
           _pick(room, ['sensor_online', 'sensorOnline', 'online']),
-          fallback: _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) !=
+          fallback:
+              _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) !=
               null,
         ),
       ),
@@ -1133,6 +1138,16 @@ class KahrabaIqApiService {
             _pick(data, ['last_command_message']),
       ),
     );
+  }
+
+  bool _isDisplayDevice(Device device) {
+    final id = device.id.toLowerCase();
+    final name = device.name.toLowerCase();
+    return !id.startsWith('esp32') &&
+        !id.contains('_sensor') &&
+        !id.contains('sensor_') &&
+        !name.contains('esp32') &&
+        !name.contains('sensor receiver');
   }
 
   DeviceType _parseApiDeviceType(String deviceId, String name, String rawType) {
@@ -1451,7 +1466,8 @@ class KahrabaIqApiService {
       data: {
         'pi_id': piId,
         'token': token,
-        if (homeName != null && homeName.trim().isNotEmpty) 'home_name': homeName.trim(),
+        if (homeName != null && homeName.trim().isNotEmpty)
+          'home_name': homeName.trim(),
       },
     );
     return _asMap(response.data);
@@ -2110,7 +2126,10 @@ class KahrabaIqApiService {
 
     return AiDashboardSummary(
       updatedAt: _asDateTime(_pick(data, ['updated_at', 'updatedAt'])),
-      source: _asString(_pick(data, ['source']), fallback: 'KahrabaIQ Intelligence'),
+      source: _asString(
+        _pick(data, ['source']),
+        fallback: 'KahrabaIQ Intelligence',
+      ),
       modelName: _asString(_pick(data, ['model_name', 'modelName'])),
       modelVersion: _asString(_pick(data, ['model_version', 'modelVersion'])),
       inputSource: _asString(_pick(data, ['input_source', 'inputSource'])),
@@ -2178,7 +2197,10 @@ class KahrabaIqApiService {
     return AiDailySummary(
       dayId: _asString(_pick(data, ['day_id', 'dayId'])),
       updatedAt: _asDateTime(_pick(data, ['updated_at', 'updatedAt'])),
-      source: _asString(_pick(data, ['source']), fallback: 'KahrabaIQ Intelligence'),
+      source: _asString(
+        _pick(data, ['source']),
+        fallback: 'KahrabaIQ Intelligence',
+      ),
       predictionCount: _asInt(
         _pick(data, ['prediction_count', 'predictionCount']),
       ),
@@ -2230,7 +2252,10 @@ class KahrabaIqApiService {
         fallback: 'KahrabaIQ Intelligence insight',
       ),
       message: _asString(_pick(data, ['message'])),
-      source: _asString(_pick(data, ['source']), fallback: 'KahrabaIQ Intelligence'),
+      source: _asString(
+        _pick(data, ['source']),
+        fallback: 'KahrabaIQ Intelligence',
+      ),
       relatedDeviceId: _asNullableString(
         _pick(data, ['related_device_id', 'relatedDeviceId']),
       ),
@@ -2275,7 +2300,10 @@ class KahrabaIqApiService {
         _pick(data, ['message']),
         fallback: 'KahrabaIQ Intelligence detected unusual energy behavior.',
       ),
-      source: _asString(_pick(data, ['source']), fallback: 'KahrabaIQ Intelligence'),
+      source: _asString(
+        _pick(data, ['source']),
+        fallback: 'KahrabaIQ Intelligence',
+      ),
       createdAt: _asDateTime(
         _pick(data, ['created_at', 'createdAt', 'timestamp']),
       ),
