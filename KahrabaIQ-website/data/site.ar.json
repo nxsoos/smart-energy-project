@@ -71,7 +71,7 @@
   "architecture": [
     { "layer": "الطبقة الفيزيائية", "title": "الحساسات", "items": ["حركة / دخان", "تيار / حرارة"], "icon": "sensor" },
     { "layer": "طبقة الحافة", "title": "ESP32", "items": ["متحكم دقيق", "مرحلات"], "icon": "bolt" },
-    { "layer": "السحابة والذكاء", "title": "محرك الذكاء", "items": ["Python / TF", "Firebase"], "icon": "cloud" },
+    { "layer": "السحابة والذكاء", "title": "محرك الذكاء", "items": ["Python / AI", "AWS"], "icon": "cloud" },
     { "layer": "طبقة الواجهة", "title": "لوحة التحكم", "items": ["ويب + تطبيق", "عرض المشغل"], "icon": "monitor" }
   ],
   "connectors": {
@@ -79,7 +79,7 @@
   },
   "technology": [
     { "group": "الواجهة", "items": ["Next.js", "TypeScript", "Tailwind CSS", "Framer Motion", "Flutter"] },
-    { "group": "الخلفية والذكاء", "items": ["Python", "TensorFlow", "FastAPI", "Firebase", "AWS IoT"] },
+    { "group": "الخلفية والذكاء", "items": ["Python", "TensorFlow", "FastAPI", "DynamoDB", "AWS IoT"] },
     { "group": "العتاد", "items": ["ESP32", "PIR Sensor", "MQ-2 Smoke", "ACS712 Current", "4-Ch Relay", "DHT22"] }
   ],
   "team": [

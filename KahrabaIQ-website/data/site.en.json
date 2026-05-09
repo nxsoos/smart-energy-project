@@ -71,7 +71,7 @@
   "architecture": [
     { "layer": "Physical Layer", "title": "Sensors", "items": ["PIR / Smoke", "Current / Temp"], "icon": "sensor" },
     { "layer": "Edge Layer", "title": "ESP32", "items": ["MCU", "Relays"], "icon": "bolt" },
-    { "layer": "Cloud / AI Layer", "title": "AI Engine", "items": ["Python / TF", "Firebase"], "icon": "cloud" },
+    { "layer": "Cloud / AI Layer", "title": "AI Engine", "items": ["Python / AI", "AWS"], "icon": "cloud" },
     { "layer": "Interface Layer", "title": "Dashboard", "items": ["Web + App", "Operator View"], "icon": "monitor" }
   ],
   "connectors": {
@@ -79,7 +79,7 @@
   },
   "technology": [
     { "group": "Frontend", "items": ["Next.js", "TypeScript", "Tailwind CSS", "Framer Motion", "Flutter"] },
-    { "group": "Backend & AI", "items": ["Python", "TensorFlow", "FastAPI", "Firebase", "AWS IoT"] },
+    { "group": "Backend & AI", "items": ["Python", "TensorFlow", "FastAPI", "DynamoDB", "AWS IoT"] },
     { "group": "Hardware", "items": ["ESP32", "PIR Sensor", "MQ-2 Smoke", "ACS712 Current", "4-Ch Relay", "DHT22"] }
   ],
   "team": [
