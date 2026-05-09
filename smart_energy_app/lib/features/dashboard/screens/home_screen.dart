@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/app_text_styles.dart';
 import '../../../core/theme/color_tokens.dart';
 import '../../../core/utils/app_routes.dart';
 import '../../../core/utils/constants.dart';
@@ -38,6 +39,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   bool _isPairing = false;
   String? _error;
+  String? _dashboardNotice;
   final Set<String> _localPendingCommands = {};
   final Map<String, String> _localCommandErrors = {};
 
@@ -58,35 +60,45 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isLoading = _dashboard == null;
       _error = null;
+      _dashboardNotice = null;
     });
 
     String? pairedHomeId;
-    try {
-      final profile = await AuthService().loadCurrentUserProfile();
-      pairedHomeId = _selectPairedHome(profile)?.homeId;
-      if (!mounted) {
-        return;
-      }
+    if (!NetworkConfig.useCognitoAuth) {
+      pairedHomeId = NetworkConfig.defaultHomeId;
       setState(() {
         _homeId = pairedHomeId;
       });
-      if (pairedHomeId == null || pairedHomeId.isEmpty) {
+    } else {
+      try {
+        final profile = await AuthService().loadCurrentUserProfile();
+        pairedHomeId = _selectPairedHome(profile)?.homeId;
+        if (!mounted) {
+          return;
+        }
         setState(() {
-          _dashboard = null;
+          _homeId = pairedHomeId;
+        });
+        if (pairedHomeId == null || pairedHomeId.isEmpty) {
+          setState(() {
+            _dashboard = null;
+            _isLoading = false;
+            _error = null;
+          });
+          return;
+        }
+      } catch (error) {
+        debugPrint('[KahrabaIQ PROFILE ERROR] $error');
+        if (!mounted) {
+          return;
+        }
+        setState(() {
           _isLoading = false;
-          _error = null;
+          _error =
+              'Could not load your home pairing. Please sign in again or check the backend connection.';
         });
         return;
       }
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _isLoading = false;
-        _error = 'Could not load your home pairing. Pull to retry.';
-      });
-      return;
     }
 
     if (widget.enableRealtimeSync && NetworkConfig.useAwsIotLive) {
@@ -95,21 +107,22 @@ class _HomeScreenState extends State<HomeScreen> {
           .listen(_applyDashboardData, onError: _handleLiveError);
     }
 
-    if (!NetworkConfig.remoteLiveOnly || !NetworkConfig.useAwsIotLive) {
-      try {
-        final dashboard = await _api.fetchDashboardData(homeId: pairedHomeId);
-        _applyDashboardData(dashboard);
-      } catch (error) {
-        if (!mounted) {
-          return;
-        }
-        if (_dashboard == null && !NetworkConfig.useAwsIotLive) {
-          setState(() {
-            _isLoading = false;
-            _error = 'Dashboard connection failed. Pull to retry.';
-          });
-        }
+    try {
+      final dashboard = await _api.fetchDashboardData(homeId: pairedHomeId);
+      _applyDashboardData(dashboard);
+    } catch (error) {
+      debugPrint('[KahrabaIQ DASHBOARD API FALLBACK ERROR] $error');
+      if (!mounted) {
+        return;
       }
+      if (_dashboard != null || NetworkConfig.useAwsIotLive) {
+        return;
+      }
+      setState(() {
+        _isLoading = false;
+        _dashboardNotice =
+            'Could not connect to the dashboard API. Live data will appear when the Pi is reachable.';
+      });
     }
   }
 
@@ -135,6 +148,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       _isLoading = false;
       _error = null;
+      _dashboardNotice = null;
     });
   }
 
@@ -145,9 +159,15 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_dashboard == null) {
       setState(() {
         _isLoading = false;
-        _error = 'Live dashboard data is unavailable. Pull to retry.';
+        _dashboardNotice =
+            'Could not receive live data. The Pi may be offline or frozen.';
       });
+      return;
     }
+    setState(() {
+      _dashboardNotice =
+          'Live updates are paused. Showing the latest available dashboard data.';
+    });
   }
 
   @override
@@ -170,10 +190,10 @@ class _HomeScreenState extends State<HomeScreen> {
             : dashboard == null
             ? AppEmptyState(
                 icon: Icons.dashboard_outlined,
-                title: 'Waiting for live data',
-                message: NetworkConfig.useAwsIotLive
-                    ? 'AWS IoT is connected, but no dashboard message has arrived yet.'
-                    : 'Connect to the Pi or enable AWS IoT live data.',
+                title: 'No dashboard data yet',
+                message:
+                    _dashboardNotice ??
+                    'Could not receive dashboard data. Pull to retry.',
               )
             : RefreshIndicator(
                 color: ColorTokens.primary,
@@ -186,6 +206,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       alertCount: dashboard.alerts.length,
                       onLogout: _logout,
                     ),
+                    if (_dashboardNotice != null) ...[
+                      const SizedBox(height: 16),
+                      _DashboardNotice(message: _dashboardNotice!),
+                    ],
                     const SizedBox(height: 24),
                     EnergyHeroCard(
                       reading: dashboard.reading,
@@ -555,6 +579,45 @@ class _DashboardActions extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+class _DashboardNotice extends StatelessWidget {
+  const _DashboardNotice({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: ColorTokens.warning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: ColorTokens.warning.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.wifi_off_rounded,
+            color: ColorTokens.warning,
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: AppTextStyles.caption.copyWith(
+                color: ColorTokens.textPrimary,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
