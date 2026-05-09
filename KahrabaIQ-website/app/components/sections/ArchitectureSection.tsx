@@ -6,15 +6,16 @@ function ArchitectureNetwork({ content }: { content: SiteContent["architectureNe
   return (
     <div className="architecture-network">
       <svg className="network-lines" viewBox="0 0 1000 560" preserveAspectRatio="none" aria-hidden="true">
-        <path className="network-path p-top-left" d="M500 280 C390 250 300 180 190 115" />
-        <path className="network-path p-top" d="M500 280 C500 220 500 165 500 98" />
-        <path className="network-path p-top-right" d="M500 280 C610 250 700 180 810 115" />
-        <path className="network-path p-left" d="M500 280 C390 280 295 280 170 280" />
-        <path className="network-path p-right" d="M500 280 C610 280 705 280 830 280" />
-        <path className="network-path p-bottom-left" d="M500 280 C390 315 305 380 205 445" />
-        <path className="network-path p-bottom" d="M500 280 C500 342 500 398 500 465" />
-        <path className="network-path p-bottom-right" d="M500 280 C610 315 695 380 795 445" />
-        <path className="network-path p-lower" d="M500 280 C500 365 500 438 500 528" />
+        <ellipse className="network-orbit" cx="500" cy="280" rx="335" ry="210" />
+        <path className="network-path p-top-left" d="M500 280 C410 250 330 178 215 112" />
+        <path className="network-path p-top" d="M500 280 C500 222 500 158 500 82" />
+        <path className="network-path p-top-right" d="M500 280 C590 250 670 178 785 112" />
+        <path className="network-path p-left" d="M500 280 C390 272 282 255 165 238" />
+        <path className="network-path p-right" d="M500 280 C610 272 718 255 835 238" />
+        <path className="network-path p-bottom-left" d="M500 280 C405 322 318 390 220 462" />
+        <path className="network-path p-bottom" d="M500 280 C500 348 500 416 500 490" />
+        <path className="network-path p-bottom-right" d="M500 280 C595 322 682 390 780 462" />
+        <path className="network-path p-lower" d="M500 280 C610 304 720 326 835 360" />
       </svg>
       <div className="network-core">
         <Icon name={content.center.icon as IconName} />

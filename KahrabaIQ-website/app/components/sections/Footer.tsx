@@ -11,7 +11,6 @@ export function Footer({ content }: { content: SiteContent }) {
             <button type="button" className="brand image-brand footer-brand" onClick={() => document.getElementById("home")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
               <Image src={content.assets.wordmark} alt={content.assets.wordmarkAlt} width={180} height={120} className="brand-wordmark" />
             </button>
-            <p>{content.footer.university}</p>
           </div>
           <nav className="footer-nav" aria-label={content.accessibility.navLinks}>
             {content.nav.map(({ label, id }) => <button key={id} type="button" onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{label}</button>)}

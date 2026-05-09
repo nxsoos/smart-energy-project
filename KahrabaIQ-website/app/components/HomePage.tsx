@@ -21,6 +21,7 @@ export default function HomePage({ content, allContent, locale }: { content: Sit
   const [boot, setBoot] = useState<{ visible: boolean; locale: Locale; fast: boolean; target?: Locale }>({ visible: !arrivedFromSwitch, locale, fast: false });
   const [active, setActive] = useState("");
   const [scrolled, setScrolled] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!arrivedFromSwitch) return;
@@ -114,10 +115,14 @@ export default function HomePage({ content, allContent, locale }: { content: Sit
     return () => cards.forEach((card) => card.removeEventListener("mousemove", move));
   }, [locale]);
 
-  const scrollToSection = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const scrollToSection = (id: string) => {
+    setMenuOpen(false);
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const switchLocale = (target: Locale) => {
     if (target === locale || boot.visible) return;
+    setMenuOpen(false);
     window.sessionStorage.setItem("kahrabaiq-scroll-y", String(window.scrollY));
     window.sessionStorage.setItem("kahrabaiq-transition-locale", target);
     setBoot({ visible: true, locale: target, fast: true, target });
@@ -138,9 +143,14 @@ export default function HomePage({ content, allContent, locale }: { content: Sit
         <div className="cursor-dot" aria-hidden="true" />
         <div className="cursor-ring" aria-hidden="true" />
         <button className="skip-link" type="button" onClick={() => scrollToSection("home")}>{content.accessibility.skip}</button>
-        <nav className={`navbar ${isArabic ? "navbar-ar" : "navbar-en"} ${scrolled ? "scrolled" : ""}`} dir={isArabic ? "rtl" : "ltr"} aria-label={content.accessibility.nav}>
+        <nav className={`navbar ${isArabic ? "navbar-ar" : "navbar-en"} ${scrolled ? "scrolled" : ""} ${menuOpen ? "menu-open" : ""}`} dir={isArabic ? "rtl" : "ltr"} aria-label={content.accessibility.nav}>
           <button type="button" className="brand image-brand" aria-label={content.accessibility.home} onClick={() => scrollToSection("home")}>
             <Image src={content.assets.wordmark} alt={content.assets.wordmarkAlt} width={150} height={100} className="brand-wordmark" priority />
+          </button>
+          <button type="button" className="menu-toggle" aria-label={content.accessibility.navLinks} aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
+            <span />
+            <span />
+            <span />
           </button>
           <div className="nav-links" dir={isArabic ? "rtl" : "ltr"} aria-label={content.accessibility.navLinks}>
             {content.nav.map(({ label, id }) => <button key={id} type="button" onClick={() => scrollToSection(id)} className={active === id ? "active" : ""}>{label}</button>)}
