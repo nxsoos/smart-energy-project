@@ -1,0 +1,748 @@
+from __future__ import annotations
+
+import os
+import socket
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import requests
+from dotenv import load_dotenv
+from flask import Flask, Response, jsonify
+
+from local_state_store import get_path, home_snapshot, set_path
+try:
+    from aws_iot_live_publisher import build_live_payload
+except Exception:
+    build_live_payload = None
+
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
+load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
+load_dotenv()
+
+PI_ID = os.environ.get("PI_ID", "pi_local_001")
+PI_DEVICE_TOKEN = os.environ.get("PI_DEVICE_TOKEN", "")
+HOME_ID = os.environ.get("HOME_ID", "")
+KAHRABAIQ_API_URL = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
+PI_AGENT_PORT = int(os.environ.get("PI_AGENT_PORT", "5010"))
+AGENT_VERSION = os.environ.get("PI_AGENT_VERSION", "local-agent-1")
+HEARTBEAT_INTERVAL_SECONDS = float(os.environ.get("PI_HEARTBEAT_INTERVAL_SECONDS", "45"))
+LIVE_SYNC_INTERVAL_SECONDS = float(os.environ.get("PI_LIVE_SYNC_INTERVAL_SECONDS", "10"))
+COMMAND_POLL_SECONDS = float(os.environ.get("PI_COMMAND_POLL_SECONDS", "3"))
+KIOSK_TOKEN_REFRESH_MARGIN_SECONDS = float(os.environ.get("KIOSK_TOKEN_REFRESH_MARGIN_SECONDS", "240"))
+ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "http://192.168.4.1").rstrip("/")
+ESP32_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
+ESP32_DISCOVERY_CANDIDATES = [
+    item.strip().rstrip("/")
+    for item in os.environ.get(
+        "ESP32_DISCOVERY_CANDIDATES",
+        "http://kahrabaiq-esp32.local,http://192.168.4.1",
+    ).split(",")
+    if item.strip()
+]
+PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "http://kahrabaiq-pi.local:5000").rstrip("/")
+PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "http://kahrabaiq-pi.local:5001").rstrip("/")
+
+app = Flask(__name__)
+_state_lock = threading.RLock()
+_agent_state: dict[str, Any] = {
+    "kiosk_token": None,
+    "kiosk_expires_at_ms": 0,
+    "last_error": None,
+    "last_heartbeat_at_ms": None,
+    "last_live_sync_at_ms": None,
+    "last_command_poll_at_ms": None,
+}
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def headers() -> dict[str, str]:
+    return {"X-Pi-Id": PI_ID, "X-Device-Token": PI_DEVICE_TOKEN}
+
+
+def local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except Exception:
+        return ""
+
+
+def current_wifi_ssid() -> str:
+    try:
+        import subprocess
+
+        result = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=2, check=False)
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def api_request(method: str, path: str, **kwargs: Any) -> requests.Response:
+    if not KAHRABAIQ_API_URL:
+        raise RuntimeError("KAHRABAIQ_API_URL is required for Pi agent.")
+    return requests.request(method, f"{KAHRABAIQ_API_URL}{path}", timeout=12, **kwargs)
+
+
+def refresh_kiosk_token(force: bool = False) -> dict[str, Any]:
+    with _state_lock:
+        expires_at_ms = int(_agent_state.get("kiosk_expires_at_ms") or 0)
+        if not force and _agent_state.get("kiosk_token") and expires_at_ms - now_ms() > KIOSK_TOKEN_REFRESH_MARGIN_SECONDS * 1000:
+            return dict(_agent_state)
+
+    response = api_request("POST", "/api/pi/kiosk-session", headers=headers())
+    data = response.json()
+    if not response.ok or data.get("success") is False:
+        raise RuntimeError(data.get("detail") or data.get("message") or "Failed to create kiosk session.")
+    with _state_lock:
+        _agent_state.update(
+            {
+                "kiosk_token": data.get("kiosk_token"),
+                "kiosk_expires_at_ms": int(data.get("expires_at_ms") or 0),
+                "home_id": data.get("home_id"),
+                "paired": data.get("paired"),
+                "last_error": None,
+            }
+        )
+        return dict(_agent_state)
+
+
+def esp32_link() -> dict[str, Any]:
+    value = get_path(f"homes/{HOME_ID or 'home_001'}/devices/{ESP32_DEVICE_ID}/link", {})
+    return value if isinstance(value, dict) else {}
+
+
+def send_heartbeat() -> None:
+    payload = {
+        "status": "online",
+        "agent_version": AGENT_VERSION,
+        "local_ip": local_ip(),
+        "wifi_ssid": current_wifi_ssid(),
+        "esp32": esp32_link(),
+    }
+    response = api_request("POST", f"/api/pi/{PI_ID}/heartbeat", headers=headers(), json=payload)
+    if not response.ok:
+        raise RuntimeError(response.text)
+    with _state_lock:
+        _agent_state["last_heartbeat_at_ms"] = now_ms()
+
+
+def build_live_state() -> dict[str, Any]:
+    home_id = HOME_ID or str(_agent_state.get("home_id") or "home_001")
+    if build_live_payload is not None:
+        payload = build_live_payload()
+        return {
+            "home_id": home_id,
+            "dashboard": payload.get("dashboard") if isinstance(payload.get("dashboard"), dict) else {},
+            "room": payload.get("room") if isinstance(payload.get("room"), dict) else {},
+            "devices": payload.get("devices") if isinstance(payload.get("devices"), dict) else {},
+            "energy": payload.get("energy") if isinstance(payload.get("energy"), dict) else {},
+            "commands": payload.get("commands") if isinstance(payload.get("commands"), dict) else {},
+            "alerts": list((payload.get("alerts") or {}).get("active", {}).values())
+            if isinstance(payload.get("alerts"), dict)
+            else payload.get("alerts", []),
+            "occupancy": payload.get("occupancy") if isinstance(payload.get("occupancy"), dict) else {},
+            "safety": payload.get("safety") if isinstance(payload.get("safety"), dict) else {},
+            "updated_at_ms": payload.get("timestamp_ms") or payload.get("timestampMs") or now_ms(),
+        }
+    home = home_snapshot(home_id)
+    devices = home.get("devices") if isinstance(home.get("devices"), dict) else {}
+    esp32 = devices.get(ESP32_DEVICE_ID) if isinstance(devices.get(ESP32_DEVICE_ID), dict) else {}
+    return {
+        "home_id": home_id,
+        "dashboard": home.get("dashboard") if isinstance(home.get("dashboard"), dict) else {},
+        "room": esp32.get("sensors") if isinstance(esp32.get("sensors"), dict) else {},
+        "devices": devices,
+        "alerts": list((home.get("alerts") or {}).get("active", {}).values()) if isinstance(home.get("alerts"), dict) else [],
+        "occupancy": (home.get("occupancy") or {}).get("room1", {}) if isinstance(home.get("occupancy"), dict) else {},
+        "safety": home.get("safety") if isinstance(home.get("safety"), dict) else {},
+        "updated_at_ms": now_ms(),
+    }
+
+
+def sync_live_state() -> None:
+    payload = build_live_state()
+    if not payload.get("home_id"):
+        return
+    response = api_request("POST", f"/api/pi/{PI_ID}/sensor-state", headers=headers(), json=payload)
+    if not response.ok:
+        raise RuntimeError(response.text)
+    with _state_lock:
+        _agent_state["last_live_sync_at_ms"] = now_ms()
+
+
+def kiosk_dashboard_data() -> dict[str, Any]:
+    session = refresh_kiosk_token()
+    token = session.get("kiosk_token")
+    if not token:
+        raise RuntimeError("Kiosk token is unavailable.")
+    response = api_request(
+        "GET",
+        "/api/kiosk/dashboard",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    data = response.json()
+    if not response.ok or data.get("success") is False:
+        raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+    return data
+
+
+def normalize_url(value: str) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if text and not text.startswith(("http://", "https://")):
+        text = f"http://{text}"
+    return text
+
+
+def esp32_status(base_url: str, timeout: float = 3.0) -> dict[str, Any]:
+    base = normalize_url(base_url)
+    response = requests.get(f"{base}/status", timeout=timeout)
+    data = response.json()
+    if not response.ok:
+        raise RuntimeError(data.get("message") or response.text)
+    return {
+        "device_id": str(data.get("device_id") or ESP32_DEVICE_ID),
+        "ip": base.replace("http://", "").replace("https://", "").split(":")[0],
+        "base_url": base,
+        "status": data,
+        "last_seen_at_ms": now_ms(),
+        "last_seen_at_iso": iso_now(),
+    }
+
+
+def save_esp32_link(record: dict[str, Any]) -> None:
+    home_id = HOME_ID or str(_agent_state.get("home_id") or "home_001")
+    set_path(f"homes/{home_id}/devices/{record.get('device_id') or ESP32_DEVICE_ID}/link", record)
+    api_request("POST", f"/api/pi/{PI_ID}/esp32/link", headers=headers(), json=record)
+
+
+def discover_esp32() -> dict[str, Any]:
+    candidates = []
+    linked = esp32_link()
+    if linked.get("base_url"):
+        candidates.append(str(linked["base_url"]))
+    candidates.extend(ESP32_DISCOVERY_CANDIDATES)
+    seen = set()
+    for candidate in candidates:
+        base = normalize_url(candidate)
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        try:
+            record = esp32_status(base)
+            save_esp32_link(record)
+            return record
+        except Exception:
+            continue
+    raise RuntimeError("ESP32 was not found on this network.")
+
+
+def provision_esp32(payload: dict[str, Any]) -> dict[str, Any]:
+    setup_url = normalize_url(str(payload.get("setup_url") or ESP32_SETUP_URL))
+    ssid = str(payload.get("ssid") or "").strip()
+    password = str(payload.get("password") or "")
+    if not ssid or not password:
+        raise RuntimeError("ssid and password are required.")
+    body = {
+        "ssid": ssid,
+        "password": password,
+        "pi_base_url": PI_LOCAL_BASE_URL,
+        "pi_sensor_url": f"{PI_SENSOR_BASE_URL}/api/sensors/room1",
+        "home_id": HOME_ID or str(_agent_state.get("home_id") or ""),
+        "pi_id": PI_ID,
+        "device_id": str(payload.get("device_id") or ESP32_DEVICE_ID),
+        "device_key": str(payload.get("device_key") or os.environ.get("ESP32_DEVICE_KEY", "")),
+    }
+    response = requests.post(f"{setup_url}/provision", json=body, timeout=15)
+    data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"message": response.text}
+    if not response.ok:
+        raise RuntimeError(data.get("message") or response.text)
+    return {"setup_url": setup_url, "response": data}
+
+
+def reset_esp32(payload: dict[str, Any]) -> dict[str, Any]:
+    base = normalize_url(str(payload.get("base_url") or esp32_link().get("base_url") or ESP32_SETUP_URL))
+    response = requests.post(f"{base}/reset", timeout=8)
+    data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"message": response.text}
+    if not response.ok:
+        raise RuntimeError(data.get("message") or response.text)
+    return {"base_url": base, "response": data}
+
+
+def execute_command(command: dict[str, Any]) -> dict[str, Any]:
+    name = str(command.get("command") or "")
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    if name == "provision_esp32":
+        return provision_esp32(payload)
+    if name == "discover_esp32":
+        return {"esp32": discover_esp32()}
+    if name == "reset_esp32":
+        return reset_esp32(payload)
+    raise RuntimeError(f"Unsupported command: {name}")
+
+
+KIOSK_DASHBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KahrabaIQ Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #04061b;
+      --panel: #15182b;
+      --panel-2: #1c2238;
+      --text: #f7f8ff;
+      --muted: #9da3b8;
+      --cyan: #11d9ff;
+      --green: #12c48b;
+      --yellow: #ffb020;
+      --red: #ff5c7a;
+      --border: rgba(17, 217, 255, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 50% -20%, #1b2a57 0, var(--bg) 42%);
+      color: var(--text);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .shell {
+      width: min(1180px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 28px 0 40px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 54px);
+      line-height: 1;
+    }
+
+    .sub {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(17, 217, 255, 0.08);
+      color: var(--cyan);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 16px var(--green);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      background: linear-gradient(145deg, rgba(28, 34, 56, 0.98), rgba(14, 18, 34, 0.98));
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+    }
+
+    .hero { grid-column: span 7; }
+    .room { grid-column: span 5; }
+    .wide { grid-column: span 12; }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .metric {
+      min-height: 108px;
+      border-radius: 14px;
+      background: rgba(4, 6, 27, 0.5);
+      padding: 16px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+
+    .value {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: clamp(28px, 4vw, 48px);
+      font-weight: 900;
+      letter-spacing: 0;
+    }
+
+    .unit {
+      margin-left: 6px;
+      color: var(--muted);
+      font-size: 20px;
+    }
+
+    .small-value {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 24px;
+      font-weight: 800;
+    }
+
+    .devices {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }
+
+    .device {
+      border-radius: 14px;
+      background: rgba(4, 6, 27, 0.5);
+      padding: 18px;
+      min-height: 160px;
+    }
+
+    .device-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .device-name {
+      font-size: 20px;
+      font-weight: 900;
+    }
+
+    .state {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(18, 196, 139, 0.14);
+      color: var(--green);
+      font-weight: 800;
+      text-transform: capitalize;
+    }
+
+    .state.offline,
+    .state.failed {
+      background: rgba(255, 92, 122, 0.14);
+      color: var(--red);
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .warn {
+      color: var(--yellow);
+    }
+
+    .error {
+      color: var(--red);
+    }
+
+    @media (max-width: 820px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .hero, .room { grid-column: span 12; }
+      .metric-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>KahrabaIQ</h1>
+        <div class="sub" id="subtitle">Loading dashboard...</div>
+      </div>
+      <div class="pill"><span class="dot"></span><span id="statusText">Connecting</span></div>
+    </header>
+
+    <section class="grid">
+      <article class="card hero">
+        <div class="label">Live Power</div>
+        <div><span class="value" id="power">--</span><span class="unit">W</span></div>
+        <div class="metric-row">
+          <div class="metric">
+            <div class="label">Today</div>
+            <div class="small-value" id="energyToday">-- kWh</div>
+          </div>
+          <div class="metric">
+            <div class="label">Cost</div>
+            <div class="small-value" id="costToday">-- BD</div>
+          </div>
+          <div class="metric">
+            <div class="label">Breakers</div>
+            <div class="small-value" id="breakerCount">--</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card room">
+        <div class="label">Room Sensors</div>
+        <div class="two-col">
+          <div class="metric">
+            <div class="label">Temperature</div>
+            <div class="small-value" id="temperature">-- C</div>
+          </div>
+          <div class="metric">
+            <div class="label">Humidity</div>
+            <div class="small-value" id="humidity">-- %</div>
+          </div>
+          <div class="metric">
+            <div class="label">Motion</div>
+            <div class="small-value" id="motion">--</div>
+          </div>
+          <div class="metric">
+            <div class="label">Smoke/Gas</div>
+            <div class="small-value" id="smoke">--</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card wide">
+        <div class="label">Devices</div>
+        <div class="devices" id="devices"></div>
+      </article>
+
+      <article class="card wide">
+        <div class="label">Alerts & Notes</div>
+        <div id="alerts">No active alerts.</div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+
+    function text(id, value) {
+      document.getElementById(id).textContent = value;
+    }
+
+    function number(value, fallback = 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function deviceState(device) {
+      if (!device.online) return "offline";
+      return device.display_state || device.state || "unknown";
+    }
+
+    function render(data) {
+      const dashboard = data.dashboard || {};
+      const energy = dashboard.energy || {};
+      const room = dashboard.room || {};
+      const devices = dashboard.devices || {};
+      const deviceList = Object.values(devices).filter((device) => {
+        const type = String(device.type || "");
+        return type !== "esp32_sensor" && !String(device.id || "").startsWith("esp32");
+      });
+      const breakers = deviceList.filter((device) => String(device.type || "").includes("breaker"));
+      const activeBreakers = breakers.filter((device) => deviceState(device) === "on").length;
+
+      text("subtitle", `${data.home_id || "home"} - ${dashboard.updated_at_iso || "waiting for live state"}`);
+      text("statusText", data.paired ? "Live" : "Unpaired");
+      text("power", fmt.format(number(energy.currentPowerW ?? energy.powerW)));
+      text("energyToday", `${fmt.format(number(energy.energyTodayKwh ?? energy.totalEnergyKwh))} kWh`);
+      text("costToday", `${number(energy.costToday).toFixed(3)} BD`);
+      text("breakerCount", `${activeBreakers}/${breakers.length || 0}`);
+      text("temperature", room.online === false ? "Offline" : `${fmt.format(number(room.temperature))} C`);
+      text("humidity", room.online === false ? "Offline" : `${fmt.format(number(room.humidity))} %`);
+      text("motion", room.motion_text || (number(room.motion) ? "Motion" : "Clear"));
+      text("smoke", room.smoke_text || (number(room.smoke) ? "Detected" : "Clear"));
+
+      const devicesNode = document.getElementById("devices");
+      devicesNode.innerHTML = "";
+      if (!deviceList.length) {
+        devicesNode.textContent = "No devices are available.";
+      } else {
+        for (const device of deviceList) {
+          const state = deviceState(device);
+          const card = document.createElement("div");
+          card.className = "device";
+          card.innerHTML = `
+            <div class="device-head">
+              <div>
+                <div class="device-name">${device.name || device.id || "Device"}</div>
+                <div class="label">${device.branch || device.control_method || ""}</div>
+              </div>
+              <div class="state ${state === "offline" ? "offline" : ""}">${state}</div>
+            </div>
+            <div class="two-col">
+              <div><div class="label">Power</div><div class="small-value">${fmt.format(number(device.power_W))} W</div></div>
+              <div><div class="label">Energy</div><div class="small-value">${fmt.format(number(device.energy_kWh))} kWh</div></div>
+              <div><div class="label">Voltage</div><div class="small-value">${fmt.format(number(device.voltage_V))} V</div></div>
+              <div><div class="label">Current</div><div class="small-value">${fmt.format(number(device.current_A))} A</div></div>
+            </div>
+          `;
+          devicesNode.appendChild(card);
+        }
+      }
+
+      const alerts = dashboard.alerts || [];
+      const notes = [];
+      if (room.stale || room.online === false) {
+        notes.push('<span class="warn">Room sensors are offline or stale.</span>');
+      }
+      for (const device of deviceList) {
+        if (device.last_command_status === "failed" || device.last_command_message) {
+          notes.push(`<span class="warn">${device.name || device.id}: ${device.last_command_message || "Last command failed."}</span>`);
+        }
+      }
+      for (const alert of alerts) {
+        notes.push(`<span class="error">${alert.title || alert.message || "Active alert"}</span>`);
+      }
+      document.getElementById("alerts").innerHTML = notes.length ? notes.join("<br>") : "No active alerts.";
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/kiosk/dashboard-data", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+          throw new Error(data.message || data.detail || "Dashboard request failed");
+        }
+        render(data);
+      } catch (error) {
+        text("statusText", "Offline");
+        document.getElementById("alerts").innerHTML = `<span class="error">${error.message}</span>`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
+"""
+
+
+def poll_commands() -> None:
+    response = api_request("GET", f"/api/pi/{PI_ID}/commands", headers=headers())
+    data = response.json()
+    if not response.ok:
+        raise RuntimeError(response.text)
+    for command in data.get("commands") or []:
+        command_id = command.get("command_id") or command.get("id")
+        if not command_id:
+            continue
+        try:
+            result = execute_command(command)
+            complete = {"success": True, "result": result}
+        except Exception as error:
+            complete = {"success": False, "message": str(error)}
+        api_request("POST", f"/api/pi/{PI_ID}/commands/{command_id}/complete", headers=headers(), json=complete)
+    with _state_lock:
+        _agent_state["last_command_poll_at_ms"] = now_ms()
+
+
+def loop_worker(name: str, interval: float, fn) -> None:
+    while True:
+        started = time.time()
+        try:
+            fn()
+            with _state_lock:
+                _agent_state["last_error"] = None
+        except Exception as error:
+            with _state_lock:
+                _agent_state["last_error"] = f"{name}: {error}"
+        elapsed = time.time() - started
+        time.sleep(max(1.0, interval - elapsed))
+
+
+@app.get("/api/kiosk/session")
+def kiosk_session() -> Any:
+    try:
+        session = refresh_kiosk_token()
+        return jsonify(
+            {
+                "success": True,
+                "pi_id": PI_ID,
+                "home_id": session.get("home_id"),
+                "paired": session.get("paired"),
+                "kiosk_token": session.get("kiosk_token"),
+                "expires_at_ms": session.get("kiosk_expires_at_ms"),
+            }
+        )
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 503
+
+
+@app.get("/api/kiosk/dashboard-data")
+def local_kiosk_dashboard_data() -> Any:
+    try:
+        return jsonify(kiosk_dashboard_data())
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 503
+
+
+@app.get("/dashboard")
+def local_dashboard() -> Response:
+    return Response(KIOSK_DASHBOARD_HTML, mimetype="text/html")
+
+
+@app.get("/api/agent/status")
+def agent_status() -> Any:
+    with _state_lock:
+        return jsonify({"success": True, "pi_id": PI_ID, "state": dict(_agent_state)})
+
+
+def start_background_threads() -> None:
+    refresh_kiosk_token(force=True)
+    workers = [
+        ("kiosk-token", max(60, KIOSK_TOKEN_REFRESH_MARGIN_SECONDS / 2), lambda: refresh_kiosk_token(force=False)),
+        ("heartbeat", HEARTBEAT_INTERVAL_SECONDS, send_heartbeat),
+        ("live-sync", LIVE_SYNC_INTERVAL_SECONDS, sync_live_state),
+        ("commands", COMMAND_POLL_SECONDS, poll_commands),
+    ]
+    for name, interval, fn in workers:
+        thread = threading.Thread(target=loop_worker, args=(name, interval, fn), daemon=True, name=f"kahrabaiq-{name}")
+        thread.start()
+
+
+if __name__ == "__main__":
+    start_background_threads()
+    app.run(host="127.0.0.1", port=PI_AGENT_PORT)

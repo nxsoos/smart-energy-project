@@ -7,11 +7,6 @@ yarn-error.log*
 firebase-debug.log*
 firebase-debug.*.log*
 
-# Firebase cache
-.firebase/
-
-# Firebase config
-
 # Uncomment this if you'd like others to create their own Firebase project.
 # For a team working on the same Firebase project(s), it is recommended to leave
 # it commented so all members can deploy to the same project(s) in .firebaserc.
@@ -62,10 +57,6 @@ node_modules/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variables file
-.env
-.env.*
-*.local
 
 # Python
 __pycache__/
@@ -79,8 +70,6 @@ serviceAccountKey.json
 devices/serviceAccountKey.json
 *firebase-adminsdk*.json
 devices/*firebase-adminsdk*.json
-*.pem
-*.key
 
 # Local AI data and generated validation output
 devices/ai_ready_dataset_60_days.csv

@@ -1,0 +1,14 @@
+Install these Arduino libraries before flashing:
+
+- ESP32 board package
+- Adafruit AHTX0
+- DFRobot ENS160
+
+Built-in ESP32 libraries used by the firmware:
+
+- WiFi
+- HTTPClient
+- WebServer
+- Preferences
+- ESPmDNS
+- Wire

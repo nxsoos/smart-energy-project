@@ -6,18 +6,17 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 
-import 'package:smart_energy_app/main.dart';
+import 'package:smart_energy_app/features/auth/screens/auth_screen.dart';
 
 void main() {
-  testWidgets('Home screen displays app name', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const SmartEnergyApp(enableRealtimeSync: false));
+  testWidgets('Auth screen displays login entry point', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: AuthScreen()));
 
-    // Verify that the app name is displayed.
-    expect(find.text('Smart Energy Control'), findsOneWidget);
-
-    // Verify that energy overview section exists.
-    expect(find.text('Energy Overview'), findsOneWidget);
+    expect(find.text('Welcome to KahrabaIQ'), findsOneWidget);
+    expect(find.text('Sign in'), findsWidgets);
   });
 }

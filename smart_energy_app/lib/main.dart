@@ -1,63 +1,30 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'screens/auth_screen.dart';
-import 'screens/home_screen.dart';
-import 'services/auth_service.dart';
-import 'services/firebase_realtime_service.dart';
-import 'utils/constants.dart';
+import 'core/theme/app_theme.dart';
+import 'features/auth/screens/auth_screen.dart';
+import 'features/dashboard/screens/home_screen.dart';
+import 'shared/services/auth_service.dart';
+import 'core/utils/constants.dart';
 
-const String _pushInstallationIdKey = 'push_installation_id';
+class NoStretchScrollBehavior extends MaterialScrollBehavior {
+  const NoStretchScrollBehavior();
+
+  @override
+  Widget buildOverscrollIndicator(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) {
+    return child;
+  }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  try {
-    await Firebase.initializeApp();
-    await _registerPushNotifications();
-  } catch (_) {
-    // Keep app running even when Firebase native config is not present.
-  }
-  runApp(const SmartEnergyApp());
+  runApp(const KahrabaIQApp());
 }
 
-Future<void> _registerPushNotifications() async {
-  await _registerPushNotificationsForUser(AuthService().currentUser);
-}
-
-Future<void> _registerPushNotificationsForUser(AppUser? user) async {
-  final messaging = FirebaseMessaging.instance;
-  await messaging.requestPermission(alert: true, badge: true, sound: true);
-  final token = await messaging.getToken();
-  if (token == null || token.isEmpty) {
-    return;
-  }
-  if (user != null) {
-    final installationId = await _getPushInstallationId();
-    await FirebaseRealtimeService().registerNotificationToken(
-      homeId: NetworkConfig.firebaseHomeId,
-      token: token,
-      userId: user.uid,
-      platform: 'android',
-      installationId: installationId,
-    );
-  }
-}
-
-Future<String> _getPushInstallationId() async {
-  final prefs = await SharedPreferences.getInstance();
-  final existing = prefs.getString(_pushInstallationIdKey);
-  if (existing != null && existing.isNotEmpty) {
-    return existing;
-  }
-  final created =
-      'smart_energy_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
-  await prefs.setString(_pushInstallationIdKey, created);
-  return created;
-}
-
-class SmartEnergyApp extends StatelessWidget {
-  const SmartEnergyApp({super.key, this.enableRealtimeSync = true});
+class KahrabaIQApp extends StatelessWidget {
+  const KahrabaIQApp({super.key, this.enableRealtimeSync = true});
 
   final bool enableRealtimeSync;
 
@@ -66,28 +33,8 @@ class SmartEnergyApp extends StatelessWidget {
     return MaterialApp(
       title: appName,
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: AppColors.primary,
-          primary: AppColors.primary,
-          secondary: AppColors.accent,
-        ),
-        useMaterial3: true,
-        scaffoldBackgroundColor: AppColors.background,
-        appBarTheme: const AppBarTheme(centerTitle: false, elevation: 0),
-        cardTheme: CardThemeData(
-          elevation: 2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            elevation: 2,
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          ),
-        ),
-      ),
+      scrollBehavior: const NoStretchScrollBehavior(),
+      theme: AppTheme.dark,
       home: AuthGate(enableRealtimeSync: enableRealtimeSync),
     );
   }
@@ -103,36 +50,23 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> {
-  final Set<String> _registeredPushUsers = <String>{};
-
-  void _registerPushForSignedInUser(AppUser user) {
-    if (_registeredPushUsers.contains(user.uid)) {
-      return;
-    }
-    _registeredPushUsers.add(user.uid);
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      try {
-        await _registerPushNotificationsForUser(user);
-      } catch (_) {
-        _registeredPushUsers.remove(user.uid);
-      }
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
+    if (!NetworkConfig.useCognitoAuth) {
+      return HomeScreen(enableRealtimeSync: widget.enableRealtimeSync);
+    }
+
     return StreamBuilder<AppUser?>(
       stream: AuthService().authStateChanges,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
+            body: Center(child: Icon(Icons.offline_bolt, size: 44)),
           );
         }
         if (!snapshot.hasData) {
           return const AuthScreen();
         }
-        _registerPushForSignedInUser(snapshot.data!);
         return HomeScreen(enableRealtimeSync: widget.enableRealtimeSync);
       },
     );

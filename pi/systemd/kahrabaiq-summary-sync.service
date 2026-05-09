@@ -1,0 +1,16 @@
+[Unit]
+Description=KahrabaIQ hourly and daily summary sync
+After=network-online.target kahrabaiq-sensor-receiver.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kahrabaiq/pi/agent
+EnvironmentFile=/etc/kahrabaiq/pi.env
+ExecStart=/opt/kahrabaiq/.venv/bin/python /opt/kahrabaiq/pi/agent/summary_sync.py
+Restart=always
+RestartSec=10
+User=pi
+
+[Install]
+WantedBy=multi-user.target

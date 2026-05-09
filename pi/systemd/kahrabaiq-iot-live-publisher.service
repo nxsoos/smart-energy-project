@@ -1,0 +1,16 @@
+[Unit]
+Description=KahrabaIQ AWS IoT live dashboard publisher
+After=network-online.target kahrabaiq-sensor-receiver.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kahrabaiq/pi/agent
+EnvironmentFile=/etc/kahrabaiq/pi.env
+ExecStart=/opt/kahrabaiq/.venv/bin/python /opt/kahrabaiq/pi/agent/aws_iot_live_publisher.py
+Restart=always
+RestartSec=10
+User=pi
+
+[Install]
+WantedBy=multi-user.target

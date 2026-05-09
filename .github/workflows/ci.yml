@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  backend-and-pi:
+    name: Backend and Pi Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r seniorproject-backend/requirements.txt
+          pip install tuya-connector-python
+
+      - name: Compile backend and Pi modules
+        run: |
+          python -m py_compile \
+            seniorproject-backend/api_server.py \
+            seniorproject-backend/aws_cloud_store.py \
+            seniorproject-backend/main.py \
+            pi/agent/pi_agent.py \
+            pi/agent/local_state_store.py \
+            pi/agent/esp32_receiver.py \
+            pi/agent/summary_sync.py \
+            pi/agent/occupancy_utils.py \
+            pi/agent/timestamp_utils.py \
+            pi/agent/local_command_controller.py \
+            pi/agent/aws_remote_command_runner.py \
+            pi/agent/home_assistant_controller.py
+
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Prevent removed backend references from returning
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          blocked = [
+              "Fire" + "base",
+              "fire" + "base",
+              "FIRE" + "BASE",
+              "fire" + "base_admin",
+              "fire" + "base_core",
+              "fire" + "base_mess" + "aging",
+              "db" + r"\.reference",
+              "mess" + "aging",
+          ]
+          pattern = re.compile("|".join(blocked))
+          suffixes = {
+              ".py", ".dart", ".js", ".json", ".yaml", ".yml", ".gradle",
+              ".kt", ".java", ".md", ".html", ".css", ".sample", ".service", ".sh",
+          }
+          skip_dirs = {".git", ".dart_tool", "build", ".venv", "venv", "node_modules", "__pycache__"}
+          failures = []
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or path.suffix not in suffixes:
+                  continue
+              if any(part in skip_dirs for part in path.parts):
+                  continue
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              for index, line in enumerate(text.splitlines(), 1):
+                  if pattern.search(line):
+                      failures.append(f"{path}:{index}: {line.strip()}")
+          if failures:
+              print("Removed backend references found:")
+              print("\n".join(failures))
+              sys.exit(1)
+          PY
+
+  flutter:
+    name: Flutter Checks
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: smart_energy_app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test

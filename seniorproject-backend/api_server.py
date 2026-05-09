@@ -4,19 +4,21 @@ import os
 import re
 import hashlib
 import hmac
+import secrets
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import firebase_admin
+import jwt
 import requests
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from firebase_admin import auth, credentials, db, messaging
+from jwt import PyJWKClient
 from pydantic import BaseModel, Field
 
 from occupancy_utils import DEFAULT_OCCUPANCY_SETTINGS
@@ -32,18 +34,31 @@ from home_assistant_controller import (
     is_home_assistant_configured,
 )
 from aws_cloud_store import (
+    app_get_path,
+    app_set_path,
+    app_update_path,
     create_remote_command,
     create_iot_websocket_config,
     find_remote_command,
     query_recent_remote_commands,
+    update_remote_command,
 )
 
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
 load_dotenv()
 
 SERVICE_NAME = "smart_energy_api"
+STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "aws").strip().lower()
 BAHRAIN_TZ = ZoneInfo(TIMEZONE)
 DEFAULT_HOME_ID = "home_001"
+HOME_MEMBER_LIMIT = int(os.environ.get("HOME_MEMBER_LIMIT", "3"))
+PAIRING_TOKEN_TTL_MS = int(os.environ.get("PAIRING_TOKEN_TTL_SECONDS", "900")) * 1000
+HOME_INVITE_TTL_MS = int(os.environ.get("HOME_INVITE_TTL_SECONDS", str(7 * 24 * 60 * 60))) * 1000
+KIOSK_SESSION_TTL_SECONDS = int(os.environ.get("KIOSK_SESSION_TTL_SECONDS", "600"))
+KIOSK_COMMAND_TTL_SECONDS = int(os.environ.get("KIOSK_COMMAND_TTL_SECONDS", "300"))
+KIOSK_SESSION_SECRET = os.environ.get("KIOSK_SESSION_SECRET") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "dev-kiosk-session-secret"
+KIOSK_ALLOWED_COMMANDS = {"provision_esp32", "discover_esp32", "reset_esp32"}
 MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch"}
 CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *MATTER_DEVICE_IDS}
 VALID_COMMANDS = {"turn_on", "turn_off"}
@@ -68,6 +83,19 @@ SMOKE_CLEAR_DELAY_MS = 15 * 1000
 VALID_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 PY_WEEKDAY_TO_DAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+AWS_REGION = os.environ.get("AWS_REGION", "eu-west-1")
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
+COGNITO_APP_CLIENT_ID = os.environ.get("COGNITO_APP_CLIENT_ID", "")
+COGNITO_ISSUER = (
+    f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+    if COGNITO_USER_POOL_ID
+    else ""
+)
+COGNITO_JWKS_CLIENT = (
+    PyJWKClient(f"{COGNITO_ISSUER}/.well-known/jwks.json")
+    if COGNITO_ISSUER
+    else None
+)
 
 DEFAULT_DEVICE_NAMES = {
     "esp32_01": "Room Sensor",
@@ -293,7 +321,7 @@ SETTINGS_OPTIONS = {
 }
 
 app = FastAPI(
-    title="Smart Energy API",
+    title="KahrabaIQ API",
     description="Clean API layer for Flutter and Raspberry Pi dashboard clients.",
     version="1.0.0",
 )
@@ -447,7 +475,63 @@ class ChatSessionMessageRequest(BaseModel):
 
 class SignupProfileRequest(BaseModel):
     display_name: str
-    home_id: str = DEFAULT_HOME_ID
+    home_id: str | None = None
+
+
+class PiPairingTokenRequest(BaseModel):
+    display_name: str | None = None
+    dashboard_version: str | None = None
+    firmware_version: str | None = None
+
+
+class PiClaimRequest(BaseModel):
+    pi_id: str
+    token: str
+    home_name: str | None = None
+
+
+class HomeInviteCreateRequest(BaseModel):
+    role: str = "member"
+    max_uses: int = Field(1, ge=1, le=3)
+
+
+class HomeInviteClaimRequest(BaseModel):
+    invite_id: str
+    token: str
+
+
+class PiHeartbeatRequest(BaseModel):
+    status: str = "online"
+    agent_version: str | None = None
+    local_ip: str | None = None
+    wifi_ssid: str | None = None
+    esp32: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+
+
+class PiSensorStateRequest(BaseModel):
+    home_id: str | None = None
+    dashboard: dict[str, Any] = Field(default_factory=dict)
+    room: dict[str, Any] = Field(default_factory=dict)
+    devices: dict[str, Any] = Field(default_factory=dict)
+    energy: dict[str, Any] = Field(default_factory=dict)
+    commands: dict[str, Any] = Field(default_factory=dict)
+    alerts: list[dict[str, Any]] = Field(default_factory=list)
+    occupancy: dict[str, Any] = Field(default_factory=dict)
+    safety: dict[str, Any] = Field(default_factory=dict)
+    updated_at_ms: int | None = None
+
+
+class PiEsp32LinkRequest(BaseModel):
+    device_id: str = "esp32_01"
+    ip: str | None = None
+    base_url: str | None = None
+    status: dict[str, Any] = Field(default_factory=dict)
+
+
+class KioskCommandCreateRequest(BaseModel):
+    command: str
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class MemberCreateRequest(BaseModel):
@@ -471,7 +555,7 @@ class AuthContext:
 
 
 ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
-    "admin": {
+    "home_admin": {
         "can_view": True,
         "can_control_devices": True,
         "can_change_settings": True,
@@ -480,16 +564,18 @@ ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
         "can_change_control_mode": True,
         "can_use_ai_chat": True,
         "can_acknowledge_alerts": True,
+        "can_generate_invites": True,
     },
     "member": {
         "can_view": True,
         "can_control_devices": True,
         "can_change_settings": False,
         "can_manage_users": False,
-        "can_manage_schedules": True,
+        "can_manage_schedules": False,
         "can_change_control_mode": False,
         "can_use_ai_chat": True,
         "can_acknowledge_alerts": True,
+        "can_generate_invites": False,
     },
     "viewer": {
         "can_view": True,
@@ -500,67 +586,54 @@ ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
         "can_change_control_mode": False,
         "can_use_ai_chat": False,
         "can_acknowledge_alerts": False,
+        "can_generate_invites": False,
     },
 }
+
+ROLE_ALIASES = {"admin": "home_admin"}
 
 
 def iso_from_ms(timestamp_ms: Any) -> str | None:
     return ms_to_iso(timestamp_ms)
 
 
-def initialize_firebase() -> None:
-    """Initialize Firebase Admin using a service account file or ADC."""
-    if firebase_admin._apps:
-        return
-
-    database_url = os.environ.get("FIREBASE_DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("FIREBASE_DATABASE_URL environment variable is required.")
-
-    service_account_path = os.environ.get("SERVICE_ACCOUNT_PATH") or os.environ.get(
-        "GOOGLE_APPLICATION_CREDENTIALS"
-    )
-
-    if service_account_path:
-        cred = credentials.Certificate(service_account_path)
-        firebase_admin.initialize_app(cred, {"databaseURL": database_url})
-    else:
-        firebase_admin.initialize_app(options={"databaseURL": database_url})
+def initialize_storage() -> None:
+    if STORAGE_BACKEND != "aws":
+        raise RuntimeError("Only AWS storage is supported. Set STORAGE_BACKEND=aws.")
 
 
 @app.on_event("startup")
 def startup() -> None:
-    initialize_firebase()
+    initialize_storage()
     ensure_matter_devices(DEFAULT_HOME_ID)
     start_home_assistant_sync_thread(DEFAULT_HOME_ID)
 
 
 def safe_get(path: str, default: Any = None) -> Any:
-    """Read Firebase safely so one missing/broken path does not break the UI."""
+    """Read app storage safely so one missing path does not break the UI."""
     try:
-        value = db.reference(path).get()
-        return default if value is None else value
+        return app_get_path(path, default)
     except Exception:
         return default
 
 
 def safe_set(path: str, value: Any) -> None:
     try:
-        db.reference(path).set(value)
+        app_set_path(path, value)
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to write Firebase path {path}: {error}",
+            detail=f"Failed to write DynamoDB path {path}: {error}",
         ) from error
 
 
 def safe_update(path: str, value: dict[str, Any]) -> None:
     try:
-        db.reference(path).update(value)
+        app_update_path(path, value)
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to update Firebase path {path}: {error}",
+            detail=f"Failed to update DynamoDB path {path}: {error}",
         ) from error
 
 
@@ -703,17 +776,44 @@ def start_home_assistant_sync_thread(home_id: str) -> None:
 
 
 def get_permissions_for_role(role: str) -> dict[str, bool]:
-    normalized = role.strip().lower()
+    normalized = ROLE_ALIASES.get(role.strip().lower(), role.strip().lower())
     if normalized not in ROLE_PERMISSIONS:
         raise HTTPException(status_code=400, detail="Invalid role.")
     return dict(ROLE_PERMISSIONS[normalized])
 
 
 def validate_role(role: str) -> str:
-    normalized = role.strip().lower()
+    normalized = ROLE_ALIASES.get(role.strip().lower(), role.strip().lower())
     if normalized not in ROLE_PERMISSIONS:
-        raise HTTPException(status_code=400, detail="Role must be admin, member, or viewer.")
+        raise HTTPException(status_code=400, detail="Role must be home_admin, member, or viewer.")
     return normalized
+
+
+def platform_admin_emails() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in os.environ.get("PLATFORM_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+
+
+def platform_role_for_email(email: str) -> str:
+    return "platform_admin" if email.strip().lower() in platform_admin_emails() else "user"
+
+
+def is_platform_admin_profile(profile: dict[str, Any]) -> bool:
+    return str(profile.get("platform_role") or "user").lower() == "platform_admin"
+
+
+def home_member_count(home_id: str, *, roles: set[str] | None = None) -> int:
+    members = as_dict(safe_get(f"/homes/{home_id}/members", {}))
+    count = 0
+    for raw_member in members.values():
+        member = as_dict(raw_member)
+        role = validate_role(str(member.get("role", "viewer")))
+        if roles is None or role in roles:
+            count += 1
+    return count
 
 
 def hash_secret(secret: str) -> str:
@@ -784,24 +884,84 @@ def home_exists(home_id: str) -> bool:
     return safe_get(f"/homes/{home_id}") is not None
 
 
+def verify_cognito_id_token(token: str) -> dict[str, Any]:
+    if not COGNITO_JWKS_CLIENT or not COGNITO_APP_CLIENT_ID or not COGNITO_ISSUER:
+        raise ValueError("Cognito authentication is not configured.")
+    signing_key = COGNITO_JWKS_CLIENT.get_signing_key_from_jwt(token)
+    decoded = jwt.decode(
+        token,
+        signing_key.key,
+        algorithms=["RS256"],
+        audience=COGNITO_APP_CLIENT_ID,
+        issuer=COGNITO_ISSUER,
+    )
+    if decoded.get("token_use") != "id":
+        raise ValueError("Cognito token is not an ID token.")
+    return decoded
+
+
+def ensure_user_profile(uid: str, email: str, display_name: str) -> dict[str, Any]:
+    profile = as_dict(safe_get(f"/users/{uid}", {}))
+    timestamp_ms = now_ms()
+    timestamp_iso = iso_from_ms(timestamp_ms)
+    platform_role = platform_role_for_email(email)
+    if profile:
+        updates: dict[str, Any] = {
+            "email": profile.get("email") or email,
+            "display_name": profile.get("display_name") or display_name or email or uid,
+            "platform_role": platform_role,
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": timestamp_iso,
+        }
+        safe_update(f"/users/{uid}", updates)
+        return {**profile, **updates}
+    profile = {
+        "uid": uid,
+        "email": email,
+        "display_name": display_name or email or uid,
+        "platform_role": platform_role,
+        "default_home_id": None,
+        "homes": {},
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": timestamp_iso,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": timestamp_iso,
+    }
+    safe_set(f"/users/{uid}", profile)
+    return profile
+
+
+def find_user_profile_by_email(email: str) -> dict[str, Any]:
+    normalized = email.strip().lower()
+    for uid, raw_profile in as_dict(safe_get("/users", {})).items():
+        profile = as_dict(raw_profile)
+        if str(profile.get("email") or "").strip().lower() == normalized:
+            return {"uid": str(profile.get("uid") or uid), **profile}
+    return {}
+
+
 def authenticate_user_token(token: str) -> AuthContext:
     try:
-        decoded = auth.verify_id_token(token)
+        decoded = verify_cognito_id_token(token)
     except Exception as error:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.") from error
+        raise HTTPException(status_code=401, detail="Invalid Cognito ID token.") from error
 
-    uid = str(decoded.get("uid") or "")
+    uid = str(decoded.get("uid") or decoded.get("sub") or "")
     if not uid:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.")
-    profile = as_dict(safe_get(f"/users/{uid}", {}))
-    if not profile:
-        raise HTTPException(status_code=403, detail="User profile does not exist.")
+        raise HTTPException(status_code=401, detail="Invalid user ID token.")
+    email = str(decoded.get("email") or "")
+    display_name = str(decoded.get("name") or email or uid)
+    profile = ensure_user_profile(uid, email, display_name)
+    email = str(email or profile.get("email") or "")
+    platform_role = platform_role_for_email(email)
+    if profile.get("platform_role") != platform_role:
+        safe_update(f"/users/{uid}", {"platform_role": platform_role, "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
     return AuthContext(
         actor_type="user",
         actor_id=uid,
-        actor_role="user",
+        actor_role=platform_role,
         uid=uid,
-        email=str(decoded.get("email") or profile.get("email") or ""),
+        email=email,
         claims=decoded,
         permissions={},
     )
@@ -884,6 +1044,17 @@ def require_home_permission(permission: str):
         actor: AuthContext
         if token:
             actor = authenticate_user_token(token)
+            if actor.actor_role == "platform_admin":
+                actor = AuthContext(
+                    actor_type=actor.actor_type,
+                    actor_id=actor.actor_id,
+                    actor_role="platform_admin",
+                    uid=actor.uid,
+                    email=actor.email,
+                    claims=actor.claims,
+                    permissions={permission: True for permissions in ROLE_PERMISSIONS.values() for permission in permissions},
+                )
+                return actor
             member = as_dict(safe_get(f"/homes/{home_id}/members/{actor.uid}", {}))
             if not member:
                 audit_log(home_id, actor, "permission_check_failed", "home", home_id, {"permission": permission}, "denied")
@@ -916,7 +1087,8 @@ def require_home_permission(permission: str):
 
 def require_home_role(required_role: str):
     def dependency(actor: AuthContext = Depends(require_home_permission("can_view"))) -> AuthContext:
-        if actor.actor_role != required_role and actor.actor_type != "service":
+        normalized_required = ROLE_ALIASES.get(required_role, required_role)
+        if actor.actor_role not in {normalized_required, "platform_admin"} and actor.actor_type != "service":
             raise HTTPException(status_code=403, detail="Admin role is required.")
         return actor
 
@@ -925,11 +1097,12 @@ def require_home_role(required_role: str):
 
 def admin_count(home_id: str) -> int:
     members = as_dict(safe_get(f"/homes/{home_id}/members", {}))
-    return sum(1 for member in members.values() if as_dict(member).get("role") == "admin")
+    return sum(1 for member in members.values() if validate_role(str(as_dict(member).get("role", "viewer"))) == "home_admin")
 
 
 def member_record(uid: str, email: str, display_name: str, role: str) -> dict[str, Any]:
     timestamp_ms = now_ms()
+    role = validate_role(role)
     permissions = get_permissions_for_role(role)
     return {
         "uid": uid,
@@ -944,6 +1117,73 @@ def member_record(uid: str, email: str, display_name: str, role: str) -> dict[st
     }
 
 
+def add_user_to_home(uid: str, email: str, display_name: str, home_id: str, role: str) -> dict[str, Any]:
+    record = member_record(uid, email, display_name, role)
+    safe_set(f"/homes/{home_id}/members/{uid}", record)
+    profile = as_dict(safe_get(f"/users/{uid}", {}))
+    safe_update(
+        f"/users/{uid}",
+        {
+            "uid": uid,
+            "email": email,
+            "display_name": display_name,
+            "platform_role": profile.get("platform_role") or platform_role_for_email(email),
+            "default_home_id": profile.get("default_home_id") or home_id,
+            "homes": {**as_dict(profile.get("homes")), home_id: {"role": record["role"], **record["permissions"]}},
+            "created_at_ms": profile.get("created_at_ms") or record["added_at_ms"],
+            "created_at_iso": profile.get("created_at_iso") or record["added_at_iso"],
+            "updated_at_ms": record["updated_at_ms"],
+            "updated_at_iso": record["updated_at_iso"],
+        },
+    )
+    return record
+
+
+def create_home_for_pi(pi_id: str, uid: str, email: str, display_name: str, home_name: str | None) -> str:
+    timestamp_ms = now_ms()
+    preferred_home_id = os.environ.get("DEFAULT_HOME_ID", "").strip()
+    if preferred_home_id:
+        existing_home = as_dict(safe_get(f"/homes/{preferred_home_id}", {}))
+        if not existing_home or existing_home.get("pi_id") in {None, "", pi_id}:
+            home_id = preferred_home_id
+        else:
+            home_id = f"home_{timestamp_ms}_{secrets.token_hex(3)}"
+    else:
+        home_id = f"home_{timestamp_ms}_{secrets.token_hex(3)}"
+    safe_set(
+        f"/homes/{home_id}",
+        {
+            "home_id": home_id,
+            "name": (home_name or "KahrabaIQ Home").strip() or "KahrabaIQ Home",
+            "owner_uid": uid,
+            "pi_id": pi_id,
+            "status": "active",
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    safe_set(f"/homes/{home_id}/settings", {**DEFAULT_SETTINGS, "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+    safe_set(f"/homes/{home_id}/control", {"mode": "assist", "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+    ensure_matter_devices(home_id)
+    add_user_to_home(uid, email, display_name, home_id, "home_admin")
+    safe_update(
+        f"/pis/{pi_id}",
+        {
+            "pi_id": pi_id,
+            "status": "paired",
+            "home_id": home_id,
+            "paired_by_uid": uid,
+            "paired_at_ms": timestamp_ms,
+            "paired_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    return home_id
+
+
 @app.post("/api/auth/complete-signup")
 def complete_signup_profile(
     request: SignupProfileRequest,
@@ -953,68 +1193,52 @@ def complete_signup_profile(
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization bearer token.")
     try:
-        decoded = auth.verify_id_token(token)
+        decoded = verify_cognito_id_token(token)
     except Exception as error:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.") from error
+        raise HTTPException(status_code=401, detail="Invalid Cognito ID token.") from error
 
-    uid = str(decoded.get("uid") or "")
+    uid = str(decoded.get("uid") or decoded.get("sub") or "")
     email = str(decoded.get("email") or "")
     if not uid:
-        raise HTTPException(status_code=401, detail="Invalid Firebase ID token.")
-    home_id = request.home_id.strip() or DEFAULT_HOME_ID
+        raise HTTPException(status_code=401, detail="Invalid user ID token.")
     display_name = request.display_name.strip() or email or uid
     existing_profile = as_dict(safe_get(f"/users/{uid}", {}))
-    existing_member = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
-    if existing_profile and existing_member:
+    requested_home_id = (request.home_id or "").strip()
+    if existing_profile and not requested_home_id:
         return {
             "success": True,
-            "home_id": home_id,
+            "home_id": existing_profile.get("default_home_id"),
             "uid": uid,
-            "role": existing_member.get("role", "viewer"),
+            "role": None,
+            "platform_role": existing_profile.get("platform_role", platform_role_for_email(email)),
             "created": False,
         }
 
-    role = "admin" if admin_count(home_id) == 0 else "viewer"
     timestamp_ms = now_ms()
     timestamp_iso = iso_from_ms(timestamp_ms)
-    permissions = get_permissions_for_role(role)
+    platform_role = platform_role_for_email(email)
+    homes = as_dict(existing_profile.get("homes"))
     profile = {
         "uid": uid,
         "email": email,
         "display_name": display_name,
-        "default_home_id": existing_profile.get("default_home_id") or home_id,
-        "homes": {
-            **as_dict(existing_profile.get("homes")),
-            home_id: {"role": role, **permissions},
-        },
+        "platform_role": platform_role,
+        "default_home_id": existing_profile.get("default_home_id"),
+        "homes": homes,
         "created_at_ms": existing_profile.get("created_at_ms") or timestamp_ms,
         "created_at_iso": existing_profile.get("created_at_iso") or timestamp_iso,
         "updated_at_ms": timestamp_ms,
         "updated_at_iso": timestamp_iso,
     }
-    member = {
-        "uid": uid,
-        "email": email,
-        "display_name": display_name,
-        "role": role,
-        "permissions": permissions,
-        "added_at_ms": timestamp_ms,
-        "added_at_iso": timestamp_iso,
-        "updated_at_ms": timestamp_ms,
-        "updated_at_iso": timestamp_iso,
-    }
     safe_set(f"/users/{uid}", profile)
-    safe_set(f"/homes/{home_id}/members/{uid}", member)
-    actor = AuthContext("user", uid, role, permissions, uid=uid, email=email)
-    audit_log(
-        home_id,
-        actor,
-        "signup_profile_created",
-        "user",
-        uid,
-        {"email": email, "first_admin": role == "admin"},
-    )
-    return {"success": True, "home_id": home_id, "uid": uid, "role": role, "created": True}
+    return {
+        "success": True,
+        "home_id": profile.get("default_home_id"),
+        "uid": uid,
+        "role": None,
+        "platform_role": platform_role,
+        "created": not bool(existing_profile),
+    }
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -1033,7 +1257,669 @@ def object_to_list(value: Any) -> list[dict[str, Any]]:
                 items.append({"id": str(key), **item})
             else:
                 items.append({"id": str(key), "value": item})
-        return items
+    return items
+
+
+@app.get("/api/me")
+def get_me(actor: AuthContext = Depends(require_authenticated_user)) -> dict[str, Any]:
+    profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
+    homes = []
+    profile_homes = {
+        **as_dict(profile.get("homes")),
+        **as_dict(safe_get(f"/users/{actor.uid}/homes", {})),
+    }
+    for home_id, raw_access in profile_homes.items():
+        access = as_dict(raw_access)
+        home = as_dict(safe_get(f"/homes/{home_id}", {}))
+        role = validate_role(str(access.get("role", "viewer")))
+        homes.append(
+            {
+                "home_id": home_id,
+                "name": home.get("name") or home_id,
+                "role": role,
+                "permissions": {**get_permissions_for_role(role), **as_dict(access.get("permissions"))},
+                "pi_id": home.get("pi_id"),
+                "status": home.get("status", "active"),
+            }
+        )
+    platform_role = platform_role_for_email(actor.email or "")
+    return {
+        "success": True,
+        "uid": actor.uid,
+        "email": actor.email,
+        "display_name": profile.get("display_name") or actor.email,
+        "platform_role": platform_role,
+        "is_platform_admin": platform_role == "platform_admin",
+        "default_home_id": profile.get("default_home_id"),
+        "homes": homes,
+    }
+
+
+def authenticate_pi_request(pi_id: str, device_token: str) -> dict[str, Any]:
+    pi_id = pi_id.strip()
+    if not pi_id or not device_token:
+        raise HTTPException(status_code=401, detail="Pi ID and device token are required.")
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    if not pi:
+        timestamp_ms = now_ms()
+        pi = {
+            "pi_id": pi_id,
+            "status": "unpaired",
+            "token_hash": hash_secret(device_token),
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+        }
+        safe_set(f"/pis/{pi_id}", pi)
+    elif not secret_matches(device_token, str(pi.get("token_hash") or "")):
+        raise HTTPException(status_code=401, detail="Invalid Pi device token.")
+    safe_update(f"/pis/{pi_id}", {"last_seen_at_ms": now_ms(), "last_seen_at_iso": iso_from_ms(now_ms())})
+    return {**pi, "pi_id": pi_id}
+
+
+def pi_auth_context(
+    pi_id: str,
+    x_pi_id: str | None,
+    x_device_token: str | None,
+) -> dict[str, Any]:
+    if x_pi_id and x_pi_id != pi_id:
+        raise HTTPException(status_code=401, detail="Pi header does not match route.")
+    return authenticate_pi_request(pi_id, x_device_token or "")
+
+
+def create_kiosk_token(pi: dict[str, Any]) -> dict[str, Any]:
+    timestamp = int(time.time())
+    expires_at = timestamp + KIOSK_SESSION_TTL_SECONDS
+    pi_id = str(pi.get("pi_id") or "")
+    home_id = str(pi.get("home_id") or "")
+    session_id = f"kiosk_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+    payload = {
+        "iss": "kahrabaiq-api",
+        "aud": "kahrabaiq-kiosk",
+        "scope": "kiosk",
+        "session_id": session_id,
+        "pi_id": pi_id,
+        "home_id": home_id,
+        "iat": timestamp,
+        "exp": expires_at,
+    }
+    token = jwt.encode(payload, KIOSK_SESSION_SECRET, algorithm="HS256")
+    safe_set(
+        f"/kiosk_sessions/{session_id}",
+        {
+            "session_id": session_id,
+            "pi_id": pi_id,
+            "home_id": home_id,
+            "scope": "kiosk",
+            "expires_at_ms": expires_at * 1000,
+            "created_at_ms": timestamp * 1000,
+            "created_at_iso": iso_from_ms(timestamp * 1000),
+            "active": True,
+        },
+    )
+    return {"token": token, "session_id": session_id, "expires_at_ms": expires_at * 1000}
+
+
+def require_kiosk_session(authorization: str | None = Header(default=None)) -> AuthContext:
+    token = bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing kiosk session token.")
+    try:
+        claims = jwt.decode(
+            token,
+            KIOSK_SESSION_SECRET,
+            algorithms=["HS256"],
+            audience="kahrabaiq-kiosk",
+            issuer="kahrabaiq-api",
+        )
+    except Exception as error:
+        raise HTTPException(status_code=401, detail="Invalid kiosk session token.") from error
+    if claims.get("scope") != "kiosk":
+        raise HTTPException(status_code=403, detail="Invalid kiosk token scope.")
+    session_id = str(claims.get("session_id") or "")
+    session = as_dict(safe_get(f"/kiosk_sessions/{session_id}", {}))
+    if session.get("active") is not True:
+        raise HTTPException(status_code=401, detail="Kiosk session is not active.")
+    if as_number(session.get("expires_at_ms")) < now_ms():
+        raise HTTPException(status_code=401, detail="Kiosk session expired.")
+    pi_id = str(claims.get("pi_id") or "")
+    home_id = str(claims.get("home_id") or "")
+    return AuthContext(
+        actor_type="kiosk",
+        actor_id=session_id,
+        actor_role="kiosk",
+        permissions={"can_view": True, "can_create_kiosk_commands": True},
+        uid=None,
+        email=None,
+        claims={"pi_id": pi_id, "home_id": home_id, **claims},
+    )
+
+
+def kiosk_pi_and_home(actor: AuthContext) -> tuple[str, str]:
+    claims = actor.claims or {}
+    pi_id = str(claims.get("pi_id") or "")
+    home_id = str(claims.get("home_id") or "")
+    if not pi_id:
+        raise HTTPException(status_code=403, detail="Kiosk token is missing Pi scope.")
+    return pi_id, home_id
+
+
+@app.post("/api/pi/kiosk-session")
+def create_pi_kiosk_session(
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = authenticate_pi_request(x_pi_id or "", x_device_token or "")
+    session = create_kiosk_token(pi)
+    return {
+        "success": True,
+        "pi_id": pi["pi_id"],
+        "home_id": pi.get("home_id"),
+        "paired": bool(pi.get("home_id")) and pi.get("status") == "paired",
+        "kiosk_token": session["token"],
+        "session_id": session["session_id"],
+        "expires_at_ms": session["expires_at_ms"],
+    }
+
+
+@app.post("/api/pairing/pi-token")
+def create_pi_pairing_token(
+    request: PiPairingTokenRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = authenticate_pi_request(x_pi_id or "", x_device_token or "")
+    pi_id = str(pi["pi_id"])
+    timestamp_ms = now_ms()
+    raw_token = secrets.token_urlsafe(24)
+    token_id = f"pair_{timestamp_ms}_{secrets.token_hex(3)}"
+    safe_set(
+        f"/pi_pairing_tokens/{token_id}",
+        {
+            "token_id": token_id,
+            "pi_id": pi_id,
+            "token_hash": hash_secret(raw_token),
+            "expires_at_ms": timestamp_ms + PAIRING_TOKEN_TTL_MS,
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+            "used": False,
+        },
+    )
+    safe_update(
+        f"/pis/{pi_id}",
+        {
+            "display_name": request.display_name or pi.get("display_name") or pi_id,
+            "dashboard_version": request.dashboard_version,
+            "firmware_version": request.firmware_version,
+            "latest_pairing_token_id": token_id,
+            "status": pi.get("status") or "unpaired",
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    return {
+        "success": True,
+        "pi_id": pi_id,
+        "token_id": token_id,
+        "token": raw_token,
+        "expires_at_ms": timestamp_ms + PAIRING_TOKEN_TTL_MS,
+        "qr_payload": f"kahrabaiq://pair?pi_id={pi_id}&token={raw_token}",
+    }
+
+
+@app.get("/api/pairing/pi-status/{pi_id}")
+def get_pi_pairing_status(pi_id: str) -> dict[str, Any]:
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    if not pi:
+        raise HTTPException(status_code=404, detail="Pi does not exist.")
+    return {"success": True, "pi": {"pi_id": pi_id, **pi}}
+
+
+@app.post("/api/pi/{pi_id}/heartbeat")
+def pi_heartbeat(
+    pi_id: str,
+    request: PiHeartbeatRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    timestamp_ms = now_ms()
+    updates = {
+        "status": pi.get("status") or "unpaired",
+        "online_status": request.status,
+        "agent_version": request.agent_version,
+        "local_ip": request.local_ip,
+        "wifi_ssid": request.wifi_ssid,
+        "esp32": request.esp32 or {},
+        "metrics": request.metrics or {},
+        "last_heartbeat_at_ms": timestamp_ms,
+        "last_heartbeat_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(f"/pis/{pi_id}", updates)
+    return {"success": True, "pi_id": pi_id, "home_id": pi.get("home_id"), "heartbeat": updates}
+
+
+@app.post("/api/pi/{pi_id}/sensor-state")
+def pi_sensor_state(
+    pi_id: str,
+    request: PiSensorStateRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = request.home_id or str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    if pi.get("home_id") and home_id != pi.get("home_id"):
+        raise HTTPException(status_code=403, detail="Pi cannot write to this home.")
+    timestamp_ms = request.updated_at_ms or now_ms()
+    latest = {
+        "home_id": home_id,
+        "pi_id": pi_id,
+        "dashboard": request.dashboard,
+        "room": request.room,
+        "devices": request.devices,
+        "energy": request.energy,
+        "commands": request.commands,
+        "alerts": request.alerts,
+        "occupancy": request.occupancy,
+        "safety": request.safety,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/latest_state", latest)
+    safe_set(f"/homes/{home_id}/dashboard/latest", latest)
+    if request.devices:
+        for device_id, device in request.devices.items():
+            if isinstance(device, dict):
+                safe_update(f"/homes/{home_id}/devices/{device_id}", device)
+    if request.alerts:
+        active_alerts = {
+            str(alert.get("id") or alert.get("alert_id") or f"alert_{index}"): alert
+            for index, alert in enumerate(request.alerts)
+            if isinstance(alert, dict)
+        }
+        safe_set(f"/homes/{home_id}/alerts/active", active_alerts)
+    safe_update(
+        f"/pis/{pi_id}",
+        {"last_state_sync_at_ms": timestamp_ms, "last_state_sync_at_iso": iso_from_ms(timestamp_ms)},
+    )
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "updated_at_ms": timestamp_ms}
+
+
+@app.post("/api/pi/{pi_id}/esp32/link")
+def pi_esp32_link(
+    pi_id: str,
+    request: PiEsp32LinkRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    timestamp_ms = now_ms()
+    record = {
+        "device_id": request.device_id,
+        "pi_id": pi_id,
+        "home_id": home_id,
+        "ip": request.ip,
+        "base_url": request.base_url,
+        "status": request.status,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_set(f"/homes/{home_id}/devices/{request.device_id}/link", record)
+    safe_set(f"/pis/{pi_id}/esp32/{request.device_id}", record)
+    return {"success": True, "esp32": record}
+
+
+@app.get("/api/pi/{pi_id}/commands")
+def pi_commands(
+    pi_id: str,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi_auth_context(pi_id, x_pi_id, x_device_token)
+    commands = []
+    for item in object_to_list(safe_get(f"/pi_commands/{pi_id}", {})):
+        if item.get("status") != "pending":
+            continue
+        if as_number(item.get("expires_at_ms")) and as_number(item.get("expires_at_ms")) < now_ms():
+            safe_update(f"/pi_commands/{pi_id}/{item['id']}", {"status": "expired", "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
+            continue
+        commands.append(item)
+    return {"success": True, "pi_id": pi_id, "commands": commands}
+
+
+@app.post("/api/pi/{pi_id}/commands/{command_id}/complete")
+def pi_command_complete(
+    pi_id: str,
+    command_id: str,
+    payload: dict[str, Any],
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi_auth_context(pi_id, x_pi_id, x_device_token)
+    command = as_dict(safe_get(f"/pi_commands/{pi_id}/{command_id}", {}))
+    if not command:
+        raise HTTPException(status_code=404, detail="Command does not exist.")
+    timestamp_ms = now_ms()
+    success = payload.get("success") is not False
+    update = {
+        "status": "completed" if success else "failed",
+        "result": payload,
+        "completed_at_ms": timestamp_ms,
+        "completed_at_iso": iso_from_ms(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(f"/pi_commands/{pi_id}/{command_id}", update)
+    return {"success": True, "command": {**command, **update}}
+
+
+@app.get("/api/pi/{pi_id}/remote-commands")
+def pi_remote_commands(
+    pi_id: str,
+    limit: int = Query(25, ge=1, le=100),
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    try:
+        commands = [
+            command
+            for command in query_recent_remote_commands(home_id, limit=limit)
+            if str(command.get("status") or "") == "pending"
+        ]
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Remote command queue read failed: {error}") from error
+    return {"success": True, "pi_id": pi_id, "home_id": home_id, "commands": commands}
+
+
+@app.post("/api/pi/{pi_id}/remote-commands/{command_id}/claim")
+def pi_remote_command_claim(
+    pi_id: str,
+    command_id: str,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    command = find_remote_command(home_id, command_id)
+    if not command:
+        raise HTTPException(status_code=404, detail="Remote command not found.")
+    if str(command.get("status") or "") != "pending":
+        raise HTTPException(status_code=409, detail="Remote command is no longer pending.")
+    timestamp_ms = now_ms()
+    try:
+        updated = update_remote_command(
+            home_id,
+            command_id,
+            {
+                "status": "processing",
+                "claimedBy": pi_id,
+                "claimed_by": pi_id,
+                "claimedAtMs": timestamp_ms,
+                "claimed_at_ms": timestamp_ms,
+                "claimedAt": iso_from_ms(timestamp_ms),
+                "claimed_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Remote command claim failed: {error}") from error
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": updated}
+
+
+@app.post("/api/pi/{pi_id}/remote-commands/{command_id}/complete")
+def pi_remote_command_complete(
+    pi_id: str,
+    command_id: str,
+    payload: dict[str, Any],
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    result = as_dict(payload.get("result"))
+    success = payload.get("success")
+    if success is None:
+        success = result.get("success") is not False
+    timestamp_ms = now_ms()
+    updates = {
+        "status": "confirmed" if success else "failed",
+        "result": {
+            **result,
+            "success": bool(success),
+        },
+        "message": payload.get("message") or result.get("message") or result.get("user_message"),
+        "executedAtMs": timestamp_ms,
+        "executed_at_ms": timestamp_ms,
+        "executedAt": iso_from_ms(timestamp_ms),
+        "executed_at_iso": iso_from_ms(timestamp_ms),
+        "completedBy": pi_id,
+        "completed_by": pi_id,
+    }
+    try:
+        updated = update_remote_command(home_id, command_id, updates)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Remote command result write failed: {error}") from error
+    if not updated:
+        raise HTTPException(status_code=404, detail="Remote command not found.")
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": updated}
+
+
+@app.post("/api/pairing/claim-pi")
+def claim_pi(request: PiClaimRequest, actor: AuthContext = Depends(require_authenticated_user)) -> dict[str, Any]:
+    pi_id = request.pi_id.strip()
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    if not pi:
+        raise HTTPException(status_code=404, detail="Pi does not exist.")
+    if pi.get("status") == "paired" and pi.get("home_id"):
+        raise HTTPException(status_code=409, detail="This Pi is already paired.")
+    active_token_id = str(pi.get("latest_pairing_token_id") or "")
+    token_record = as_dict(safe_get(f"/pi_pairing_tokens/{active_token_id}", {}))
+    if not token_record or token_record.get("pi_id") != pi_id:
+        raise HTTPException(status_code=404, detail="Pairing token does not exist.")
+    if token_record.get("used") is True or as_number(token_record.get("expires_at_ms")) < now_ms():
+        raise HTTPException(status_code=409, detail="Pairing token expired. Refresh the QR code on the Pi.")
+    if not secret_matches(request.token, str(token_record.get("token_hash") or "")):
+        raise HTTPException(status_code=401, detail="Invalid pairing token.")
+    profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
+    display_name = str(profile.get("display_name") or actor.email or actor.uid)
+    home_id = create_home_for_pi(pi_id, str(actor.uid), str(actor.email or ""), display_name, request.home_name)
+    timestamp_ms = now_ms()
+    safe_update(
+        f"/pi_pairing_tokens/{active_token_id}",
+        {"used": True, "used_by_uid": actor.uid, "used_at_ms": timestamp_ms, "used_at_iso": iso_from_ms(timestamp_ms)},
+    )
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "role": "home_admin"}
+
+
+@app.post("/api/home/{home_id}/invites")
+def create_home_invite(
+    home_id: str,
+    request: HomeInviteCreateRequest,
+    actor: AuthContext = Depends(require_home_permission("can_generate_invites")),
+) -> dict[str, Any]:
+    role = validate_role(request.role)
+    if role == "home_admin":
+        raise HTTPException(status_code=400, detail="Invite role cannot be home_admin.")
+    if home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
+    timestamp_ms = now_ms()
+    raw_token = secrets.token_urlsafe(24)
+    invite_id = f"invite_{timestamp_ms}_{secrets.token_hex(3)}"
+    safe_set(
+        f"/home_invites/{invite_id}",
+        {
+            "invite_id": invite_id,
+            "home_id": home_id,
+            "role": role,
+            "token_hash": hash_secret(raw_token),
+            "created_by_uid": actor.uid,
+            "expires_at_ms": timestamp_ms + HOME_INVITE_TTL_MS,
+            "max_uses": request.max_uses,
+            "used_count": 0,
+            "active": True,
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    return {
+        "success": True,
+        "home_id": home_id,
+        "invite_id": invite_id,
+        "token": raw_token,
+        "expires_at_ms": timestamp_ms + HOME_INVITE_TTL_MS,
+        "qr_payload": f"kahrabaiq://invite?invite_id={invite_id}&token={raw_token}",
+    }
+
+
+@app.get("/api/kiosk/session-state")
+def kiosk_session_state(actor: AuthContext = Depends(require_kiosk_session)) -> dict[str, Any]:
+    pi_id, home_id = kiosk_pi_and_home(actor)
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+    pairing_payload = None
+    expires_at_ms = None
+    if not home_id:
+        timestamp_ms = now_ms()
+        raw_token = secrets.token_urlsafe(24)
+        token_id = f"pair_{timestamp_ms}_{secrets.token_hex(3)}"
+        safe_set(
+            f"/pi_pairing_tokens/{token_id}",
+            {
+                "token_id": token_id,
+                "pi_id": pi_id,
+                "token_hash": hash_secret(raw_token),
+                "expires_at_ms": timestamp_ms + PAIRING_TOKEN_TTL_MS,
+                "created_at_ms": timestamp_ms,
+                "created_at_iso": iso_from_ms(timestamp_ms),
+                "used": False,
+            },
+        )
+        safe_update(f"/pis/{pi_id}", {"latest_pairing_token_id": token_id, "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+        expires_at_ms = timestamp_ms + PAIRING_TOKEN_TTL_MS
+        pairing_payload = f"kahrabaiq://pair?pi_id={pi_id}&token={raw_token}"
+    return {
+        "success": True,
+        "pi": {"pi_id": pi_id, **pi},
+        "pi_id": pi_id,
+        "home_id": home_id or None,
+        "paired": bool(home_id),
+        "pairing_payload": pairing_payload,
+        "pairing_expires_at_ms": expires_at_ms,
+    }
+
+
+@app.get("/api/kiosk/dashboard")
+def kiosk_dashboard(actor: AuthContext = Depends(require_kiosk_session)) -> dict[str, Any]:
+    pi_id, home_id = kiosk_pi_and_home(actor)
+    if not home_id:
+        return {"success": True, "pi_id": pi_id, "home_id": None, "paired": False, "dashboard": {}}
+    latest = as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+    return {"success": True, "pi_id": pi_id, "home_id": home_id, "paired": True, "dashboard": latest}
+
+
+@app.post("/api/kiosk/commands")
+def kiosk_create_command(
+    request: KioskCommandCreateRequest,
+    actor: AuthContext = Depends(require_kiosk_session),
+) -> dict[str, Any]:
+    pi_id, home_id = kiosk_pi_and_home(actor)
+    command_name = request.command.strip().lower()
+    if command_name not in KIOSK_ALLOWED_COMMANDS:
+        raise HTTPException(status_code=400, detail="Unsupported kiosk command.")
+    timestamp_ms = now_ms()
+    command_id = f"kcmd_{timestamp_ms}_{secrets.token_hex(4)}"
+    command = {
+        "command_id": command_id,
+        "pi_id": pi_id,
+        "home_id": home_id,
+        "command": command_name,
+        "payload": request.payload,
+        "status": "pending",
+        "created_by": actor.actor_id,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+        "expires_at_ms": timestamp_ms + (KIOSK_COMMAND_TTL_SECONDS * 1000),
+    }
+    safe_set(f"/pi_commands/{pi_id}/{command_id}", command)
+    return {"success": True, "command": command}
+
+
+@app.post("/api/home-invites/claim")
+def claim_home_invite(
+    request: HomeInviteClaimRequest,
+    actor: AuthContext = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    invite = as_dict(safe_get(f"/home_invites/{request.invite_id}", {}))
+    if not invite or invite.get("active") is not True:
+        raise HTTPException(status_code=404, detail="Invite does not exist.")
+    if as_number(invite.get("expires_at_ms")) < now_ms():
+        raise HTTPException(status_code=409, detail="Invite expired.")
+    if as_number(invite.get("used_count")) >= as_number(invite.get("max_uses"), 1):
+        raise HTTPException(status_code=409, detail="Invite has already been used.")
+    if not secret_matches(request.token, str(invite.get("token_hash") or "")):
+        raise HTTPException(status_code=401, detail="Invalid invite token.")
+    home_id = str(invite.get("home_id") or "")
+    if home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
+    existing = as_dict(safe_get(f"/homes/{home_id}/members/{actor.uid}", {}))
+    if existing:
+        return {"success": True, "home_id": home_id, "role": validate_role(str(existing.get("role", "viewer"))), "already_member": True}
+    profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
+    display_name = str(profile.get("display_name") or actor.email or actor.uid)
+    role = validate_role(str(invite.get("role", "member")))
+    member = add_user_to_home(str(actor.uid), str(actor.email or ""), display_name, home_id, role)
+    used_count = int(as_number(invite.get("used_count"))) + 1
+    safe_update(
+        f"/home_invites/{request.invite_id}",
+        {"used_count": used_count, "active": used_count < int(as_number(invite.get("max_uses"), 1)), "last_used_at_ms": now_ms(), "last_used_at_iso": iso_from_ms(now_ms())},
+    )
+    return {"success": True, "home_id": home_id, "role": member["role"], "already_member": False}
+
+
+def require_platform_admin(actor: AuthContext = Depends(require_authenticated_user)) -> AuthContext:
+    if actor.actor_role != "platform_admin":
+        raise HTTPException(status_code=403, detail="Platform admin role is required.")
+    return actor
+
+
+@app.get("/api/admin/users")
+def admin_users(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    users = object_to_list(safe_get("/users", {}))
+    return {"success": True, "count": len(users), "users": users}
+
+
+@app.get("/api/admin/homes")
+def admin_homes(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    homes = object_to_list(safe_get("/homes", {}))
+    return {"success": True, "count": len(homes), "homes": homes}
+
+
+@app.get("/api/admin/pis")
+def admin_pis(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    pis = object_to_list(safe_get("/pis", {}))
+    for pi in pis:
+        pi.pop("token_hash", None)
+    return {"success": True, "count": len(pis), "pis": pis}
+
+
+@app.get("/api/admin/pairings")
+def admin_pairings(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    tokens = object_to_list(safe_get("/pi_pairing_tokens", {}))
+    for token in tokens:
+        token.pop("token_hash", None)
+    return {"success": True, "count": len(tokens), "pairings": tokens}
     return []
 
 
@@ -1262,36 +2148,8 @@ def create_notification_record(home_id: str, title: str, body: str) -> dict[str,
 
 
 def send_push_notifications(home_id: str, notification_id: str, title: str, body: str) -> None:
-    tokens = [
-        as_dict(item)
-        for item in object_to_list(safe_get(f"/homes/{home_id}/notification_tokens", {}))
-    ]
-    active_tokens = [item.get("token") for item in tokens if item.get("active") is True and item.get("token")]
-    if not active_tokens:
-        return
-    delivered = False
-    for token in active_tokens:
-        try:
-            messaging.send(
-                messaging.Message(
-                    token=str(token),
-                    notification=messaging.Notification(title=title, body=body),
-                    data={
-                        "home_id": home_id,
-                        "notification_id": notification_id,
-                        "alert_type": "smoke_detected",
-                        "severity": "critical",
-                    },
-                )
-            )
-            delivered = True
-        except Exception:
-            continue
-    if delivered:
-        safe_update(
-            f"/homes/{home_id}/notifications/{notification_id}",
-            {"delivered": True, "delivered_at_ms": now_ms(), "delivered_at_iso": iso_from_ms(now_ms())},
-        )
+    # Mobile push delivery is intentionally disabled until AWS SNS/Pinpoint is wired.
+    return
 
 
 def default_settings_record(updated_by: str = "system_default") -> dict[str, Any]:
@@ -1730,9 +2588,11 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
     backend_dashboard = as_dict(backend.get("dashboard"))
     backend_energy = as_dict(backend.get("energy"))
     backend_ai = as_dict(backend.get("ai"))
+    latest_state = as_dict(home.get("latest_state"))
 
     return {
         "home": home,
+        "latest_state": latest_state,
         "devices": as_dict(home.get("devices")),
         "dashboard_latest": as_dict(as_dict(home.get("dashboard")).get("latest")),
         "alerts_active": as_dict(as_dict(home.get("alerts")).get("active")),
@@ -1760,6 +2620,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
 
 
 def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
+    latest_room = as_dict(bundle["latest_state"].get("room"))
     esp32 = as_dict(bundle["devices"].get("esp32_01"))
     sensors = as_dict(esp32.get("sensors"))
     status = as_dict(esp32.get("status"))
@@ -1772,12 +2633,15 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
         **dashboard_env,
         **sensors,
         **occupancy,
+        **latest_room,
     }
 
     motion_bool = normalize_bool(first_present(source.get("motion"), source.get("occupied")))
     smoke_bool = normalize_bool(source.get("smoke"))
     sensor_timestamp_ms = first_present(
         sensors.get("timestamp_ms"),
+        latest_room.get("timestamp_ms"),
+        latest_room.get("timestampMs"),
         status.get("lastSeenMs"),
         status.get("last_seen_ms"),
         dashboard_env.get("updated_at"),
@@ -1827,6 +2691,9 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
 
 def build_devices(bundle: dict[str, Any], home_id: str | None = None) -> dict[str, dict[str, Any]]:
     raw_devices = dict(bundle["devices"])
+    for device_id, device in as_dict(bundle["latest_state"].get("devices")).items():
+        if isinstance(device, dict):
+            raw_devices[device_id] = {**as_dict(raw_devices.get(device_id)), **device}
     branches = bundle["backend_branches"]
     health_devices = as_dict(bundle["backend_device_health"].get("devices"))
 
@@ -1856,8 +2723,9 @@ def build_energy(
     dashboard_energy = bundle["backend_dashboard_energy"]
     current_total = bundle["backend_current_total"]
     latest = bundle["dashboard_latest"]
+    latest_energy = as_dict(bundle["latest_state"].get("energy"))
 
-    source = {**latest, **dashboard_energy, **current_total}
+    source = {**latest, **dashboard_energy, **current_total, **latest_energy}
     branches = as_dict(first_present(source.get("branches"), current_total.get("branches")))
     highest_device = None
     highest_power = -1.0
@@ -2242,6 +3110,20 @@ def get_iot_live_config(home_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/api/home/{home_id}/state/current", dependencies=[Depends(require_home_permission("can_view"))])
+def get_current_state(home_id: str) -> dict[str, Any]:
+    latest = as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+    if not latest:
+        raise HTTPException(status_code=404, detail="No current state has been reported by the Pi yet.")
+    return {
+        "success": True,
+        "home_id": home_id,
+        "state": latest,
+        "updated_at_ms": latest.get("updated_at_ms"),
+        "updated_at_iso": latest.get("updated_at_iso"),
+    }
+
+
 @app.get("/api/home/{home_id}/dashboard", dependencies=[Depends(require_home_permission("can_view"))])
 def get_dashboard(home_id: str) -> dict[str, Any]:
     resolve_smoke_emergency_if_clear(home_id)
@@ -2255,6 +3137,11 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     alerts = active_only(
         object_to_list(bundle["alerts_active"])
         + object_to_list(bundle["backend_active_alerts"])
+        + [
+            item
+            for item in bundle["latest_state"].get("alerts", [])
+            if isinstance(item, dict)
+        ]
     )
     recommendations = active_only(
         object_to_list(bundle["recommendations_active"])
@@ -2995,13 +3882,16 @@ def add_member(
     actor: AuthContext = Depends(require_home_permission("can_manage_users")),
 ) -> dict[str, Any]:
     role = validate_role(request.role)
+    if role == "member" and home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
     email = request.email.strip().lower()
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email is required.")
 
-    try:
-        user = auth.get_user_by_email(email)
-    except Exception:
+    profile = find_user_profile_by_email(email)
+    user_uid = str(profile.get("uid") or "")
+    user_display_name = str(profile.get("display_name") or email)
+    if not user_uid:
         timestamp_ms = now_ms()
         invitation_id = re.sub(r"[^A-Za-z0-9_-]", "_", email)
         safe_set(
@@ -3023,9 +3913,9 @@ def add_member(
             "message": "User must sign up first. Invitation record created.",
         }
 
-    uid = user.uid
+    uid = user_uid
     profile = as_dict(safe_get(f"/users/{uid}", {}))
-    display_name = str(profile.get("display_name") or user.display_name or email)
+    display_name = str(profile.get("display_name") or user_display_name or email)
     record = member_record(uid, email, display_name, role)
     safe_set(f"/homes/{home_id}/members/{uid}", record)
     safe_update(
@@ -3055,7 +3945,7 @@ def update_member_role(
     existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
     if not existing:
         raise HTTPException(status_code=404, detail="Member does not exist.")
-    if existing.get("role") == "admin" and role != "admin" and admin_count(home_id) <= 1:
+    if validate_role(str(existing.get("role", "viewer"))) == "home_admin" and role != "home_admin" and admin_count(home_id) <= 1:
         raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
 
     timestamp_ms = now_ms()
@@ -3067,8 +3957,13 @@ def update_member_role(
         "updated_at_iso": iso_from_ms(timestamp_ms),
     }
     safe_update(f"/homes/{home_id}/members/{uid}", update)
+    user_profile = as_dict(safe_get(f"/users/{uid}", {}))
+    user_homes = {**as_dict(user_profile.get("homes")), home_id: {"role": role, **permissions}}
     safe_update(f"/users/{uid}/homes/{home_id}", {"role": role, **permissions})
-    safe_update(f"/users/{uid}", {"updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)})
+    safe_update(
+        f"/users/{uid}",
+        {"homes": user_homes, "updated_at_ms": timestamp_ms, "updated_at_iso": iso_from_ms(timestamp_ms)},
+    )
     audit_log(home_id, actor, "member_role_changed", "member", uid, {"role": role})
     return {"success": True, "home_id": home_id, "uid": uid, "role": role, "permissions": permissions}
 
@@ -3082,11 +3977,14 @@ def remove_member(
     existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
     if not existing:
         raise HTTPException(status_code=404, detail="Member does not exist.")
-    if existing.get("role") == "admin" and admin_count(home_id) <= 1:
+    if validate_role(str(existing.get("role", "viewer"))) == "home_admin" and admin_count(home_id) <= 1:
         raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
     safe_set(f"/homes/{home_id}/members/{uid}", None)
     safe_set(f"/users/{uid}/homes/{home_id}", None)
-    safe_update(f"/users/{uid}", {"updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
+    user_profile = as_dict(safe_get(f"/users/{uid}", {}))
+    user_homes = as_dict(user_profile.get("homes"))
+    user_homes.pop(home_id, None)
+    safe_update(f"/users/{uid}", {"homes": user_homes, "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
     audit_log(home_id, actor, "member_removed", "member", uid)
     return {"success": True, "home_id": home_id, "uid": uid}
 
@@ -3880,7 +4778,7 @@ def title_from_message(message: str) -> str:
         picked = words[:4]
     title = " ".join(word.capitalize() for word in picked[:5]).strip()
     if not title:
-        return "Smart Energy Chat"
+        return "KahrabaIQ Chat"
     if any(word.lower() in {"power", "cost", "energy", "usage"} for word in picked):
         title = f"{title} Explanation" if "explanation" not in title.lower() else title
     return title[:60]
@@ -3925,7 +4823,7 @@ def require_chat_session_access(
     if session.get("archived") is True and not allow_archived:
         raise HTTPException(status_code=404, detail="Chat session is archived.")
     created_by = str(session.get("created_by") or "")
-    if actor.actor_type != "service" and actor.actor_role != "admin" and created_by != chat_actor_id(actor):
+    if actor.actor_type != "service" and actor.actor_role not in {"home_admin", "platform_admin"} and created_by != chat_actor_id(actor):
         raise HTTPException(status_code=403, detail="You do not have access to this chat session.")
     return session
 
@@ -4097,7 +4995,7 @@ def list_chat_sessions(
         item
         for item in sessions
         if item.get("archived") is not True
-        and (actor.actor_role == "admin" or str(item.get("created_by")) == actor_id)
+        and (actor.actor_role in {"home_admin", "platform_admin"} or str(item.get("created_by")) == actor_id)
     ]
     visible.sort(key=lambda item: as_number(item.get("updated_at_ms")), reverse=True)
     return {"home_id": home_id, "count": len(visible), "sessions": visible}

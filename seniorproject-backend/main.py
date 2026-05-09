@@ -7,17 +7,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import firebase_admin
 import joblib
 import pandas as pd
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
-from firebase_admin import db
 
 from timestamp_utils import TIMEZONE, BAHRAIN_TZ, ms_to_iso, now_ms
+from aws_cloud_store import app_get_path, app_set_path, app_update_path
 
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
+load_dotenv()
 
 SERVICE_NAME = "smart-energy-ai"
+STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "aws").strip().lower()
 DEFAULT_HOME_ID = os.environ.get("DEFAULT_HOME_ID", "home_001")
 MODEL_PATH = Path(os.environ.get("MODEL_PATH", "devices/models/smart_energy_ai.joblib"))
 EFFICIENCY_SCORE_CHANGE_THRESHOLD = 3
@@ -28,12 +32,37 @@ ACTIVE_DEVICE_POWER_W = 10.0
 FRESH_DATA_MAX_AGE_MS = 3 * 60 * 1000
 
 app = FastAPI(
-    title="Smart Energy AI",
-    description="Cloud Run FastAPI service for Smart Energy Consumption AI predictions.",
+    title="KahrabaIQ Intelligence",
+    description="Cloud Run FastAPI service for KahrabaIQ energy predictions.",
     version="1.0.0",
 )
 
 model_bundle: dict[str, Any] | None = None
+
+
+class AwsPathReference:
+    def __init__(self, path: str):
+        self.path = "/" + path.strip().strip("/")
+
+    def child(self, path: str) -> "AwsPathReference":
+        return AwsPathReference(f"{self.path.rstrip('/')}/{path.strip().strip('/')}")
+
+    def get(self) -> Any:
+        return app_get_path(self.path)
+
+    def set(self, value: Any) -> None:
+        app_set_path(self.path, value)
+
+    def update(self, value: dict[str, Any]) -> None:
+        app_update_path(self.path, value)
+
+
+class AwsPathDb:
+    def ref(self, path: str) -> AwsPathReference:
+        return AwsPathReference(path)
+
+
+store = AwsPathDb()
 
 
 class HealthResponse(BaseModel):
@@ -67,18 +96,9 @@ def require_internal_service_token(
         raise HTTPException(status_code=401, detail="Invalid internal service token.")
 
 
-def initialize_firebase() -> None:
-    """Initialize Firebase Admin with Cloud Run Application Default Credentials."""
-    if firebase_admin._apps:
-        return
-
-    database_url = os.environ.get("FIREBASE_DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("FIREBASE_DATABASE_URL environment variable is required.")
-
-    # No serviceAccountKey.json is used here. In Cloud Run, Firebase Admin uses
-    # the Cloud Run service account through Application Default Credentials.
-    firebase_admin.initialize_app(options={"databaseURL": database_url})
+def initialize_storage() -> None:
+    if STORAGE_BACKEND != "aws":
+        raise RuntimeError("Only AWS storage is supported. Set STORAGE_BACKEND=aws.")
 
 
 def load_model() -> dict[str, Any]:
@@ -102,8 +122,8 @@ def load_model() -> dict[str, Any]:
 
 @app.on_event("startup")
 def startup() -> None:
-    """Fail early if Firebase config or the model is missing."""
-    initialize_firebase()
+    """Fail early if AWS storage config or the model is missing."""
+    initialize_storage()
     load_model()
 
 
@@ -182,7 +202,7 @@ def is_fresh_timestamp(value: Any, current_ms: int, max_age_ms: int = FRESH_DATA
 
 def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str, Any]:
     try:
-        home_ref = db.reference(f"/homes/{home_id}")
+        home_ref = store.ref(f"/homes/{home_id}")
         if home_id == "home_test" and scenario_id:
             scenario_raw = home_ref.child(f"demo_scenarios/{scenario_id}").get()
             if not isinstance(scenario_raw, dict) or not scenario_raw:
@@ -208,14 +228,14 @@ def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str,
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to read Firebase data: {error}",
+            detail=f"Failed to read backend store data: {error}",
         ) from error
 
 
 def read_chat_context(home_id: str, scenario_id: str | None = None) -> dict[str, Any]:
     try:
-        root_home_ref = db.reference(f"/homes/{home_id}")
-        root_backend_ref = db.reference(f"/homes/{home_id}/backend")
+        root_home_ref = store.ref(f"/homes/{home_id}")
+        root_backend_ref = store.ref(f"/homes/{home_id}/backend")
         scenario_data = None
         if home_id == "home_test" and scenario_id:
             scenario_data = root_home_ref.child(f"demo_scenarios/{scenario_id}").get()
@@ -280,7 +300,7 @@ def read_chat_context(home_id: str, scenario_id: str | None = None) -> dict[str,
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to read Firebase chat context: {error}",
+            detail=f"Failed to read backend store chat context: {error}",
         ) from error
 
 
@@ -465,7 +485,7 @@ def build_ai_payload(
     if not latest_summary and not dashboard_energy and not dashboard_environment:
         raise HTTPException(
             status_code=404,
-            detail=f"No usable Firebase backend data found for home_id '{home_id}'.",
+            detail=f"No usable backend store backend data found for home_id '{home_id}'.",
         )
 
     summary_energy = latest_summary.get("energy")
@@ -988,7 +1008,7 @@ def build_ai_status(prediction: dict[str, Any], payload: dict[str, Any]) -> dict
     }
 
 
-def build_firebase_result(
+def build_ai_result(
     home_id: str,
     payload: dict[str, Any],
     prediction: dict[str, Any],
@@ -1057,7 +1077,7 @@ def write_ai_result(
         else:
             backend_path = f"/homes/{home_id}/backend"
 
-        backend_ref = db.reference(backend_path)
+        backend_ref = store.ref(backend_path)
         prediction_path = f"{backend_path}/ai/latest_prediction"
         prediction_id = f"ai_{result['created_at']}"
         previous_prediction = ensure_dict(backend_ref.child("ai/latest_prediction").get())
@@ -1065,7 +1085,7 @@ def write_ai_result(
 
         result.update(build_deduplication_metadata(previous_prediction, result))
 
-        updates = build_ai_firebase_updates(
+        updates = build_ai_store_updates(
             home_id,
             result,
             prediction_id,
@@ -1077,11 +1097,11 @@ def write_ai_result(
     except Exception as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to write AI result to Firebase: {error}",
+            detail=f"Failed to write AI result to backend store: {error}",
         ) from error
 
 
-def build_ai_firebase_updates(
+def build_ai_store_updates(
     home_id: str,
     result: dict[str, Any],
     prediction_id: str,
@@ -1266,7 +1286,7 @@ def build_chat_prompt(
         )
 
     return f"""
-You are the Smart Energy AI assistant for a senior project.
+You are the KahrabaIQ Intelligence assistant.
 
 Rules:
 - Answer the user's exact question first. Do not switch topics unless the user asks.
@@ -1281,7 +1301,7 @@ Rules:
 - Keep answers clear, short, and understandable.
 - If the user asks a follow-up such as "explain more", "why", "how", or "what about that", use current_conversation_latest to identify what they mean.
 - Do not use messages from unrelated chat sessions. The provided current_conversation_latest is the only chat memory you should use.
-- Do not mention internal implementation words such as Firebase, backend, database paths, JSON, device IDs, breaker_01, breaker_02, or esp32_01 unless the user explicitly asks for technical details.
+- Do not mention internal implementation words such as backend store, backend, database paths, JSON, device IDs, breaker_01, breaker_02, or esp32_01 unless the user explicitly asks for technical details.
 - Use friendly names like "room sensor", "switch breaker", and "AC breaker".
 - Use BHD for cost values and kWh for energy values when those units are present.
 - Timestamp fields are epoch milliseconds. When answering about time/date, use the readable Bahrain time fields from derived_context. Do not reply with only a raw millisecond timestamp unless the user explicitly asks for the raw value.
@@ -1295,7 +1315,7 @@ Rules:
 Home ID: {home_id}
 Home name: {home_name or home_id}{scenario_line}
 
-Firebase system data:
+backend store system data:
 {context_json}
 
 User question:
@@ -1304,7 +1324,7 @@ User question:
 
 
 def answer_direct_chat_question(user_message: str, context: dict[str, Any]) -> str | None:
-    """Answer simple factual Firebase questions without asking Gemini to reason."""
+    """Answer simple factual backend store questions without asking Gemini to reason."""
     normalized = normalize_text(user_message)
 
     asks_time = any(
@@ -1606,7 +1626,7 @@ def log_chat_message(
 ) -> None:
     try:
         key = f"chat_{created_at}"
-        db.reference(f"/homes/{home_id}/backend/ai/chat_history/{key}").set(
+        store.ref(f"/homes/{home_id}/backend/ai/chat_history/{key}").set(
             {
                 "timestamp_ms": created_at,
                 "timestamp_iso": ms_to_iso(created_at),
@@ -1948,19 +1968,19 @@ def build_daily_summary_text(
 
 def flatten_response(
     home_id: str,
-    firebase_result: dict[str, Any],
-    firebase_path_written: str,
+    ai_result: dict[str, Any],
+    store_path_written: str,
 ) -> dict[str, Any]:
-    predictions = firebase_result["predictions"]
+    predictions = ai_result["predictions"]
 
     return {
         "home_id": home_id,
-        "scenario_id": firebase_result.get("scenario_id"),
-        "timestamp": firebase_result["created_at"],
-        "timestamp_ms": firebase_result["created_at"],
-        "timestamp_iso": ms_to_iso(firebase_result["created_at"]),
+        "scenario_id": ai_result.get("scenario_id"),
+        "timestamp": ai_result["created_at"],
+        "timestamp_ms": ai_result["created_at"],
+        "timestamp_iso": ms_to_iso(ai_result["created_at"]),
         "timezone": TIMEZONE,
-        "prediction_status": firebase_result.get("prediction_status", "ok"),
+        "prediction_status": ai_result.get("prediction_status", "ok"),
         "energy_waste": predictions["waste_event"]["value"],
         "abnormal_usage": predictions["anomaly_label"]["value"],
         "recommendation_type": predictions["recommendation_type"]["value"],
@@ -1968,15 +1988,15 @@ def flatten_response(
         "next_hour_cost": predictions["next_hour_total_cost_BHD"]["value"],
         "efficiency_score": predictions["energy_efficiency_score"],
         "explanation": predictions["explanation"],
-        "firebase_path_written": firebase_path_written,
-        "history_written": firebase_result["history_written"],
-        "change_reason": firebase_result["change_reason"],
-        "same_status_count": firebase_result["same_status_count"],
-        "checks_since_change": firebase_result["checks_since_change"],
-        "last_checked_at": firebase_result["last_checked_at"],
-        "last_changed_at": firebase_result["last_changed_at"],
-        "post_processing_rules": firebase_result.get("post_processing_rules", []),
-        "latest_prediction": firebase_result,
+        "store_path_written": store_path_written,
+        "history_written": ai_result["history_written"],
+        "change_reason": ai_result["change_reason"],
+        "same_status_count": ai_result["same_status_count"],
+        "checks_since_change": ai_result["checks_since_change"],
+        "last_checked_at": ai_result["last_checked_at"],
+        "last_changed_at": ai_result["last_changed_at"],
+        "post_processing_rules": ai_result.get("post_processing_rules", []),
+        "latest_prediction": ai_result,
     }
 
 
@@ -2049,9 +2069,9 @@ def predict_default_home() -> dict[str, Any]:
 def predict_home(home_id: str) -> dict[str, Any]:
     payload, input_source = build_ai_payload(home_id)
     prediction = run_model(payload)
-    firebase_result = build_firebase_result(home_id, payload, prediction, input_source)
-    firebase_path_written = write_ai_result(home_id, firebase_result)
-    return flatten_response(home_id, firebase_result, firebase_path_written)
+    ai_result = build_ai_result(home_id, payload, prediction, input_source)
+    store_path_written = write_ai_result(home_id, ai_result)
+    return flatten_response(home_id, ai_result, store_path_written)
 
 
 @app.post("/predict/{home_id}/scenario/{scenario_id}", dependencies=[Depends(require_internal_service_token)])
@@ -2064,16 +2084,16 @@ def predict_home_scenario(home_id: str, scenario_id: str) -> dict[str, Any]:
 
     payload, input_source = build_ai_payload(home_id, scenario_id)
     prediction = run_model(payload)
-    firebase_result = build_firebase_result(
+    ai_result = build_ai_result(
         home_id,
         payload,
         prediction,
         input_source,
         scenario_id=scenario_id,
     )
-    firebase_path_written = write_ai_result(
+    store_path_written = write_ai_result(
         home_id,
-        firebase_result,
+        ai_result,
         scenario_id=scenario_id,
     )
-    return flatten_response(home_id, firebase_result, firebase_path_written)
+    return flatten_response(home_id, ai_result, store_path_written)

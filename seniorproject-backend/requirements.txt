@@ -1,6 +1,5 @@
 fastapi==0.124.2
 uvicorn[standard]==0.38.0
-firebase-admin==7.4.0
 pandas==3.0.2
 numpy==2.4.4
 scikit-learn==1.8.0
@@ -9,4 +8,6 @@ pydantic==2.12.5
 google-genai>=1.0.0
 python-dotenv
 requests
+qrcode[pil]
 boto3
+PyJWT[crypto]

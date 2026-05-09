@@ -1,0 +1,15 @@
+[Unit]
+Description=KahrabaIQ Pi touchscreen kiosk browser
+After=graphical.target kahrabaiq-agent.service
+Wants=kahrabaiq-agent.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/kahrabaiq/pi.env
+ExecStart=/opt/kahrabaiq/pi/scripts/launch-kiosk.sh
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=graphical.target

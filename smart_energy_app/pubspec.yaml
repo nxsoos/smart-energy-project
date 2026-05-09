@@ -42,17 +42,19 @@ dependencies:
   dio: ^5.4.0
   web_socket_channel: ^2.4.0
   mqtt_client: ^10.2.1
-  firebase_core: ^3.15.2
-  firebase_messaging: ^15.2.10
   
   # State Management
   provider: ^6.1.0
   
   # UI Components & Charts
-  fl_chart: ^0.66.0
+  fl_chart: ^0.68.0
+  google_fonts: ^6.2.1
+  shimmer: ^3.0.0
+  cached_network_image: ^3.3.1
   
   # Local Storage
   shared_preferences: ^2.2.0
+  mobile_scanner: ^7.1.3
   amazon_cognito_identity_dart_2: ^4.0.0
   aws_common: ^0.7.11
   aws_signature_v4: ^0.6.9

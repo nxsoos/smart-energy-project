@@ -15,6 +15,10 @@ AWS_DYNAMODB_SUMMARIES_TABLE = os.environ.get(
     "AWS_DYNAMODB_SUMMARIES_TABLE",
     "SmartEnergySummaries",
 )
+AWS_DYNAMODB_APP_TABLE = os.environ.get(
+    "AWS_DYNAMODB_APP_TABLE",
+    "KahrabaIQApp",
+)
 AWS_IOT_ENDPOINT = os.environ.get("AWS_IOT_ENDPOINT", "").strip()
 AWS_IOT_WEBSOCKET_EXPIRES_SECONDS = int(os.environ.get("AWS_IOT_WEBSOCKET_EXPIRES_SECONDS", "900"))
 
@@ -23,6 +27,12 @@ def _table():
     import boto3
 
     return boto3.resource("dynamodb", region_name=AWS_REGION).Table(AWS_DYNAMODB_SUMMARIES_TABLE)
+
+
+def _app_table():
+    import boto3
+
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(AWS_DYNAMODB_APP_TABLE)
 
 
 def _from_dynamodb(value: Any) -> Any:
@@ -45,6 +55,66 @@ def _to_dynamodb(value: Any) -> Any:
     if isinstance(value, list):
         return [_to_dynamodb(item) for item in value if item is not None]
     return value
+
+
+def _normalize_path(path: str) -> str:
+    normalized = "/" + path.strip().strip("/")
+    return "/" if normalized == "/" else normalized
+
+
+def _path_sk(path: str) -> str:
+    return f"PATH#{_normalize_path(path)}"
+
+
+def app_get_path(path: str, default: Any = None) -> Any:
+    normalized = _normalize_path(path)
+    table = _app_table()
+    response = table.get_item(Key={"PK": "APP", "SK": _path_sk(normalized)})
+    if "Item" in response:
+        return _from_dynamodb(response["Item"].get("value"))
+
+    prefix = _path_sk(normalized if normalized == "/" else f"{normalized}/")
+    response = table.query(
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues={":pk": "APP", ":sk": prefix},
+    )
+    children: dict[str, Any] = {}
+    for item in response.get("Items", []):
+        child_path = str(item.get("path") or "")
+        remainder = child_path[len(normalized.rstrip("/") + "/") :]
+        if remainder and "/" not in remainder:
+            value = _from_dynamodb(item.get("value"))
+            if value is not None:
+                children[remainder] = value
+    return children if children else default
+
+
+def app_set_path(path: str, value: Any) -> None:
+    normalized = _normalize_path(path)
+    table = _app_table()
+    key = {"PK": "APP", "SK": _path_sk(normalized)}
+    if value is None:
+        table.delete_item(Key=key)
+        return
+    timestamp_ms = now_ms()
+    table.put_item(
+        Item=_to_dynamodb(
+            {
+                **key,
+                "path": normalized,
+                "value": value,
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": ms_to_iso(timestamp_ms),
+            }
+        )
+    )
+
+
+def app_update_path(path: str, value: dict[str, Any]) -> None:
+    existing = app_get_path(path, {})
+    if not isinstance(existing, dict):
+        existing = {}
+    app_set_path(path, {**existing, **value})
 
 
 def home_pk(home_id: str) -> str:
@@ -146,6 +216,23 @@ def find_remote_command(home_id: str, command_id: str) -> dict[str, Any]:
         if str(item.get("commandId") or item.get("command_id")) == command_id:
             return item
     return {}
+
+
+def update_remote_command(home_id: str, command_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    command = find_remote_command(home_id, command_id)
+    if not command:
+        return {}
+    timestamp_ms = now_ms()
+    updated = {
+        **command,
+        **updates,
+        "updatedAtMs": timestamp_ms,
+        "updated_at_ms": timestamp_ms,
+        "updatedAt": ms_to_iso(timestamp_ms),
+        "updated_at_iso": ms_to_iso(timestamp_ms),
+    }
+    _table().put_item(Item=_to_dynamodb(updated))
+    return updated
 
 
 def live_topic(home_id: str) -> str:

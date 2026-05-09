@@ -199,7 +199,7 @@ def train() -> dict[str, Any]:
 def main() -> None:
     metrics = train()
 
-    print("Smart Energy AI trained successfully.")
+    print("KahrabaIQ Intelligence trained successfully.")
     print(f"Model saved to: {MODEL_PATH}")
     print(f"Metrics saved to: {METRICS_PATH}")
     print()
