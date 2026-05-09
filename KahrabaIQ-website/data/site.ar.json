@@ -1,0 +1,155 @@
+{
+  "locale": "ar",
+  "languageName": "العربية",
+  "metadata": {
+    "title": "كهرباء آي كيو | نظام ذكي للطاقة والسلامة الكهربائية",
+    "description": "كهرباء آي كيو نظام ذكي لإدارة الطاقة والسلامة الكهربائية مدعوم بالذكاء الاصطناعي، من مشروع تخرج في جامعة البحرين."
+  },
+  "brand": {
+    "name": "KAHRABAIQ",
+    "prefix": "KAHRABA",
+    "suffix": "IQ"
+  },
+  "assets": {
+    "emblem": "/kahrabaiq-emblem.png",
+    "favicon": "/favicon.ico",
+    "wordmark": "/kahrabaiq-wordmark.png",
+    "fullIdentity": "/kahrabaiq-brand-identity.png",
+    "emblemAlt": "شعار كهرباء آي كيو الذكي",
+    "wordmarkAlt": "كلمة كهرباء آي كيو التعريفية",
+    "fullIdentityAlt": "الهوية الكاملة لكهرباء آي كيو"
+  },
+  "languages": {
+    "label": "اختيار اللغة",
+    "english": "الإنجليزية",
+    "arabic": "العربية"
+  },
+  "nav": [
+    { "label": "الرئيسية", "id": "home" },
+    { "label": "المميزات", "id": "features" },
+    { "label": "البنية", "id": "architecture" },
+    { "label": "التقنيات", "id": "technology" },
+    { "label": "العرض", "id": "demo" },
+    { "label": "الفريق", "id": "team" },
+    { "label": "التواصل", "id": "contact" }
+  ],
+  "hero": {
+    "kicker": "جامعة البحرين · مشروع التخرج 2026",
+    "headline": ["نظام", "ذكي", "للطاقة", "والسلامة", "الكهربائية"],
+    "subheadline": "تحسين ذكي لاستهلاك الطاقة، سلامة تنبؤية، وعي بالإشغال، واستجابة للطوارئ، مدعومة بالذكاء الاصطناعي.",
+    "primaryCta": "استكشاف المميزات",
+    "secondaryCta": "عرض النموذج",
+    "scroll": "مرر"
+  },
+  "homeStrip": [
+    { "key": "energy", "icon": "stripEnergy", "labelLines": ["تحسين", "الطاقة"] },
+    { "key": "occupancy", "icon": "stripOccupancy", "labelLines": ["الوعي", "بالإشغال"] },
+    { "key": "overload", "icon": "stripOverload", "labelLines": ["حماية", "الحمل"] },
+    { "key": "fire", "icon": "stripFire", "labelLines": ["الحريق", "والطوارئ"] },
+    { "key": "ai", "icon": "stripAi", "labelLines": ["محرك", "القرار"] },
+    { "key": "monitor", "icon": "stripMonitor", "labelLines": ["مراقبة", "فورية"] },
+    { "key": "predict", "icon": "stripPredict", "labelLines": ["سلامة", "تنبؤية"] },
+    { "key": "schedule", "icon": "stripSchedule", "labelLines": ["جدولة", "ذكية"] }
+  ],
+  "sections": {
+    "features": { "label": "القدرات", "title": "مصمم باختلاف.", "subtitle": "سبعة أنظمة ذكية تعمل بانسجام." },
+    "architecture": { "label": "البنية", "title": "كيف يفكر النظام.", "subtitle": "مسار ذكي فوري من الحساس إلى القرار." },
+    "technology": { "label": "التقنيات", "title": "التقنيات خلف الذكاء." },
+    "demo": { "label": "العرض", "title": "شاهده أثناء العمل." },
+    "team": { "label": "الفريق", "title": "تم بناؤه بواسطة." },
+    "contact": { "label": "التواصل", "title": "تواصل معنا." }
+  },
+  "features": [
+    { "title": "تحسين الطاقة", "icon": "bolt", "description": "يوزان الذكاء الاصطناعي الطلب، وينظم تشغيل الأجهزة عالية الحمل، ويقلل الهدر قبل ظهوره في الفاتورة." },
+    { "title": "الوعي بالإشغال", "icon": "eye", "description": "يعتمد النظام على حساسات الحركة لتكييف الإضاءة وسلوك الأجهزة حسب الوجود الفعلي في الغرفة." },
+    { "title": "حماية من الحمل الزائد", "icon": "shield", "description": "تكشف حساسات التيار أنماط الحمل غير الطبيعية وتفعل إجراءات الحماية قبل تصاعد الضرر." },
+    { "title": "الحريق والطوارئ", "icon": "flame", "description": "تتحد إشارات الدخان والحرارة والخطر في منطق استجابة سريع وتنبيهات حاسمة." },
+    { "title": "محرك القرار الذكي", "icon": "cpu", "description": "طبقة ذكاء مبنية بلغة بايثون تقيم سياق الحساسات المباشر وتقترح قرارات تحكم آمنة وفعالة." },
+    { "title": "مراقبة فورية", "icon": "activity", "description": "تعرض لوحة التحكم استهلاك الطاقة، حالات الغرف، نشاط المرحلات، وإشارات الخطر لحظة بلحظة." },
+    { "title": "سلامة تنبؤية", "icon": "radar", "description": "يكشف تحليل الأنماط مؤشرات الخطر المبكرة، لينقل السلامة الكهربائية من رد الفعل إلى التوقع." }
+  ],
+  "architecture": [
+    { "layer": "الطبقة الفيزيائية", "title": "الحساسات", "items": ["حركة / دخان", "تيار / حرارة"], "icon": "sensor" },
+    { "layer": "طبقة الحافة", "title": "ESP32", "items": ["متحكم دقيق", "مرحلات"], "icon": "bolt" },
+    { "layer": "السحابة والذكاء", "title": "محرك الذكاء", "items": ["Python / TF", "Firebase"], "icon": "cloud" },
+    { "layer": "طبقة الواجهة", "title": "لوحة التحكم", "items": ["ويب + تطبيق", "عرض المشغل"], "icon": "monitor" }
+  ],
+  "connectors": {
+    "mqtt": "MQTT"
+  },
+  "technology": [
+    { "group": "الواجهة", "items": ["Next.js", "TypeScript", "Tailwind CSS", "Framer Motion", "Flutter"] },
+    { "group": "الخلفية والذكاء", "items": ["Python", "TensorFlow", "FastAPI", "Firebase", "AWS IoT"] },
+    { "group": "العتاد", "items": ["ESP32", "PIR Sensor", "MQ-2 Smoke", "ACS712 Current", "4-Ch Relay", "DHT22"] }
+  ],
+  "team": [
+    { "name": "علي عبدالحسين عبدالعلي", "id": "202200578", "role": "عضو المشروع", "phone": "+973 37798824", "image": "/ali-abdulhussain-abdali.jpg", "githubUrl": "https://github.com/3xoob", "linkedinUrl": "https://www.linkedin.com/in/aliabdulhussain3" },
+    { "name": "ناصر حسين سلمان", "id": "202206918", "role": "عضو المشروع", "phone": "+973 37223372", "image": "/nasser-hussain-salman.jpg", "imagePosition": "center 8%", "githubUrl": "https://github.com/nxsoos", "linkedinUrl": "https://www.linkedin.com/in/nasser-hussain-b94a972a2" },
+    { "name": "س. سلمان عدنان عبدالله", "id": "202201576", "role": "عضو المشروع", "phone": "+973 33300410", "image": "/s-salman-adnan-abdullah.jpg", "githubUrl": "https://github.com/Sayed-Salman", "linkedinUrl": "https://www.linkedin.com/in/sayed-salman-sharaf-0b783b341" }
+  ],
+  "teamLabels": {
+    "id": "الرقم الجامعي",
+    "phone": "رقم الهاتف"
+  },
+  "contact": {
+    "emailLabel": "البريد الإلكتروني",
+    "emailValue": "kahrabaiq@uob.edu.bh",
+    "nameLabel": "الاسم",
+    "namePlaceholder": "اكتب اسمك",
+    "emailInputLabel": "البريد الإلكتروني",
+    "emailPlaceholder": "you@example.com",
+    "messageLabel": "الرسالة",
+    "messagePlaceholder": "اكتب رسالتك أو ما ترغب في معرفته",
+    "submit": "إرسال الرسالة"
+  },
+  "mockup": {
+    "live": "كهرباء آي كيو مباشر",
+    "safe": "آمن 98.7%",
+    "chartBars": [36, 58, 44, 75, 52, 88, 64, 72],
+    "metrics": [
+      { "label": "الحمل", "value": "2.4 kW" },
+      { "label": "الغرف", "value": "06 نشطة" },
+      { "label": "الخطر", "value": "منخفض" }
+    ],
+    "devices": [
+      { "name": "إضاءة المختبر أ", "state": "تشغيل", "tone": "normal" },
+      { "name": "مرحل التكييف", "state": "تشغيل", "tone": "normal" },
+      { "name": "عقدة الدخان", "state": "مراقبة", "tone": "warn" }
+    ],
+    "phoneLabel": "سلامة المنزل",
+    "phoneStatus": "كل الأنظمة مفعلة",
+    "phoneScore": "82%",
+    "phoneItems": [
+      { "label": "وضع الطاقة", "value": "Eco AI" },
+      { "label": "الطوارئ", "value": "جاهز" },
+      { "label": "الإشغال", "value": "مكتشف" }
+    ],
+    "hardwareLabel": "النموذج العتادي",
+    "hardwareChip": "ESP32"
+  },
+  "social": {
+    "linkedin": "LinkedIn",
+    "github": "GitHub",
+    "linkedinUrl": "https://www.linkedin.com",
+    "githubUrl": "https://github.com"
+  },
+  "footer": {
+    "university": "جامعة البحرين · 2026",
+    "copyright": "© 2026 كهرباء آي كيو. مشروع تخرج جامعة البحرين.",
+    "projectRepo": {
+      "label": "مستودع المشروع الكامل",
+      "placeholder": "سيضاف الرابط لاحقا",
+      "url": ""
+    }
+  },
+  "accessibility": {
+    "skip": "تجاوز إلى المحتوى الرئيسي",
+    "home": "العودة إلى بداية كهرباء آي كيو",
+    "nav": "التنقل الرئيسي",
+    "navLinks": "روابط الأقسام",
+    "scrollFeatures": "الانتقال إلى المميزات",
+    "homeStrip": "شريط أيقونات كهرباء آي كيو يعرض ثماني قدرات للنظام",
+    "architectureDiagram": "مخطط بنية النظام قابل للتمرير",
+    "chart": "رسم بياني لاستهلاك الطاقة"
+  }
+}
