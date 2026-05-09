@@ -1,7 +1,6 @@
 name: CI
 
 on:
-  pull_request:
   push:
     branches:
       - "**"
@@ -23,15 +22,15 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r seniorproject-backend/requirements.txt
+          pip install -r KahrabaIQ-backend/requirements.txt
           pip install tuya-connector-python
 
       - name: Compile backend and Pi modules
         run: |
           python -m py_compile \
-            seniorproject-backend/api_server.py \
-            seniorproject-backend/aws_cloud_store.py \
-            seniorproject-backend/main.py \
+            KahrabaIQ-backend/api_server.py \
+            KahrabaIQ-backend/aws_cloud_store.py \
+            KahrabaIQ-backend/main.py \
             pi/agent/pi_agent.py \
             pi/agent/local_state_store.py \
             pi/agent/esp32_receiver.py \
@@ -90,7 +89,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: smart_energy_app
+        working-directory: KahrabaIQ-mobile-app
 
     steps:
       - name: Checkout
