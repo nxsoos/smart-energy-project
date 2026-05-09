@@ -77,6 +77,48 @@
   "connectors": {
     "mqtt": "MQTT"
   },
+  "terminal": {
+    "label": "KAHRABAIQ SYSTEM BOOT",
+    "skip": "SKIP →",
+    "online": "[ KAHRABAIQ ONLINE ]",
+    "lines": [
+      "Initializing KAHRABAIQ...",
+      "Initializing Pi hub...",
+      "Booting AI energy core...",
+      "Connecting ESP32 modules...",
+      "Scanning occupancy sensors...",
+      "Loading power monitoring system...",
+      "Activating overload protection...",
+      "Syncing emergency shutdown protocol...",
+      "System ready."
+    ]
+  },
+  "languageTerminal": {
+    "label": "KAHRABAIQ INTERFACE RECONFIG",
+    "skip": "SKIP →",
+    "online": "[ LANGUAGE UPDATED ]",
+    "lines": [
+      "Switching interface language...",
+      "Loading English interface...",
+      "Updating layout direction...",
+      "Applying localized content...",
+      "Language updated."
+    ]
+  },
+  "architectureNetwork": {
+    "center": { "title": "KAHRABAIQ AI Core", "label": "Decision Layer", "icon": "radar" },
+    "nodes": [
+      { "title": "ESP32 Controller", "label": "Edge", "icon": "cpu", "position": "top-left" },
+      { "title": "Power Sensors", "label": "Load", "icon": "bolt", "position": "top" },
+      { "title": "Fire Detection Sensor", "label": "Smoke", "icon": "flame", "position": "top-right" },
+      { "title": "Occupancy Sensor", "label": "Presence", "icon": "eye", "position": "left" },
+      { "title": "MQTT Communication", "label": "Protocol", "icon": "activity", "position": "right" },
+      { "title": "AI Decision Engine", "label": "Intelligence", "icon": "radar", "position": "bottom-left" },
+      { "title": "Database", "label": "DynamoDB", "icon": "cloud", "position": "bottom" },
+      { "title": "Web Dashboard", "label": "Interface", "icon": "monitor", "position": "bottom-right" },
+      { "title": "Emergency Shutdown", "label": "Relay Kill", "icon": "shield", "position": "lower" }
+    ]
+  },
   "technology": [
     { "group": "Frontend", "items": ["Next.js", "TypeScript", "Tailwind CSS", "Framer Motion", "Flutter"] },
     { "group": "Backend & AI", "items": ["Python", "TensorFlow", "FastAPI", "DynamoDB", "AWS IoT"] },
@@ -136,6 +178,7 @@
   "footer": {
     "university": "University of Bahrain · 2026",
     "copyright": "© 2026 KAHRABAIQ. University of Bahrain Senior Project.",
+    "status": "KAHRABAIQ system online",
     "projectRepo": {
       "label": "Full project repository",
       "placeholder": "Link coming soon",

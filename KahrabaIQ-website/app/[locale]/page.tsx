@@ -22,5 +22,5 @@ export default async function LocalePage({ params }: { params: Promise<{ locale:
   const { locale } = await params;
   if (locale !== "en" && locale !== "ar") notFound();
 
-  return <HomePage key={locale} content={content[locale]} locale={locale} />;
+  return <HomePage key={locale} content={content[locale]} allContent={content} locale={locale} />;
 }

@@ -41,7 +41,10 @@ This package contains the public-facing website built with Next.js App Router, T
 KahrabaIQ-website/
   app/
     [locale]/page.tsx        Localized English and Arabic page route
-    components/HomePage.tsx  Main website UI and section rendering
+    components/
+      HomePage.tsx           Page shell, navigation, animation, language transition state
+      sections/              Page sections: hero, capabilities, architecture, demo, team, contact, footer
+      ui/                    Reusable UI: icons, terminal, particles, section headers
     favicon.ico              App Router favicon
     globals.css              Global theme, layout, and responsive styling
     layout.tsx               Metadata, fonts, and root HTML shell
@@ -127,8 +130,17 @@ When `url` is empty, the website shows a non-clickable placeholder. When `url` i
 
 - `/en` uses English content and left-to-right layout.
 - `/ar` uses Arabic content and right-to-left layout.
-- Language switch links are real route links between `/en` and `/ar`.
+- Language switching uses button-triggered terminal transitions, then routes between `/en` and `/ar` without resetting scroll.
 - Internal section navigation uses buttons and smooth scrolling.
+
+## Terminal Behavior
+
+The website has two terminal modes:
+
+- Initial page load uses the localized system boot terminal from `terminal` in the locale JSON file.
+- Language switching uses the faster localized interface reconfiguration terminal from `languageTerminal` in the locale JSON file.
+
+When adding or editing terminal lines, keep both English and Arabic JSON structures aligned.
 
 ## Quality Checks
 

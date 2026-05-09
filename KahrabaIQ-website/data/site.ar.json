@@ -77,6 +77,48 @@
   "connectors": {
     "mqtt": "MQTT"
   },
+  "terminal": {
+    "label": "تشغيل نظام KAHRABAIQ",
+    "skip": "تجاوز ←",
+    "online": "[ KAHRABAIQ متصل ]",
+    "lines": [
+      "جاري تهيئة KAHRABAIQ...",
+      "جاري تهيئة محور Pi...",
+      "تشغيل نواة الطاقة الذكية...",
+      "الاتصال بوحدات ESP32...",
+      "فحص حساسات الحركة...",
+      "تحميل نظام مراقبة الطاقة...",
+      "تفعيل حماية الأحمال الزائدة...",
+      "مزامنة بروتوكول الإيقاف الطارئ...",
+      "النظام جاهز."
+    ]
+  },
+  "languageTerminal": {
+    "label": "إعادة ضبط واجهة KAHRABAIQ",
+    "skip": "تجاوز ←",
+    "online": "[ تم تحديث اللغة ]",
+    "lines": [
+      "جاري تغيير لغة الواجهة...",
+      "تحميل الواجهة العربية...",
+      "تحديث اتجاه التخطيط...",
+      "تطبيق المحتوى المترجم...",
+      "تم تحديث اللغة."
+    ]
+  },
+  "architectureNetwork": {
+    "center": { "title": "نواة KAHRABAIQ الذكية", "label": "طبقة القرار", "icon": "radar" },
+    "nodes": [
+      { "title": "متحكم ESP32", "label": "الحافة", "icon": "cpu", "position": "top-left" },
+      { "title": "حساسات الطاقة", "label": "الحمل", "icon": "bolt", "position": "top" },
+      { "title": "حساس كشف الحريق", "label": "الدخان", "icon": "flame", "position": "top-right" },
+      { "title": "حساس الإشغال", "label": "الحضور", "icon": "eye", "position": "left" },
+      { "title": "اتصال MQTT", "label": "البروتوكول", "icon": "activity", "position": "right" },
+      { "title": "محرك القرار الذكي", "label": "الذكاء", "icon": "radar", "position": "bottom-left" },
+      { "title": "قاعدة البيانات", "label": "DynamoDB", "icon": "cloud", "position": "bottom" },
+      { "title": "لوحة الويب", "label": "الواجهة", "icon": "monitor", "position": "bottom-right" },
+      { "title": "الإيقاف الطارئ", "label": "قتل المرحل", "icon": "shield", "position": "lower" }
+    ]
+  },
   "technology": [
     { "group": "الواجهة", "items": ["Next.js", "TypeScript", "Tailwind CSS", "Framer Motion", "Flutter"] },
     { "group": "الخلفية والذكاء", "items": ["Python", "TensorFlow", "FastAPI", "DynamoDB", "AWS IoT"] },
@@ -136,6 +178,7 @@
   "footer": {
     "university": "جامعة البحرين · 2026",
     "copyright": "© 2026 كهرباء آي كيو. مشروع تخرج جامعة البحرين.",
+    "status": "نظام كهرباء آي كيو متصل",
     "projectRepo": {
       "label": "مستودع المشروع الكامل",
       "placeholder": "سيضاف الرابط لاحقا",
