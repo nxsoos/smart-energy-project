@@ -8,13 +8,18 @@ import '../../../core/utils/app_routes.dart';
 import '../../../core/utils/constants.dart';
 import '../../../core/widgets/alert_banner.dart';
 import '../../../core/widgets/app_state_widgets.dart';
+import '../../../shared/models/alert.dart';
 import '../../../shared/models/device.dart';
+import '../../../shared/models/energy_reading.dart';
+import '../../../shared/models/sensor_data.dart';
 import '../../../shared/services/auth_service.dart';
 import '../../../shared/services/kahrabaiq_api_service.dart';
+import '../../../shared/services/notification_service.dart';
 import '../../ai_chat/screens/ai_chatbot_screen.dart';
 import '../../pairing/screens/qr_scanner_screen.dart';
 import '../../sensors/screens/sensors_status_screen.dart';
 import 'breakers_screen.dart';
+import 'notifications_screen.dart';
 import '../widgets/ai_insights_banner.dart';
 import '../widgets/dashboard_header.dart';
 import '../widgets/devices_section.dart';
@@ -42,6 +47,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _dashboardNotice;
   final Set<String> _localPendingCommands = {};
   final Map<String, String> _localCommandErrors = {};
+  final Set<String> _dismissedAlertIds = {};
+  final Set<String> _notifiedSmokeAlertIds = {};
+  bool _smokeDialogVisible = false;
 
   @override
   void initState() {
@@ -115,13 +123,14 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) {
         return;
       }
-      if (_dashboard != null || NetworkConfig.useAwsIotLive) {
+      if (_dashboard != null) {
         return;
       }
       setState(() {
+        _dashboard = _offlineDashboard();
         _isLoading = false;
         _dashboardNotice =
-            'Could not connect to the dashboard API. Live data will appear when the Pi is reachable.';
+            'The Pi is offline or frozen. Showing the dashboard shell until live data returns.';
       });
     }
   }
@@ -133,6 +142,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final liveDeviceIds = dashboard.devices.map((device) => device.id).toSet();
     setState(() {
       _dashboard = dashboard;
+      _syncSafetyPopup(dashboard.alerts);
       _localPendingCommands.removeWhere((deviceId) {
         Device? device;
         for (final item in dashboard.devices) {
@@ -152,15 +162,68 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  void _syncSafetyPopup(List<Alert> alerts) {
+    final smokeAlert = _activeSmokeAlert(alerts);
+    if (smokeAlert == null) {
+      if (_smokeDialogVisible) {
+        _smokeDialogVisible = false;
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+      return;
+    }
+    if (_notifiedSmokeAlertIds.add(smokeAlert.id)) {
+      unawaited(
+        NotificationService.showSmokeAlert(
+          alertId: smokeAlert.id,
+          message: smokeAlert.message,
+        ),
+      );
+    }
+    if (_smokeDialogVisible) {
+      return;
+    }
+    _smokeDialogVisible = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted ||
+          _activeSmokeAlert(_dashboard?.alerts ?? const []) == null) {
+        _smokeDialogVisible = false;
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _SmokeAlertDialog(alert: smokeAlert),
+      );
+      _smokeDialogVisible = false;
+    });
+  }
+
+  Alert? _activeSmokeAlert(List<Alert> alerts) {
+    for (final alert in alerts) {
+      final type = alert.backendType.toLowerCase();
+      final message = alert.message.toLowerCase();
+      if (alert.isActive &&
+          (alert.id == 'smoke_detected_room1' ||
+              type.contains('smoke') ||
+              type.contains('gas') ||
+              message.contains('smoke') ||
+              message.contains('gas'))) {
+        return alert;
+      }
+    }
+    return null;
+  }
+
   void _handleLiveError(Object error) {
     if (!mounted) {
       return;
     }
     if (_dashboard == null) {
       setState(() {
+        _dashboard = _offlineDashboard();
         _isLoading = false;
         _dashboardNotice =
-            'Could not receive live data. The Pi may be offline or frozen.';
+            'The Pi is offline or frozen. Showing the dashboard shell until live data returns.';
       });
       return;
     }
@@ -168,6 +231,83 @@ class _HomeScreenState extends State<HomeScreen> {
       _dashboardNotice =
           'Live updates are paused. Showing the latest available dashboard data.';
     });
+  }
+
+  DashboardData _offlineDashboard() {
+    final now = DateTime.now();
+    return DashboardData(
+      reading: EnergyReading(
+        timestamp: now,
+        voltage: 0,
+        current: 0,
+        power: 0,
+        energyToday: 0,
+        energyTotal: 0,
+      ),
+      sensors: SensorData(
+        timestamp: DateTime.fromMillisecondsSinceEpoch(0),
+        temperature: 0,
+        humidity: 0,
+        isOccupied: false,
+        smokeStatus: 'Unknown',
+        noiseStatus: 'Unknown',
+        lightStatus: 'Unknown',
+        online: false,
+      ),
+      devices: [
+        Device(
+          id: 'matter_socket_switch',
+          name: 'Socket Switch',
+          type: DeviceType.socket,
+          isOn: false,
+          currentPower: 0,
+          branch: 'Main',
+          online: false,
+          localOnline: false,
+          cloudOnline: false,
+          controlMethod: 'home_assistant',
+        ),
+        Device(
+          id: 'matter_ac_switch',
+          name: 'AC Switch',
+          type: DeviceType.airConditioner,
+          isOn: false,
+          currentPower: 0,
+          branch: 'Main',
+          online: false,
+          localOnline: false,
+          cloudOnline: false,
+          controlMethod: 'home_assistant',
+        ),
+        Device(
+          id: 'breaker_01',
+          name: 'Switch Breaker',
+          type: DeviceType.light,
+          isOn: false,
+          currentPower: 0,
+          branch: 'Branch 1',
+          online: false,
+          localOnline: false,
+          cloudOnline: false,
+          controlMethod: 'tuya_cloud',
+        ),
+        Device(
+          id: 'breaker_02',
+          name: 'AC Breaker',
+          type: DeviceType.airConditioner,
+          isOn: false,
+          currentPower: 0,
+          branch: 'Branch 2',
+          online: false,
+          localOnline: false,
+          cloudOnline: false,
+          controlMethod: 'tuya_cloud',
+        ),
+      ],
+      alerts: const [],
+      tariffBhdPerKwh: ElectricityPricing.costPerKWh,
+      deviceControlEnabled: false,
+    );
   }
 
   @override
@@ -204,6 +344,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     DashboardHeader(
                       name: _displayName(),
                       alertCount: dashboard.alerts.length,
+                      onNotifications: () => _openNotifications(dashboard),
                       onLogout: _logout,
                     ),
                     if (_dashboardNotice != null) ...[
@@ -226,10 +367,27 @@ class _HomeScreenState extends State<HomeScreen> {
                       onBreakersTap: () => _openBreakers(dashboard.devices),
                     ),
                     const SizedBox(height: 16),
-                    if (dashboard.alerts.isNotEmpty)
+                    if (dashboard.alerts
+                        .where(
+                          (alert) => !_dismissedAlertIds.contains(alert.id),
+                        )
+                        .isNotEmpty)
                       AlertBanner(
-                        alert: dashboard.alerts.first,
-                        onDismiss: () {},
+                        alert: dashboard.alerts.firstWhere(
+                          (alert) => !_dismissedAlertIds.contains(alert.id),
+                        ),
+                        onDismiss: () {
+                          setState(() {
+                            _dismissedAlertIds.add(
+                              dashboard.alerts
+                                  .firstWhere(
+                                    (alert) =>
+                                        !_dismissedAlertIds.contains(alert.id),
+                                  )
+                                  .id,
+                            );
+                          });
+                        },
                       ),
                     const SizedBox(height: 16),
                     AiInsightsBanner(
@@ -322,6 +480,17 @@ class _HomeScreenState extends State<HomeScreen> {
     Navigator.of(
       context,
     ).push(fadeSlideRoute(BreakersScreen(devices: devices)));
+  }
+
+  void _openNotifications(DashboardData dashboard) {
+    Navigator.of(context).push(
+      fadeSlideRoute(
+        NotificationsScreen(
+          homeId: _homeId ?? NetworkConfig.defaultHomeId,
+          alerts: dashboard.alerts,
+        ),
+      ),
+    );
   }
 
   void _openSensors() => Navigator.of(
@@ -595,9 +764,7 @@ class _DashboardNotice extends StatelessWidget {
       decoration: BoxDecoration(
         color: ColorTokens.warning.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: ColorTokens.warning.withValues(alpha: 0.35),
-        ),
+        border: Border.all(color: ColorTokens.warning.withValues(alpha: 0.35)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -618,6 +785,45 @@ class _DashboardNotice extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _SmokeAlertDialog extends StatelessWidget {
+  const _SmokeAlertDialog({required this.alert});
+
+  final Alert alert;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: ColorTokens.surfaceElevated,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      icon: const Icon(
+        Icons.local_fire_department,
+        color: ColorTokens.danger,
+        size: 42,
+      ),
+      title: Text('Smoke/Gas Detected', style: AppTextStyles.h2),
+      content: Text(
+        alert.message.isEmpty
+            ? 'Smoke or gas was detected in Room 1. Check immediately.'
+            : alert.message,
+        style: AppTextStyles.body,
+        textAlign: TextAlign.center,
+      ),
+      actionsAlignment: MainAxisAlignment.center,
+      actions: [
+        FilledButton.icon(
+          style: FilledButton.styleFrom(
+            backgroundColor: ColorTokens.danger,
+            foregroundColor: ColorTokens.textPrimary,
+          ),
+          onPressed: () => Navigator.of(context).pop(),
+          icon: const Icon(Icons.check_circle_outline),
+          label: const Text('I understand'),
+        ),
+      ],
     );
   }
 }

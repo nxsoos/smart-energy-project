@@ -142,6 +142,7 @@ def build_live_state() -> dict[str, Any]:
     home_id = HOME_ID or str(_agent_state.get("home_id") or "home_001")
     if build_live_payload is not None:
         payload = build_live_payload()
+        home = home_snapshot(home_id)
         return {
             "home_id": home_id,
             "dashboard": payload.get("dashboard") if isinstance(payload.get("dashboard"), dict) else {},
@@ -152,6 +153,9 @@ def build_live_state() -> dict[str, Any]:
             "alerts": list((payload.get("alerts") or {}).get("active", {}).values())
             if isinstance(payload.get("alerts"), dict)
             else payload.get("alerts", []),
+            "notifications": list((home.get("notifications") or {}).values())
+            if isinstance(home.get("notifications"), dict)
+            else [],
             "occupancy": payload.get("occupancy") if isinstance(payload.get("occupancy"), dict) else {},
             "safety": payload.get("safety") if isinstance(payload.get("safety"), dict) else {},
             "updated_at_ms": payload.get("timestamp_ms") or payload.get("timestampMs") or now_ms(),
@@ -165,6 +169,7 @@ def build_live_state() -> dict[str, Any]:
         "room": esp32.get("sensors") if isinstance(esp32.get("sensors"), dict) else {},
         "devices": devices,
         "alerts": list((home.get("alerts") or {}).get("active", {}).values()) if isinstance(home.get("alerts"), dict) else [],
+        "notifications": list(home.get("notifications", {}).values()) if isinstance(home.get("notifications"), dict) else [],
         "occupancy": (home.get("occupancy") or {}).get("room1", {}) if isinstance(home.get("occupancy"), dict) else {},
         "safety": home.get("safety") if isinstance(home.get("safety"), dict) else {},
         "updated_at_ms": now_ms(),

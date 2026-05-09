@@ -3,6 +3,7 @@ import 'core/theme/app_theme.dart';
 import 'features/auth/screens/auth_screen.dart';
 import 'features/dashboard/screens/home_screen.dart';
 import 'shared/services/auth_service.dart';
+import 'shared/services/notification_service.dart';
 import 'core/utils/constants.dart';
 
 class NoStretchScrollBehavior extends MaterialScrollBehavior {
@@ -20,6 +21,7 @@ class NoStretchScrollBehavior extends MaterialScrollBehavior {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await NotificationService.initialize();
   runApp(const KahrabaIQApp());
 }
 

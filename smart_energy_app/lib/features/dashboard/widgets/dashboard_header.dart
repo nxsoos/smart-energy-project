@@ -9,11 +9,13 @@ class DashboardHeader extends StatelessWidget {
     super.key,
     required this.name,
     required this.alertCount,
+    this.onNotifications,
     this.onLogout,
   });
 
   final String name;
   final int alertCount;
+  final VoidCallback? onNotifications;
   final VoidCallback? onLogout;
 
   @override
@@ -55,7 +57,7 @@ class DashboardHeader extends StatelessWidget {
           children: [
             IconButton(
               tooltip: 'Notifications',
-              onPressed: () {},
+              onPressed: onNotifications,
               icon: const Icon(
                 Icons.notifications_none,
                 color: ColorTokens.textPrimary,

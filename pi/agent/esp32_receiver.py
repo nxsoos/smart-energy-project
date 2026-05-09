@@ -27,6 +27,7 @@ APP_DEVICE_ID = "esp32_01"
 SMOKE_ALERT_ID = "smoke_detected_room1"
 SMOKE_CONFIRMATION_COUNT = 2
 SMOKE_CONFIRMATION_MS = 7000
+SMOKE_CLEAR_CONFIRMATION_MS = int(os.environ.get("SMOKE_CLEAR_CONFIRMATION_MS", "15000"))
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
@@ -203,6 +204,38 @@ def create_smoke_emergency(timestamp_ms: int, source_log: str) -> None:
     )
 
 
+def resolve_smoke_emergency(timestamp_ms: int) -> None:
+    alert = as_dict(home_ref(f"alerts/active/{SMOKE_ALERT_ID}").get())
+    if alert:
+        home_ref(f"alerts/history/alert_{timestamp_ms}_{SMOKE_ALERT_ID}").set(
+            {
+                **alert,
+                "status": "resolved",
+                "event": "resolved",
+                "resolved_at_ms": timestamp_ms,
+                "resolved_at_iso": ms_to_iso(timestamp_ms),
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": ms_to_iso(timestamp_ms),
+            }
+        )
+        home_ref(f"alerts/active/{SMOKE_ALERT_ID}").set(None)
+    home_ref("safety/emergency_mode").update(
+        {
+            "active": False,
+            "ended_at_ms": timestamp_ms,
+            "ended_at_iso": ms_to_iso(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": ms_to_iso(timestamp_ms),
+        }
+    )
+    write_safety_event(
+        "emergency_mode_disabled",
+        "Smoke or gas has been clear for 15 seconds. Emergency alert resolved.",
+        timestamp_ms,
+        ["smoke_clear_confirmed"],
+    )
+
+
 def update_smoke_safety(history_payload: dict[str, Any], timestamp_ms: int) -> None:
     detected = smoke_detected_from_payload(history_payload)
     current = as_dict(home_ref("safety/smoke_state").get())
@@ -249,6 +282,11 @@ def update_smoke_safety(history_payload: dict[str, Any], timestamp_ms: int) -> N
             "updated_at_iso": ms_to_iso(timestamp_ms),
         }
     )
+    if (
+        current.get("status") in {"pending", "confirmed", "clear"}
+        and timestamp_ms - first_clear_at >= SMOKE_CLEAR_CONFIRMATION_MS
+    ):
+        resolve_smoke_emergency(timestamp_ms)
 
 
 def build_payload(data: dict[str, Any]) -> dict[str, Any]:

@@ -101,18 +101,22 @@ class _AlertBannerState extends State<AlertBanner>
                 ],
               ),
             ),
-            Icon(Icons.swipe_left, color: ColorTokens.textMuted, size: 18),
+            if (widget.onDismiss != null)
+              IconButton(
+                tooltip: 'Dismiss',
+                onPressed: widget.onDismiss,
+                icon: const Icon(
+                  Icons.close,
+                  color: ColorTokens.textMuted,
+                  size: 18,
+                ),
+              ),
           ],
         ),
       ),
     );
 
-    return Dismissible(
-      key: ValueKey(widget.alert.id),
-      direction: DismissDirection.endToStart,
-      onDismissed: (_) => widget.onDismiss?.call(),
-      child: content,
-    );
+    return content;
   }
 
   Color _severityColor(String severity) {

@@ -82,6 +82,46 @@ class SensorData {
     };
   }
 
+  SensorData copyWith({
+    DateTime? timestamp,
+    double? temperature,
+    double? humidity,
+    bool? isOccupied,
+    double? eco2,
+    double? tvoc,
+    int? aqi,
+    int? smokeRaw,
+    int? lightRaw,
+    int? soundRaw,
+    int? noise,
+    String? noiseStatus,
+    String? lightStatus,
+    String? smokeStatus,
+    bool? ahtOk,
+    bool? ens160Ok,
+    bool? online,
+  }) {
+    return SensorData(
+      timestamp: timestamp ?? this.timestamp,
+      temperature: temperature ?? this.temperature,
+      humidity: humidity ?? this.humidity,
+      isOccupied: isOccupied ?? this.isOccupied,
+      eco2: eco2 ?? this.eco2,
+      tvoc: tvoc ?? this.tvoc,
+      aqi: aqi ?? this.aqi,
+      smokeRaw: smokeRaw ?? this.smokeRaw,
+      lightRaw: lightRaw ?? this.lightRaw,
+      soundRaw: soundRaw ?? this.soundRaw,
+      noise: noise ?? this.noise,
+      noiseStatus: noiseStatus ?? this.noiseStatus,
+      lightStatus: lightStatus ?? this.lightStatus,
+      smokeStatus: smokeStatus ?? this.smokeStatus,
+      ahtOk: ahtOk ?? this.ahtOk,
+      ens160Ok: ens160Ok ?? this.ens160Ok,
+      online: online ?? this.online,
+    );
+  }
+
   // Check if temperature is comfortable
   bool get isComfortableTemp => temperature >= 18 && temperature <= 26;
 

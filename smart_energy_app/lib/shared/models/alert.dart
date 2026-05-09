@@ -23,17 +23,53 @@ class Alert {
   });
 
   factory Alert.fromJson(Map<String, dynamic> json) {
-    final backendType = (json['type'] as String?) ?? 'sensorfailure';
+    final backendType =
+        (json['alert_type'] as String?) ??
+        (json['category'] as String?) ??
+        (json['type'] as String?) ??
+        'sensorfailure';
+    final alertId =
+        (json['alert_id'] as String?) ??
+        (json['id'] as String?) ??
+        (json['alertId'] as String?) ??
+        DateTime.now().millisecondsSinceEpoch.toString();
+    final isSmokeAlert =
+        alertId == 'smoke_detected_room1' ||
+        backendType.toLowerCase().contains('smoke') ||
+        backendType.toLowerCase().contains('gas');
+    final message =
+        (json['message'] as String?) ??
+        (json['body'] as String?) ??
+        (json['title'] as String?) ??
+        (isSmokeAlert
+            ? 'Smoke or gas was detected in Room 1. Check immediately.'
+            : 'System alert');
 
     return Alert(
-      id: (json['id'] as String?) ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      id: alertId,
       type: _parseAlertType(backendType),
       backendType: backendType,
-      message: (json['message'] as String?) ?? 'System alert',
-      timestamp: _parseTimestamp(json['timestamp']),
-      severity: (json['severity'] as String?) ?? (json['level'] as String?) ?? 'medium',
-      isActive: json['isActive'] as bool? ?? true,
-      affectedBranch: json['affectedBranch'] as String?,
+      message: message,
+      timestamp: _parseTimestamp(
+        json['created_at_ms'] ??
+            json['created_at_iso'] ??
+            json['createdAt'] ??
+            json['first_detected_at_ms'] ??
+            json['started_at_ms'] ??
+            json['timestamp_ms'] ??
+            json['timestamp'] ??
+            json['created_at_ms'] ??
+            json['updated_at_ms'],
+      ),
+      severity:
+          (json['severity'] as String?) ??
+          (json['level'] as String?) ??
+          (isSmokeAlert ? 'critical' : 'medium'),
+      isActive: json['isActive'] as bool? ?? json['status'] != 'resolved',
+      affectedBranch:
+          json['affectedBranch'] as String? ??
+          json['room_id'] as String? ??
+          json['branch'] as String?,
     );
   }
 
@@ -55,6 +91,9 @@ class Alert {
         return AlertType.overload;
       case 'fire':
       case 'safety':
+      case 'smoke_detected':
+      case 'smoke':
+      case 'gas':
         return AlertType.fire;
       case 'highconsumption':
       case 'high_consumption':

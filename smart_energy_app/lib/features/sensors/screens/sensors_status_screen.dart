@@ -91,7 +91,13 @@ class SensorsStatusScreen extends StatelessWidget {
     );
   }
 
-  bool get _isSafe => !sensorData.smokeStatus.toLowerCase().contains('alert');
+  bool get _isSafe {
+    final smoke = sensorData.smokeStatus.toLowerCase();
+    return !(smoke.contains('alert') ||
+        smoke.contains('detect') ||
+        smoke.contains('smoke') ||
+        smoke.contains('gas'));
+  }
 
   bool get _isOffline {
     if (!sensorData.online) {
@@ -273,10 +279,11 @@ class _HeaderState extends State<_Header> with SingleTickerProviderStateMixin {
             width: 12,
             height: 12,
             decoration: BoxDecoration(
-              color: (widget.isOffline
-                      ? ColorTokens.textMuted
-                      : ColorTokens.success)
-                  .withValues(alpha: 0.4 + _controller.value * 0.6),
+              color:
+                  (widget.isOffline
+                          ? ColorTokens.textMuted
+                          : ColorTokens.success)
+                      .withValues(alpha: 0.4 + _controller.value * 0.6),
               shape: BoxShape.circle,
             ),
           ),

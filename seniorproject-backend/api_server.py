@@ -517,6 +517,7 @@ class PiSensorStateRequest(BaseModel):
     energy: dict[str, Any] = Field(default_factory=dict)
     commands: dict[str, Any] = Field(default_factory=dict)
     alerts: list[dict[str, Any]] = Field(default_factory=list)
+    notifications: list[dict[str, Any]] = Field(default_factory=list)
     occupancy: dict[str, Any] = Field(default_factory=dict)
     safety: dict[str, Any] = Field(default_factory=dict)
     updated_at_ms: int | None = None
@@ -1523,6 +1524,7 @@ def pi_sensor_state(
         "energy": request.energy,
         "commands": request.commands,
         "alerts": request.alerts,
+        "notifications": request.notifications,
         "occupancy": request.occupancy,
         "safety": request.safety,
         "updated_at_ms": timestamp_ms,
@@ -1541,6 +1543,19 @@ def pi_sensor_state(
             if isinstance(alert, dict)
         }
         safe_set(f"/homes/{home_id}/alerts/active", active_alerts)
+    if request.notifications:
+        for index, notification in enumerate(request.notifications):
+            if not isinstance(notification, dict):
+                continue
+            notification_id = str(
+                notification.get("notification_id")
+                or notification.get("id")
+                or f"notification_{index}"
+            )
+            safe_update(
+                f"/homes/{home_id}/notifications/{notification_id}",
+                notification,
+            )
     safe_update(
         f"/pis/{pi_id}",
         {"last_state_sync_at_ms": timestamp_ms, "last_state_sync_at_iso": iso_from_ms(timestamp_ms)},
@@ -1932,7 +1947,7 @@ def normalize_bool(value: Any) -> bool | None:
         return value != 0
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in {"true", "1", "on", "yes", "detected", "motion", "smoke"}:
+        if normalized in {"true", "1", "on", "yes", "detected", "motion", "smoke", "gas"}:
             return True
         if normalized in {"false", "0", "off", "no", "clear", "no motion", "none"}:
             return False
@@ -2150,6 +2165,18 @@ def create_notification_record(home_id: str, title: str, body: str) -> dict[str,
 def send_push_notifications(home_id: str, notification_id: str, title: str, body: str) -> None:
     # Mobile push delivery is intentionally disabled until AWS SNS/Pinpoint is wired.
     return
+
+
+def notification_sort_key(item: dict[str, Any]) -> int:
+    return int(
+        first_present(
+            item.get("created_at_ms"),
+            item.get("timestamp_ms"),
+            item.get("updated_at_ms"),
+            0,
+        )
+        or 0
+    )
 
 
 def default_settings_record(updated_by: str = "system_default") -> dict[str, Any]:
@@ -2565,6 +2592,47 @@ def active_only(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def alert_dedupe_key(item: dict[str, Any]) -> str:
+    alert_id = str(first_present(item.get("alert_id"), item.get("id"), item.get("alert_key"), "")).strip()
+    alert_type = str(first_present(item.get("alert_type"), item.get("category"), item.get("type"), "")).lower()
+    message = str(first_present(item.get("message"), item.get("body"), item.get("title"), "")).lower().strip()
+    if alert_id == SMOKE_ALERT_ID or "smoke" in alert_type or "gas" in alert_type or "smoke" in message or "gas" in message:
+        return SMOKE_ALERT_ID
+    if alert_id:
+        return alert_id
+    return f"{alert_type}:{message}"
+
+
+def dedupe_alerts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not is_meaningful_alert(item):
+            continue
+        key = alert_dedupe_key(item)
+        existing = result.get(key)
+        if not existing or (
+            str(existing.get("message", "")).strip().lower() == "system alert"
+            and str(item.get("message", "")).strip().lower() != "system alert"
+        ):
+            result[key] = item
+    return sorted(
+        result.values(),
+        key=lambda item: int(first_present(item.get("created_at_ms"), item.get("timestamp_ms"), item.get("updated_at_ms"), 0) or 0),
+        reverse=True,
+    )
+
+
+def is_meaningful_alert(item: dict[str, Any]) -> bool:
+    alert_id = str(first_present(item.get("alert_id"), item.get("id"), item.get("alert_key"), "")).strip()
+    alert_type = str(first_present(item.get("alert_type"), item.get("category"), item.get("type"), "")).lower().strip()
+    message = str(first_present(item.get("message"), item.get("body"), item.get("title"), "")).lower().strip()
+    if alert_id == SMOKE_ALERT_ID or "smoke" in alert_type or "gas" in alert_type or "smoke" in message or "gas" in message:
+        return True
+    if not message or message == "system alert":
+        return alert_type not in {"", "sensorfailure", "sensor_failure", "unknown"}
+    return True
+
+
 def dedupe_action_suggestions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped = []
     seen = set()
@@ -2627,6 +2695,8 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
     dashboard_env = bundle["backend_dashboard_environment"]
     current_state = as_dict(bundle["backend"].get("current_state"))
     occupancy = bundle["occupancy_room1"]
+    smoke_state = as_dict(as_dict(bundle["safety"]).get("smoke_state"))
+    emergency_mode = as_dict(as_dict(bundle["safety"]).get("emergency_mode"))
 
     source = {
         **current_state,
@@ -2638,6 +2708,13 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
 
     motion_bool = normalize_bool(first_present(source.get("motion"), source.get("occupied")))
     smoke_bool = normalize_bool(source.get("smoke"))
+    safety_smoke_active = (
+        smoke_state.get("status") in {"pending", "confirmed"}
+        or emergency_mode.get("active") is True
+        and "smoke" in str(emergency_mode.get("reason", "")).lower()
+    )
+    if safety_smoke_active:
+        smoke_bool = True
     sensor_timestamp_ms = first_present(
         sensors.get("timestamp_ms"),
         latest_room.get("timestamp_ms"),
@@ -2668,8 +2745,12 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
         "motion_text": source.get("motion_text")
         or ("Motion" if motion_bool else "No motion" if motion_bool is False else "Unknown"),
         "smoke": bool(smoke_bool) if smoke_bool is not None else False,
-        "smoke_text": source.get("smoke_text")
-        or ("Smoke/Gas" if smoke_bool else "Clear" if smoke_bool is False else "Unknown"),
+        "smoke_text": (
+            "Detected"
+            if safety_smoke_active
+            else source.get("smoke_text")
+            or ("Smoke/Gas" if smoke_bool else "Clear" if smoke_bool is False else "Unknown")
+        ),
         "sound_level": first_present(
             source.get("sound_level"),
             source.get("sound_raw"),
@@ -3134,7 +3215,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     settings = ensure_settings(home_id)
     control_mode = str(control.get("mode", "assist")).lower()
 
-    alerts = active_only(
+    alerts = dedupe_alerts(active_only(
         object_to_list(bundle["alerts_active"])
         + object_to_list(bundle["backend_active_alerts"])
         + [
@@ -3142,7 +3223,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
             for item in bundle["latest_state"].get("alerts", [])
             if isinstance(item, dict)
         ]
-    )
+    ))
     recommendations = active_only(
         object_to_list(bundle["recommendations_active"])
         + object_to_list(bundle["backend_recommendations"])
@@ -3855,6 +3936,26 @@ def register_notification_token(home_id: str, request: NotificationTokenRequest)
     return {"success": True, "home_id": home_id, "token_id": token_id}
 
 
+@app.get("/api/home/{home_id}/notifications", dependencies=[Depends(require_home_permission("can_view"))])
+def list_notifications(home_id: str, limit: int = 50, unread_only: bool = False) -> dict[str, Any]:
+    raw_notifications = object_to_list(safe_get(f"/homes/{home_id}/notifications", {}))
+    notifications = [
+        item
+        for item in raw_notifications
+        if isinstance(item, dict) and (not unread_only or item.get("read") is not True)
+    ]
+    notifications.sort(key=notification_sort_key, reverse=True)
+    limited = notifications[: max(1, min(int(limit), 100))]
+    unread_count = sum(1 for item in raw_notifications if isinstance(item, dict) and item.get("read") is not True)
+    return {
+        "success": True,
+        "home_id": home_id,
+        "count": len(limited),
+        "unread_count": unread_count,
+        "notifications": limited,
+    }
+
+
 @app.post("/api/home/{home_id}/notifications/{notification_id}/read", dependencies=[Depends(require_home_permission("can_view"))])
 def mark_notification_read(home_id: str, notification_id: str) -> dict[str, Any]:
     timestamp_ms = now_ms()
@@ -4008,10 +4109,10 @@ def sync_home_assistant(home_id: str) -> dict[str, Any]:
 @app.get("/api/home/{home_id}/alerts/active", dependencies=[Depends(require_home_permission("can_view"))])
 def get_active_alerts(home_id: str) -> dict[str, Any]:
     bundle = read_home_bundle(home_id)
-    alerts = active_only(
+    alerts = dedupe_alerts(active_only(
         object_to_list(bundle["alerts_active"])
         + object_to_list(bundle["backend_active_alerts"])
-    )
+    ))
     return {"home_id": home_id, "count": len(alerts), "alerts": alerts}
 
 

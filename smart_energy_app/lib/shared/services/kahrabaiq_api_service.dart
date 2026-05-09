@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 
 import '../models/alert.dart';
+import '../models/app_notification.dart';
 import '../models/ai_insights.dart';
 import '../models/device.dart';
 import '../models/energy_reading.dart';
@@ -647,6 +648,7 @@ class KahrabaIqApiService {
   }) {
     final room = _asMap(data['room']);
     final energy = _asMap(data['energy']);
+    final safety = _asMap(data['safety']);
     final devicesMap = _asMap(data['devices']);
     final devices =
         devicesMap.entries
@@ -687,6 +689,16 @@ class KahrabaIqApiService {
         (sum, device) => sum + device.energyToday,
       ),
     );
+    final parsedAlerts = _dedupeAlerts(
+      _asList(data['alerts'])
+          .map((alert) => _alertFromBackend(_asString(alert['id']), alert))
+          .toList(),
+    );
+    final parsedSensors = _sensorWithSmokeOverride(
+      _parseAwsIotLiveSensor(room),
+      safety: safety,
+      alerts: parsedAlerts,
+    );
 
     return DashboardData(
       reading: EnergyReading(
@@ -717,14 +729,12 @@ class KahrabaIqApiService {
         ),
         costToday: _asDouble(_pick(energy, ['costToday', 'costTodayBhd'])),
       ),
-      sensors: _parseAwsIotLiveSensor(room),
+      sensors: parsedSensors,
       devices: devices,
-      alerts: _asList(data['alerts'])
-          .map((alert) => _alertFromBackend(_asString(alert['id']), alert))
-          .toList(),
+      alerts: parsedAlerts,
       tariffBhdPerKwh: ElectricityPricing.costPerKWh,
       control: _parseControl(_asMap(data['control'])),
-      safety: _asMap(data['safety']),
+      safety: safety,
       deviceControlEnabled: homeId != 'home_test',
     );
   }
@@ -995,6 +1005,16 @@ class KahrabaIqApiService {
         pendingCommands.add(entry.key);
       }
     }
+    final parsedAlerts = _dedupeAlerts(
+      alerts
+          .map(
+            (item) => _alertFromBackend(
+              _asString(_pick(item, ['id', 'alert_key', 'alert_id'])),
+              item,
+            ),
+          )
+          .toList(),
+    );
 
     return DashboardData(
       reading: EnergyReading(
@@ -1018,55 +1038,55 @@ class KahrabaIqApiService {
           _pick(energy, ['today_cost_bhd', 'total_cost_BHD']),
         ),
       ),
-      sensors: SensorData(
-        timestamp:
-            (_pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) ??
-                    _pick(data, ['updated_at_ms', 'updated_at_iso'])) ==
-                null
-            ? DateTime.fromMillisecondsSinceEpoch(0)
-            : _asDateTime(
-                _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) ??
-                    _pick(data, ['updated_at_ms', 'updated_at_iso']),
-              ),
-        temperature: _asDouble(_pick(room, ['temperature'])),
-        humidity: _asDouble(_pick(room, ['humidity'])),
-        isOccupied: _asBool(_pick(room, ['motion'])),
-        eco2: _asDouble(_pick(room, ['eco2'])),
-        tvoc: _asDouble(_pick(room, ['tvoc'])),
-        aqi: _asInt(_pick(room, ['aqi'])),
-        smokeRaw: _asInt(_pick(room, ['smoke_raw'])),
-        lightRaw: _asInt(_pick(room, ['light_raw'])),
-        soundRaw: _asInt(_pick(room, ['sound_level'])),
-        noiseStatus: _asString(
-          _pick(room, ['noise_text']),
-          fallback: 'Unknown',
+      sensors: _sensorWithSmokeOverride(
+        SensorData(
+          timestamp:
+              (_pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) ??
+                      _pick(data, ['updated_at_ms', 'updated_at_iso'])) ==
+                  null
+              ? DateTime.fromMillisecondsSinceEpoch(0)
+              : _asDateTime(
+                  _pick(room, [
+                        'sensor_timestamp_ms',
+                        'sensor_timestamp_iso',
+                      ]) ??
+                      _pick(data, ['updated_at_ms', 'updated_at_iso']),
+                ),
+          temperature: _asDouble(_pick(room, ['temperature'])),
+          humidity: _asDouble(_pick(room, ['humidity'])),
+          isOccupied: _asBool(_pick(room, ['motion'])),
+          eco2: _asDouble(_pick(room, ['eco2'])),
+          tvoc: _asDouble(_pick(room, ['tvoc'])),
+          aqi: _asInt(_pick(room, ['aqi'])),
+          smokeRaw: _asInt(_pick(room, ['smoke_raw'])),
+          lightRaw: _asInt(_pick(room, ['light_raw'])),
+          soundRaw: _asInt(_pick(room, ['sound_level'])),
+          noiseStatus: _asString(
+            _pick(room, ['noise_text']),
+            fallback: 'Unknown',
+          ),
+          lightStatus: _asString(
+            _pick(room, ['light_status']),
+            fallback: 'Unknown',
+          ),
+          smokeStatus: _asString(
+            _pick(room, ['smoke_text']),
+            fallback: 'Unknown',
+          ),
+          ahtOk: _asBool(_pick(room, ['aht_ok'])),
+          ens160Ok: _asBool(_pick(room, ['ens160_ok'])),
+          online: _asBool(
+            _pick(room, ['sensor_online', 'sensorOnline', 'online']),
+            fallback:
+                _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) !=
+                null,
+          ),
         ),
-        lightStatus: _asString(
-          _pick(room, ['light_status']),
-          fallback: 'Unknown',
-        ),
-        smokeStatus: _asString(
-          _pick(room, ['smoke_text']),
-          fallback: 'Unknown',
-        ),
-        ahtOk: _asBool(_pick(room, ['aht_ok'])),
-        ens160Ok: _asBool(_pick(room, ['ens160_ok'])),
-        online: _asBool(
-          _pick(room, ['sensor_online', 'sensorOnline', 'online']),
-          fallback:
-              _pick(room, ['sensor_timestamp_ms', 'sensor_timestamp_iso']) !=
-              null,
-        ),
+        safety: _asMap(data['safety']),
+        alerts: parsedAlerts,
       ),
       devices: parsedDevices,
-      alerts: alerts
-          .map(
-            (item) => _alertFromBackend(
-              _asString(_pick(item, ['id', 'alert_key', 'alert_id'])),
-              item,
-            ),
-          )
-          .toList(),
+      alerts: parsedAlerts,
       tariffBhdPerKwh: ElectricityPricing.costPerKWh,
       pendingDeviceCommands: pendingCommands,
       deviceCommandErrors: const {},
@@ -1579,6 +1599,39 @@ class KahrabaIqApiService {
         if (installationId != null) ...{'installation_id': installationId},
       },
     );
+  }
+
+  Future<List<AppNotification>> fetchNotifications({
+    required String homeId,
+    int limit = 50,
+    bool unreadOnly = false,
+    CancelToken? cancelToken,
+  }) async {
+    if (usesLocalPiApi) {
+      return const [];
+    }
+
+    final response = await _dio.get(
+      '/api/home/$homeId/notifications',
+      queryParameters: {'limit': limit, 'unread_only': unreadOnly},
+      cancelToken: cancelToken,
+    );
+    final data = _asMap(response.data);
+    return _asList(data['notifications'])
+        .map((item) => AppNotification.fromJson(_asMap(item)))
+        .where((item) => item.id.isNotEmpty)
+        .toList();
+  }
+
+  Future<void> markNotificationRead({
+    required String homeId,
+    required String notificationId,
+  }) async {
+    if (usesLocalPiApi) {
+      return;
+    }
+
+    await _dio.post('/api/home/$homeId/notifications/$notificationId/read');
   }
 
   Future<String> updateControlMode({
@@ -2838,7 +2891,25 @@ class KahrabaIqApiService {
     }
     if (value is String) {
       final normalized = value.toLowerCase();
-      return normalized == 'true' || normalized == '1' || normalized == 'on';
+      if (normalized == 'true' ||
+          normalized == '1' ||
+          normalized == 'on' ||
+          normalized == 'yes' ||
+          normalized == 'detected' ||
+          normalized == 'smoke' ||
+          normalized == 'gas' ||
+          normalized.contains('detected')) {
+        return true;
+      }
+      if (normalized == 'false' ||
+          normalized == '0' ||
+          normalized == 'off' ||
+          normalized == 'no' ||
+          normalized == 'clear' ||
+          normalized.contains('no smoke') ||
+          normalized.contains('no gas')) {
+        return false;
+      }
     }
     return fallback;
   }
@@ -2854,6 +2925,18 @@ class KahrabaIqApiService {
   String _asSmokeStatus(dynamic textValue, dynamic digitalValue, int rawValue) {
     final text = _asString(textValue);
     if (text.isNotEmpty) {
+      final normalized = text.toLowerCase();
+      if (normalized.contains('clear') ||
+          normalized.contains('no smoke') ||
+          normalized.contains('no gas')) {
+        return 'Clear';
+      }
+      if (normalized.contains('detect') ||
+          normalized.contains('smoke') ||
+          normalized.contains('gas') ||
+          normalized.contains('alert')) {
+        return 'Detected';
+      }
       return text;
     }
 
@@ -2866,6 +2949,48 @@ class KahrabaIqApiService {
     }
 
     return 'Unknown';
+  }
+
+  bool _isSmokeAlert(Alert alert) {
+    final id = alert.id.toLowerCase();
+    final type = alert.backendType.toLowerCase();
+    final message = alert.message.toLowerCase();
+    return alert.isActive &&
+        (id == 'smoke_detected_room1' ||
+            type.contains('smoke') ||
+            type.contains('gas') ||
+            message.contains('smoke') ||
+            message.contains('gas'));
+  }
+
+  SensorData _sensorWithSmokeOverride(
+    SensorData sensors, {
+    required Map<String, dynamic> safety,
+    required List<Alert> alerts,
+  }) {
+    final smokeState = _asMap(safety['smoke_state']);
+    final emergency = _asMap(safety['emergency_mode']);
+    final smokeStatus = _asString(_pick(smokeState, ['status'])).toLowerCase();
+    final emergencyReason = _asString(
+      _pick(emergency, ['reason']),
+    ).toLowerCase();
+    final smokeActive =
+        alerts.any(_isSmokeAlert) ||
+        smokeStatus == 'confirmed' ||
+        smokeStatus == 'pending' ||
+        (_asBool(_pick(emergency, ['active'])) &&
+            (emergencyReason.contains('smoke') ||
+                emergencyReason.contains('gas')));
+
+    if (!smokeActive) {
+      return sensors;
+    }
+
+    return sensors.copyWith(
+      smokeStatus: 'Detected',
+      smokeRaw: sensors.smokeRaw > 0 ? sensors.smokeRaw : 1,
+      online: true,
+    );
   }
 
   String? _asNullableString(dynamic value) {
@@ -2931,22 +3056,90 @@ class KahrabaIqApiService {
   }
 
   Alert _alertFromBackend(String id, Map<String, dynamic> data) {
+    final alertId = _asString(
+      _pick(data, ['alert_id', 'id', 'alertId', 'alert_key']),
+      fallback: id,
+    );
+    final alertType = _asString(
+      _pick(data, ['alert_type', 'category', 'type']),
+      fallback: 'sensorfailure',
+    );
+    final isSmokeAlert =
+        alertId == 'smoke_detected_room1' ||
+        alertType.toLowerCase().contains('smoke') ||
+        alertType.toLowerCase().contains('gas');
     final payload = <String, dynamic>{
       ...data,
-      'id': id,
-      'severity': _pick(data, ['severity', 'level']) ?? 'medium',
+      'id': alertId,
+      'alert_id': alertId,
+      'severity':
+          _pick(data, ['severity', 'level']) ??
+          (isSmokeAlert ? 'critical' : 'medium'),
       'timestamp': _pick(data, [
-        'timestamp_ms',
-        'timestamp',
         'created_at_ms',
+        'created_at_iso',
         'createdAt',
         'created_at',
+        'first_detected_at_ms',
+        'started_at_ms',
+        'timestamp_ms',
+        'timestamp',
+        'updated_at_ms',
       ]),
       'isActive': _pick(data, ['isActive', 'active']) ?? true,
-      'type':
-          _pick(data, ['category', 'type', 'alert_type']) ?? 'sensorfailure',
+      'type': alertType,
+      'alert_type': alertType,
+      'message':
+          _pick(data, ['message', 'body', 'title']) ??
+          (isSmokeAlert
+              ? 'Smoke or gas was detected in Room 1. Check immediately.'
+              : 'System alert'),
     };
 
     return Alert.fromJson(payload);
+  }
+
+  List<Alert> _dedupeAlerts(List<Alert> alerts) {
+    final byId = <String, Alert>{};
+    for (final alert in alerts) {
+      if (!_isMeaningfulAlert(alert)) {
+        continue;
+      }
+      final key = _alertDedupeKey(alert);
+      final existing = byId[key];
+      if (existing == null ||
+          existing.message == 'System alert' &&
+              alert.message != 'System alert') {
+        byId[key] = alert;
+      }
+    }
+    final result = byId.values.toList()
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    return result;
+  }
+
+  String _alertDedupeKey(Alert alert) {
+    if (_isSmokeAlert(alert)) {
+      return 'smoke_detected_room1';
+    }
+    if (alert.id.isNotEmpty) {
+      return alert.id;
+    }
+    final message = alert.message.toLowerCase().trim();
+    return '${alert.backendType.toLowerCase()}_$message';
+  }
+
+  bool _isMeaningfulAlert(Alert alert) {
+    if (_isSmokeAlert(alert)) {
+      return true;
+    }
+    final message = alert.message.trim().toLowerCase();
+    final type = alert.backendType.trim().toLowerCase();
+    if (message.isEmpty || message == 'system alert') {
+      return type.isNotEmpty &&
+          type != 'sensorfailure' &&
+          type != 'sensor_failure';
+    }
+    return true;
   }
 }
