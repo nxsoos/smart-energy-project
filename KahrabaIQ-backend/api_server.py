@@ -34,12 +34,23 @@ from home_assistant_controller import (
     is_home_assistant_configured,
 )
 from aws_cloud_store import (
+    ACTIVE_COMMAND_STATUSES,
+    COMMAND_STATUS_CANCELLED,
+    COMMAND_STATUS_CLAIMED,
+    COMMAND_STATUS_EXECUTING,
+    COMMAND_STATUS_EXPIRED,
+    COMMAND_STATUS_FAILED,
+    COMMAND_STATUS_PENDING,
+    COMMAND_STATUS_SUCCEEDED,
     app_get_path,
     app_set_path,
     app_update_path,
     create_remote_command,
     create_iot_websocket_config,
+    latest_summary,
     find_remote_command,
+    normalize_command_status,
+    query_summaries_between,
     query_recent_remote_commands,
     update_remote_command,
 )
@@ -60,10 +71,26 @@ KIOSK_COMMAND_TTL_SECONDS = int(os.environ.get("KIOSK_COMMAND_TTL_SECONDS", "300
 KIOSK_SESSION_SECRET = os.environ.get("KIOSK_SESSION_SECRET") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "dev-kiosk-session-secret"
 KIOSK_ALLOWED_COMMANDS = {"provision_esp32", "discover_esp32", "reset_esp32"}
 MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch"}
-CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *MATTER_DEVICE_IDS}
+DEVICE_ALIASES = {
+    "ac_breaker": "breaker_01",
+    "socket_breaker": "breaker_02",
+}
+CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *DEVICE_ALIASES, *MATTER_DEVICE_IDS}
 VALID_COMMANDS = {"turn_on", "turn_off"}
 DEVICE_STALE_AFTER_MS = 45 * 1000
 HA_SYNC_INTERVAL_SECONDS = int(os.environ.get("HA_SYNC_INTERVAL_SECONDS", "30"))
+USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKERS", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+USE_TUYA_CLOUD_FOR_BREAKERS = os.environ.get("USE_TUYA_CLOUD_FOR_BREAKERS", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 VALID_CONTROL_MODES = {"manual", "assist", "auto"}
 AUTO_REQUESTERS = {"ai", "backend_ai", "automation", "backend_automation"}
 EMERGENCY_REQUESTERS = {"user_emergency_action", "emergency_auto_shutdown"}
@@ -99,8 +126,8 @@ COGNITO_JWKS_CLIENT = (
 
 DEFAULT_DEVICE_NAMES = {
     "esp32_01": "Room Sensor",
-    "breaker_01": "Switch Breaker",
-    "breaker_02": "AC Breaker",
+    "breaker_01": "AC Breaker",
+    "breaker_02": "Socket Breaker",
     "matter_socket_switch": "Socket Switch",
     "matter_ac_switch": "AC Switch",
 }
@@ -729,7 +756,7 @@ def sync_home_assistant_device(home_id: str, device_id: str, device: dict[str, A
     if not entity_id:
         raise HomeAssistantError(
             "HA_ENTITY_NOT_FOUND",
-            "Matter switch was not found in Home Assistant.",
+            "Home Assistant switch was not found.",
             "Missing ha_entity_id.",
         )
     try:
@@ -1261,6 +1288,39 @@ def object_to_list(value: Any) -> list[dict[str, Any]]:
     return items
 
 
+def command_status_payload(item: dict[str, Any]) -> dict[str, Any]:
+    status = normalize_command_status(item.get("status"))
+    return {
+        **item,
+        "status": status,
+        "is_final": status not in ACTIVE_COMMAND_STATUSES,
+    }
+
+
+def member_user_ids(home_id: str) -> list[str]:
+    user_ids = []
+    for uid, raw_member in as_dict(safe_get(f"/homes/{home_id}/members", {})).items():
+        member = as_dict(raw_member)
+        if member.get("status") == "removed":
+            continue
+        normalized_uid = str(member.get("uid") or uid).strip()
+        if normalized_uid:
+            user_ids.append(normalized_uid)
+    return user_ids
+
+
+def user_notification_sort_key(item: dict[str, Any]) -> int:
+    return int(
+        first_present(
+            item.get("created_at_ms"),
+            item.get("timestamp_ms"),
+            item.get("updated_at_ms"),
+            0,
+        )
+        or 0
+    )
+
+
 @app.get("/api/me")
 def get_me(actor: AuthContext = Depends(require_authenticated_user)) -> dict[str, Any]:
     profile = as_dict(safe_get(f"/users/{actor.uid}", {}))
@@ -1515,6 +1575,13 @@ def pi_sensor_state(
     if pi.get("home_id") and home_id != pi.get("home_id"):
         raise HTTPException(status_code=403, detail="Pi cannot write to this home.")
     timestamp_ms = request.updated_at_ms or now_ms()
+    active_alerts = [
+        alert
+        for alert in request.alerts
+        if isinstance(alert, dict)
+        and str(first_present(alert.get("status"), alert.get("state"), "OPEN")).upper()
+        not in {"RESOLVED", "AUTO_RESOLVED", "CLEARED"}
+    ][:20]
     latest = {
         "home_id": home_id,
         "pi_id": pi_id,
@@ -1523,8 +1590,8 @@ def pi_sensor_state(
         "devices": request.devices,
         "energy": request.energy,
         "commands": request.commands,
-        "alerts": request.alerts,
-        "notifications": request.notifications,
+        "alerts": active_alerts,
+        "notifications": [],
         "occupancy": request.occupancy,
         "safety": request.safety,
         "updated_at_ms": timestamp_ms,
@@ -1536,26 +1603,18 @@ def pi_sensor_state(
         for device_id, device in request.devices.items():
             if isinstance(device, dict):
                 safe_update(f"/homes/{home_id}/devices/{device_id}", device)
+    if request.occupancy:
+        safe_update(f"/homes/{home_id}/occupancy/room1", request.occupancy)
+    if request.safety:
+        smoke_state = as_dict(request.safety.get("smoke_state"))
+        emergency_mode = as_dict(request.safety.get("emergency_mode"))
+        if smoke_state:
+            safe_update(f"/homes/{home_id}/safety/smoke_state", smoke_state)
+        if emergency_mode:
+            safe_update(f"/homes/{home_id}/safety/emergency_mode", emergency_mode)
     if request.alerts:
-        active_alerts = {
-            str(alert.get("id") or alert.get("alert_id") or f"alert_{index}"): alert
-            for index, alert in enumerate(request.alerts)
-            if isinstance(alert, dict)
-        }
-        safe_set(f"/homes/{home_id}/alerts/active", active_alerts)
-    if request.notifications:
-        for index, notification in enumerate(request.notifications):
-            if not isinstance(notification, dict):
-                continue
-            notification_id = str(
-                notification.get("notification_id")
-                or notification.get("id")
-                or f"notification_{index}"
-            )
-            safe_update(
-                f"/homes/{home_id}/notifications/{notification_id}",
-                notification,
-            )
+        sync_pi_alerts(home_id, request.alerts, timestamp_ms=timestamp_ms)
+    resolve_smoke_emergency_if_clear(home_id)
     safe_update(
         f"/pis/{pi_id}",
         {"last_state_sync_at_ms": timestamp_ms, "last_state_sync_at_iso": iso_from_ms(timestamp_ms)},
@@ -1646,11 +1705,11 @@ def pi_remote_commands(
     if not home_id:
         raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
     try:
-        commands = [
-            command
-            for command in query_recent_remote_commands(home_id, limit=limit)
-            if str(command.get("status") or "") == "pending"
-        ]
+        commands = []
+        for command in query_recent_remote_commands(home_id, limit=limit):
+            sync_remote_command_projection(home_id, command)
+            if normalize_command_status(command.get("status")) == COMMAND_STATUS_PENDING:
+                commands.append(command_status_payload(command))
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"Remote command queue read failed: {error}") from error
     return {"success": True, "pi_id": pi_id, "home_id": home_id, "commands": commands}
@@ -1670,7 +1729,9 @@ def pi_remote_command_claim(
     command = find_remote_command(home_id, command_id)
     if not command:
         raise HTTPException(status_code=404, detail="Remote command not found.")
-    if str(command.get("status") or "") != "pending":
+    if normalize_command_status(command.get("status")) == COMMAND_STATUS_EXPIRED:
+        raise HTTPException(status_code=409, detail="Remote command expired before it could be claimed.")
+    if normalize_command_status(command.get("status")) != COMMAND_STATUS_PENDING:
         raise HTTPException(status_code=409, detail="Remote command is no longer pending.")
     timestamp_ms = now_ms()
     try:
@@ -1678,7 +1739,7 @@ def pi_remote_command_claim(
             home_id,
             command_id,
             {
-                "status": "processing",
+                "status": COMMAND_STATUS_CLAIMED,
                 "claimedBy": pi_id,
                 "claimed_by": pi_id,
                 "claimedAtMs": timestamp_ms,
@@ -1689,7 +1750,8 @@ def pi_remote_command_claim(
         )
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"Remote command claim failed: {error}") from error
-    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": updated}
+    sync_remote_command_projection(home_id, updated)
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": command_status_payload(updated)}
 
 
 @app.post("/api/pi/{pi_id}/remote-commands/{command_id}/complete")
@@ -1710,7 +1772,7 @@ def pi_remote_command_complete(
         success = result.get("success") is not False
     timestamp_ms = now_ms()
     updates = {
-        "status": "confirmed" if success else "failed",
+        "status": COMMAND_STATUS_SUCCEEDED if success else COMMAND_STATUS_FAILED,
         "result": {
             **result,
             "success": bool(success),
@@ -1729,7 +1791,44 @@ def pi_remote_command_complete(
         raise HTTPException(status_code=502, detail=f"Remote command result write failed: {error}") from error
     if not updated:
         raise HTTPException(status_code=404, detail="Remote command not found.")
-    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": updated}
+    sync_remote_command_projection(home_id, updated)
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": command_status_payload(updated)}
+
+
+@app.post("/api/pi/{pi_id}/remote-commands/{command_id}/executing")
+def pi_remote_command_executing(
+    pi_id: str,
+    command_id: str,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    command = find_remote_command(home_id, command_id)
+    if not command:
+        raise HTTPException(status_code=404, detail="Remote command not found.")
+    current_status = normalize_command_status(command.get("status"))
+    if current_status not in {COMMAND_STATUS_CLAIMED, COMMAND_STATUS_EXECUTING}:
+        raise HTTPException(status_code=409, detail="Remote command cannot move to executing from its current state.")
+    timestamp_ms = now_ms()
+    try:
+        updated = update_remote_command(
+            home_id,
+            command_id,
+            {
+                "status": COMMAND_STATUS_EXECUTING,
+                "startedAtMs": timestamp_ms,
+                "started_at_ms": timestamp_ms,
+                "startedAt": iso_from_ms(timestamp_ms),
+                "started_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Remote command update failed: {error}") from error
+    sync_remote_command_projection(home_id, updated)
+    return {"success": True, "home_id": home_id, "pi_id": pi_id, "command": command_status_payload(updated)}
 
 
 @app.post("/api/pairing/claim-pi")
@@ -2105,7 +2204,8 @@ def resolve_smoke_emergency_if_clear(home_id: str) -> None:
             f"/homes/{home_id}/alerts/history/alert_{timestamp_ms}_{SMOKE_ALERT_ID}",
             {
                 **alert,
-                "status": "resolved",
+                "status": "AUTO_RESOLVED",
+                "event": "auto_resolved",
                 "resolved_at_ms": timestamp_ms,
                 "resolved_at_iso": iso_from_ms(timestamp_ms),
                 "updated_at_ms": timestamp_ms,
@@ -2139,17 +2239,27 @@ def resolve_smoke_emergency_if_clear(home_id: str) -> None:
     )
 
 
-def create_notification_record(home_id: str, title: str, body: str) -> dict[str, Any]:
+def create_notification_record(
+    home_id: str,
+    title: str,
+    body: str,
+    *,
+    notification_type: str = "critical_alert",
+    alert_type: str | None = None,
+    severity: str = "critical",
+    alert_id: str | None = None,
+) -> dict[str, Any]:
     timestamp_ms = now_ms()
     notification_id = f"notif_{timestamp_ms}"
     notification = {
         "notification_id": notification_id,
-        "type": "critical_alert",
-        "alert_type": "smoke_detected",
-        "severity": "critical",
+        "type": notification_type,
+        "alert_type": alert_type,
+        "severity": severity,
         "title": title,
         "body": body,
         "home_id": home_id,
+        "alert_id": alert_id,
         "room_id": "room1",
         "read": False,
         "delivered": False,
@@ -2158,6 +2268,14 @@ def create_notification_record(home_id: str, title: str, body: str) -> dict[str,
         "timezone": TIMEZONE,
     }
     safe_set(f"/homes/{home_id}/notifications/{notification_id}", notification)
+    for user_id in member_user_ids(home_id):
+        safe_set(
+            f"/users/{user_id}/notifications/{notification_id}",
+            {
+                **notification,
+                "user_id": user_id,
+            },
+        )
     send_push_notifications(home_id, notification_id, title, body)
     return notification
 
@@ -2177,6 +2295,108 @@ def notification_sort_key(item: dict[str, Any]) -> int:
         )
         or 0
     )
+
+
+def normalize_alert_status(status: str | None, *, default: str = "OPEN") -> str:
+    normalized = str(status or "").strip().upper()
+    aliases = {
+        "ACTIVE": "OPEN",
+        "OPEN": "OPEN",
+        "ACK": "ACKNOWLEDGED",
+        "ACKNOWLEDGED": "ACKNOWLEDGED",
+        "RESOLVED": "RESOLVED",
+        "AUTO_RESOLVED": "AUTO_RESOLVED",
+    }
+    return aliases.get(normalized, default)
+
+
+def normalize_alert_severity(severity: str | None) -> str:
+    normalized = str(severity or "").strip().lower()
+    if normalized in {"critical", "warning", "info"}:
+        return normalized
+    if normalized in {"high", "emergency"}:
+        return "critical"
+    if normalized in {"medium", "warn"}:
+        return "warning"
+    return "info"
+
+
+def cloud_alert_record(home_id: str, alert: dict[str, Any], *, timestamp_ms: int) -> dict[str, Any]:
+    alert_id = str(first_present(alert.get("alert_id"), alert.get("id"), alert.get("alert_key"), "")).strip()
+    alert_type = str(first_present(alert.get("alert_type"), alert.get("type"), alert.get("category"), "unknown")).strip().lower()
+    message = str(first_present(alert.get("message"), alert.get("body"), alert.get("title"), "System alert")).strip()
+    title = str(first_present(alert.get("title"), alert.get("message"), "System alert")).strip()
+    return {
+        **alert,
+        "alert_id": alert_id,
+        "home_id": home_id,
+        "alert_type": alert_type,
+        "title": title,
+        "message": message,
+        "severity": normalize_alert_severity(first_present(alert.get("severity"), alert.get("level"), "warning")),
+        "status": normalize_alert_status(alert.get("status"), default="OPEN"),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": iso_from_ms(timestamp_ms),
+        "last_seen_at_ms": timestamp_ms,
+        "last_seen_at_iso": iso_from_ms(timestamp_ms),
+        "created_at_ms": as_number(first_present(alert.get("created_at_ms"), alert.get("timestamp_ms"), timestamp_ms)),
+        "created_at_iso": first_present(alert.get("created_at_iso"), alert.get("timestamp_iso"), iso_from_ms(timestamp_ms)),
+        "timestamp_ms": as_number(first_present(alert.get("timestamp_ms"), timestamp_ms)),
+        "timestamp_iso": first_present(alert.get("timestamp_iso"), iso_from_ms(timestamp_ms)),
+        "timezone": TIMEZONE,
+    }
+
+
+def upsert_cloud_alert_from_pi(home_id: str, alert: dict[str, Any], *, timestamp_ms: int) -> dict[str, Any]:
+    normalized = cloud_alert_record(home_id, alert, timestamp_ms=timestamp_ms)
+    alert_id = normalized["alert_id"]
+    if not alert_id:
+        return normalized
+    path = f"/homes/{home_id}/alerts/active/{alert_id}"
+    existing = as_dict(safe_get(path, {}))
+    if existing:
+        merged = {
+            **existing,
+            **normalized,
+            "status": "OPEN" if normalize_alert_status(existing.get("status")) != "ACKNOWLEDGED" else "ACKNOWLEDGED",
+            "created_at_ms": existing.get("created_at_ms") or normalized.get("created_at_ms"),
+            "created_at_iso": existing.get("created_at_iso") or normalized.get("created_at_iso"),
+        }
+        safe_set(path, merged)
+        return merged
+
+    safe_set(path, normalized)
+    history_id = f"alert_{timestamp_ms}_{alert_id}"
+    safe_set(
+        f"/homes/{home_id}/alerts/history/{history_id}",
+        {
+            **normalized,
+            "event": "created",
+        },
+    )
+    if normalized["severity"] == "critical":
+        create_notification_record(
+            home_id,
+            normalized["title"],
+            normalized["message"],
+            notification_type="critical_alert",
+            alert_type=normalized["alert_type"],
+            severity=normalized["severity"],
+            alert_id=alert_id,
+        )
+    return normalized
+
+
+def sync_pi_alerts(home_id: str, alerts: list[dict[str, Any]], *, timestamp_ms: int) -> dict[str, dict[str, Any]]:
+    active: dict[str, dict[str, Any]] = {}
+    for alert in alerts:
+        if not isinstance(alert, dict):
+            continue
+        normalized = upsert_cloud_alert_from_pi(home_id, alert, timestamp_ms=timestamp_ms)
+        alert_id = str(normalized.get("alert_id") or "").strip()
+        if alert_id:
+            active[alert_id] = normalized
+    return active
 
 
 def default_settings_record(updated_by: str = "system_default") -> dict[str, Any]:
@@ -2447,7 +2667,14 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
     status = as_dict(raw.get("status"))
     metering = as_dict(raw.get("metering"))
     backend_energy = as_dict(raw.get("_backend_energy"))
-    control_method = str(raw.get("control_method") or ("tuya_cloud" if device_id.startswith("breaker_") else "")).lower()
+    default_control_method = (
+        "home_assistant"
+        if device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS
+        else "tuya_cloud"
+        if device_id.startswith("breaker_") and USE_TUYA_CLOUD_FOR_BREAKERS
+        else ""
+    )
+    control_method = str(raw.get("control_method") or default_control_method).lower()
     is_home_assistant_device = control_method == "home_assistant"
 
     explicit_state = raw.get("state")
@@ -2889,6 +3116,57 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
         **bundle["backend_latest_prediction"],
         **bundle["backend_dashboard_ai"],
     }
+    if not latest:
+        return {}
+    predictions = as_dict(latest.get("predictions"))
+    waste = as_dict(predictions.get("waste_event"))
+    anomaly = as_dict(predictions.get("anomaly_label"))
+    recommendation = as_dict(predictions.get("recommendation_type"))
+    next_energy = as_dict(predictions.get("next_hour_total_energy_kWh"))
+    next_cost = as_dict(predictions.get("next_hour_total_cost_BHD"))
+
+    return {
+        "status": first_present(
+            latest.get("prediction_status"),
+            latest.get("abnormal_usage"),
+            default="unknown",
+        ),
+        "prediction_status": first_present(latest.get("prediction_status"), default="unknown"),
+        "confidence": first_present(latest.get("confidence"), waste.get("confidence")),
+        "waste_confidence": first_present(latest.get("waste_confidence"), waste.get("confidence")),
+        "abnormal_usage_confidence": first_present(
+            latest.get("abnormal_usage_confidence"),
+            anomaly.get("confidence"),
+        ),
+        "energy_waste": first_present(latest.get("energy_waste"), waste.get("value")),
+        "abnormal_usage": first_present(latest.get("abnormal_usage"), anomaly.get("value")),
+        "recommendation_type": first_present(
+            latest.get("recommendation_type"),
+            recommendation.get("value"),
+        ),
+        "next_hour_energy_kWh": first_present(
+            latest.get("next_hour_energy_kWh"),
+            latest.get("next_hour_energy"),
+            next_energy.get("value"),
+        ),
+        "next_hour_cost_BHD": first_present(
+            latest.get("next_hour_cost_BHD"),
+            latest.get("next_hour_cost"),
+            next_cost.get("value"),
+        ),
+        "efficiency_score": first_present(
+            latest.get("efficiency_score"),
+            predictions.get("energy_efficiency_score"),
+        ),
+        "summary": first_present(latest.get("explanation"), latest.get("summary")),
+        "recommended_action": first_present(
+            latest.get("recommendation_type"),
+            recommendation.get("value"),
+            nested(latest, "control_suggestion", "action"),
+        ),
+        "control_suggestion": latest.get("control_suggestion"),
+        "updated_at": first_present(latest.get("updated_at"), latest.get("created_at")),
+    }
 
 
 def validate_days(days: Any) -> list[str]:
@@ -3051,55 +3329,6 @@ def next_schedule_summary(home_id: str) -> dict[str, Any] | None:
         "next_run_at_iso": schedule.get("next_run_at_iso"),
         "message": f"Next schedule: {schedule.get('name')} at {schedule.get('time')}",
     }
-    predictions = as_dict(latest.get("predictions"))
-    waste = as_dict(predictions.get("waste_event"))
-    anomaly = as_dict(predictions.get("anomaly_label"))
-    recommendation = as_dict(predictions.get("recommendation_type"))
-    next_energy = as_dict(predictions.get("next_hour_total_energy_kWh"))
-    next_cost = as_dict(predictions.get("next_hour_total_cost_BHD"))
-
-    return {
-        "status": first_present(
-            latest.get("prediction_status"),
-            latest.get("abnormal_usage"),
-            default="unknown",
-        ),
-        "prediction_status": first_present(latest.get("prediction_status"), default="unknown"),
-        "confidence": first_present(latest.get("confidence"), waste.get("confidence")),
-        "waste_confidence": first_present(latest.get("waste_confidence"), waste.get("confidence")),
-        "abnormal_usage_confidence": first_present(
-            latest.get("abnormal_usage_confidence"),
-            anomaly.get("confidence"),
-        ),
-        "energy_waste": first_present(latest.get("energy_waste"), waste.get("value")),
-        "abnormal_usage": first_present(latest.get("abnormal_usage"), anomaly.get("value")),
-        "recommendation_type": first_present(
-            latest.get("recommendation_type"),
-            recommendation.get("value"),
-        ),
-        "next_hour_energy_kWh": first_present(
-            latest.get("next_hour_energy_kWh"),
-            latest.get("next_hour_energy"),
-            next_energy.get("value"),
-        ),
-        "next_hour_cost_BHD": first_present(
-            latest.get("next_hour_cost_BHD"),
-            latest.get("next_hour_cost"),
-            next_cost.get("value"),
-        ),
-        "efficiency_score": first_present(
-            latest.get("efficiency_score"),
-            predictions.get("energy_efficiency_score"),
-        ),
-        "summary": first_present(latest.get("explanation"), latest.get("summary")),
-        "recommended_action": first_present(
-            latest.get("recommendation_type"),
-            recommendation.get("value"),
-            nested(latest, "control_suggestion", "action"),
-        ),
-        "control_suggestion": latest.get("control_suggestion"),
-        "updated_at": first_present(latest.get("updated_at"), latest.get("created_at")),
-    }
 
 
 @app.get("/api/health")
@@ -3117,35 +3346,226 @@ def health() -> dict[str, Any]:
 @app.post("/api/home/{home_id}/cloud/commands", dependencies=[Depends(require_home_permission("can_control_devices"))])
 def create_cloud_remote_command(home_id: str, request: CloudRemoteCommandRequest) -> dict[str, Any]:
     command = request.command.strip().lower()
-    device_id = request.device_id.strip()
+    requested_device_id = request.device_id.strip()
+    device_id = DEVICE_ALIASES.get(requested_device_id, requested_device_id)
     if command not in VALID_COMMANDS:
         raise HTTPException(status_code=400, detail="Command must be turn_on or turn_off.")
-    if device_id not in CONTROLLABLE_DEVICES:
+    if requested_device_id not in CONTROLLABLE_DEVICES:
         raise HTTPException(status_code=400, detail="Unsupported device_id.")
-
-    try:
-        command_record = create_remote_command(
-            home_id,
-            device_id,
-            command,
+    device = as_dict(safe_get(f"/homes/{home_id}/devices/{device_id}", {}))
+    if not device:
+        raise HTTPException(status_code=404, detail="Device does not exist.")
+    result = queue_remote_device_command(
+        home_id,
+        device_id,
+        device,
+        DeviceCommandRequest(
+            command=command,
             requested_by=request.requested_by,
+            reason=request.reason,
             source=request.source,
             emergency=request.emergency,
             alert_id=request.alert_id,
-            reason=request.reason,
-        )
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=f"AWS command queue write failed: {error}") from error
+        ),
+        command,
+        request.requested_by,
+    )
+    command_record = find_remote_command(home_id, str(result.command_id or ""))
 
     return {
         "success": True,
-        "status": "pending",
+        "status": COMMAND_STATUS_PENDING,
         "message": "Command queued for the Raspberry Pi.",
-        "command_id": command_record["command_id"],
+        "command_id": result.command_id,
         "device_id": device_id,
         "command": command,
-        "target_state": command_record["target_state"],
-        "command_record": command_record,
+        "target_state": command_record.get("target_state") or command_record.get("targetState"),
+        "command_record": command_status_payload(command_record),
+    }
+
+
+def summary_energy_value(summary: dict[str, Any]) -> float:
+    value = as_number(first_present(summary.get("totalEnergyKwh"), summary.get("total_energy_kwh")), 0)
+    return float(value or 0)
+
+
+def summary_command_success_rate(summaries: list[dict[str, Any]]) -> float | None:
+    succeeded = 0
+    failed = 0
+    for summary in summaries:
+        by_status = as_dict(as_dict(summary.get("commandSummary")).get("byStatus"))
+        for status, count in by_status.items():
+            normalized = normalize_command_status(status, default=str(status).upper())
+            amount = int(as_number(count, 0) or 0)
+            if normalized == COMMAND_STATUS_SUCCEEDED:
+                succeeded += amount
+            elif normalized == COMMAND_STATUS_FAILED:
+                failed += amount
+    total = succeeded + failed
+    if total <= 0:
+        return None
+    return round((succeeded / total) * 100, 1)
+
+
+def build_home_insights(home_id: str) -> dict[str, Any]:
+    hourly = query_summaries_between(home_id, "hourly", limit=48)
+    daily = query_summaries_between(home_id, "daily", limit=14)
+    if not hourly and not daily:
+        return {
+            "home_id": home_id,
+            "generated_at_ms": now_ms(),
+            "generated_at_iso": iso_from_ms(now_ms()),
+            "insights": [],
+        }
+
+    peak_hour = max(hourly, key=summary_energy_value) if hourly else {}
+    latest_day = daily[0] if daily else {}
+    previous_day = daily[1] if len(daily) > 1 else {}
+    latest_day_energy = summary_energy_value(latest_day)
+    previous_day_energy = summary_energy_value(previous_day)
+    trend_delta = round(latest_day_energy - previous_day_energy, 3) if previous_day else None
+    occupancy_waste = []
+    repeated_alert_types: dict[str, int] = {}
+    for summary in daily or hourly:
+        occupancy = as_dict(summary.get("occupancySummary"))
+        occupied = as_number(occupancy.get("occupiedCount"), 0) or 0
+        samples = as_number(occupancy.get("sampleCount"), 0) or 0
+        energy = summary_energy_value(summary)
+        if samples > 0 and occupied <= max(1, samples * 0.2) and energy > 0.5:
+            occupancy_waste.append(
+                {
+                    "period_start_ms": first_present(summary.get("startAtMs"), summary.get("start_at_ms")),
+                    "energy_kwh": round(energy, 3),
+                    "occupied_count": int(occupied),
+                    "sample_count": int(samples),
+                }
+            )
+        by_type = as_dict(as_dict(summary.get("alertSummary")).get("byType"))
+        for alert_type, count in by_type.items():
+            repeated_alert_types[alert_type] = repeated_alert_types.get(alert_type, 0) + int(as_number(count, 0) or 0)
+
+    insights: list[dict[str, Any]] = []
+    if peak_hour:
+        insights.append(
+            {
+                "type": "peak_energy_usage",
+                "title": "Peak energy usage hour",
+                "message": "Highest recent hourly consumption came from the local Pi hourly summaries.",
+                "period_start_ms": first_present(peak_hour.get("startAtMs"), peak_hour.get("start_at_ms")),
+                "energy_kwh": round(summary_energy_value(peak_hour), 3),
+            }
+        )
+    if trend_delta is not None:
+        insights.append(
+            {
+                "type": "daily_energy_trend",
+                "title": "Daily energy trend",
+                "message": "Compares the latest daily summary against the previous day.",
+                "latest_day_energy_kwh": round(latest_day_energy, 3),
+                "previous_day_energy_kwh": round(previous_day_energy, 3),
+                "delta_kwh": trend_delta,
+            }
+        )
+    if occupancy_waste:
+        insights.append(
+            {
+                "type": "occupancy_vs_energy_waste",
+                "title": "Possible occupancy waste",
+                "message": "Energy usage stayed relatively high while occupancy stayed mostly low in one or more recent summary buckets.",
+                "periods": occupancy_waste[:5],
+            }
+        )
+    noisy_alerts = [
+        {"alert_type": alert_type, "count": count}
+        for alert_type, count in sorted(repeated_alert_types.items(), key=lambda item: item[1], reverse=True)
+        if count > 1
+    ]
+    if noisy_alerts:
+        insights.append(
+            {
+                "type": "repeated_alerts",
+                "title": "Repeated alerts detected",
+                "message": "The same alert types appeared across recent summaries.",
+                "alerts": noisy_alerts[:5],
+            }
+        )
+    success_rate = summary_command_success_rate(hourly + daily)
+    if success_rate is not None:
+        insights.append(
+            {
+                "type": "command_success_rate",
+                "title": "Command execution success rate",
+                "message": "Calculated from command summaries synced by the Pi.",
+                "success_rate_percent": success_rate,
+            }
+        )
+    latest_state = as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+    updated_at_ms = as_number(latest_state.get("updated_at_ms"), 0) or 0
+    if updated_at_ms > 0:
+        offline_minutes = round(max(0, now_ms() - updated_at_ms) / 60000, 1)
+        insights.append(
+            {
+                "type": "device_offline_pattern",
+                "title": "Latest Pi/cloud state freshness",
+                "message": "Based on the most recent compact state upload from the Pi.",
+                "minutes_since_last_state": offline_minutes,
+            }
+        )
+    generated_at = now_ms()
+    return {
+        "home_id": home_id,
+        "generated_at_ms": generated_at,
+        "generated_at_iso": iso_from_ms(generated_at),
+        "insights": insights,
+    }
+
+
+def build_home_recommendations(home_id: str) -> dict[str, Any]:
+    insights_bundle = build_home_insights(home_id)
+    recommendations = []
+    for insight in insights_bundle["insights"]:
+        if insight["type"] == "peak_energy_usage":
+            recommendations.append(
+                {
+                    "type": "shift_usage",
+                    "priority": "medium",
+                    "title": "Shift heavy loads away from peak hours",
+                    "message": "Review the devices running during the highest hourly consumption period and move flexible loads away from that hour when possible.",
+                }
+            )
+        elif insight["type"] == "occupancy_vs_energy_waste":
+            recommendations.append(
+                {
+                    "type": "reduce_empty_room_waste",
+                    "priority": "high",
+                    "title": "Reduce energy use while rooms are empty",
+                    "message": "One or more recent periods show low occupancy with meaningful energy use. Check breakers, AC, and socket switches for idle waste.",
+                }
+            )
+        elif insight["type"] == "repeated_alerts":
+            recommendations.append(
+                {
+                    "type": "investigate_repeated_alerts",
+                    "priority": "high",
+                    "title": "Investigate repeated alerts",
+                    "message": "Repeated alert types suggest an unresolved environmental or device issue that should be checked locally on the Pi side.",
+                }
+            )
+        elif insight["type"] == "command_success_rate" and as_number(insight.get("success_rate_percent"), 100) < 90:
+            recommendations.append(
+                {
+                    "type": "improve_command_reliability",
+                    "priority": "high",
+                    "title": "Improve command reliability",
+                    "message": "Recent command success rate is lower than expected. Check Pi connectivity, Home Assistant/Matter availability, and device online state.",
+                }
+            )
+    recommendations.extend(object_to_list(safe_get(f"/homes/{home_id}/backend/recommendations", {})))
+    return {
+        "home_id": home_id,
+        "generated_at_ms": insights_bundle["generated_at_ms"],
+        "generated_at_iso": insights_bundle["generated_at_iso"],
+        "recommendations": recommendations,
     }
 
 
@@ -3155,11 +3575,13 @@ def get_cloud_remote_commands(home_id: str, limit: int = Query(25, ge=1, le=100)
         commands = query_recent_remote_commands(home_id, limit)
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"AWS command read failed: {error}") from error
+    for command in commands:
+        sync_remote_command_projection(home_id, command)
     return {
         "success": True,
         "home_id": home_id,
         "count": len(commands),
-        "commands": commands,
+        "commands": [command_status_payload(item) for item in commands],
     }
 
 
@@ -3171,10 +3593,11 @@ def get_cloud_remote_command(home_id: str, command_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"AWS command read failed: {error}") from error
     if not command:
         raise HTTPException(status_code=404, detail="Command not found.")
+    sync_remote_command_projection(home_id, command)
     return {
         "success": True,
         "home_id": home_id,
-        "command": command,
+        "command": command_status_payload(command),
     }
 
 
@@ -3203,6 +3626,50 @@ def get_current_state(home_id: str) -> dict[str, Any]:
         "updated_at_ms": latest.get("updated_at_ms"),
         "updated_at_iso": latest.get("updated_at_iso"),
     }
+
+
+@app.get("/api/homes/{home_id}/summaries/hourly", dependencies=[Depends(require_home_permission("can_view"))])
+def get_hourly_summaries(
+    home_id: str,
+    limit: int = Query(24, ge=1, le=168),
+    start_at_ms: int | None = None,
+    end_at_ms: int | None = None,
+) -> dict[str, Any]:
+    summaries = query_summaries_between(
+        home_id,
+        "hourly",
+        start_at_ms=start_at_ms,
+        end_at_ms=end_at_ms,
+        limit=limit,
+    )
+    return {"success": True, "home_id": home_id, "count": len(summaries), "summaries": summaries}
+
+
+@app.get("/api/homes/{home_id}/summaries/daily", dependencies=[Depends(require_home_permission("can_view"))])
+def get_daily_summaries(
+    home_id: str,
+    limit: int = Query(7, ge=1, le=90),
+    start_at_ms: int | None = None,
+    end_at_ms: int | None = None,
+) -> dict[str, Any]:
+    summaries = query_summaries_between(
+        home_id,
+        "daily",
+        start_at_ms=start_at_ms,
+        end_at_ms=end_at_ms,
+        limit=limit,
+    )
+    return {"success": True, "home_id": home_id, "count": len(summaries), "summaries": summaries}
+
+
+@app.get("/api/homes/{home_id}/insights", dependencies=[Depends(require_home_permission("can_view"))])
+def get_home_insights(home_id: str) -> dict[str, Any]:
+    return {"success": True, **build_home_insights(home_id)}
+
+
+@app.get("/api/homes/{home_id}/recommendations", dependencies=[Depends(require_home_permission("can_view"))])
+def get_home_recommendations(home_id: str) -> dict[str, Any]:
+    return {"success": True, **build_home_recommendations(home_id)}
 
 
 @app.get("/api/home/{home_id}/dashboard", dependencies=[Depends(require_home_permission("can_view"))])
@@ -3760,7 +4227,7 @@ def dismiss_action_suggestion(home_id: str, suggestion_id: str) -> SuggestionDec
 @app.post("/api/home/{home_id}/safety/smoke/actions/turn-off-safe-devices", dependencies=[Depends(require_home_permission("can_control_devices"))])
 def turn_off_safe_devices(home_id: str) -> dict[str, Any]:
     alert = as_dict(safe_get(f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}", {}))
-    if not alert or alert.get("status") != "active":
+    if not alert or normalize_alert_status(alert.get("status")) not in {"OPEN", "ACKNOWLEDGED"}:
         raise HTTPException(status_code=409, detail="No active smoke emergency alert exists.")
 
     devices = as_dict(safe_get(f"/homes/{home_id}/devices", {}))
@@ -3836,6 +4303,7 @@ def mark_smoke_safe(home_id: str) -> dict[str, Any]:
         safe_update(
             f"/homes/{home_id}/alerts/active/{SMOKE_ALERT_ID}",
             {
+                "status": "ACKNOWLEDGED",
                 "acknowledged": True,
                 "acknowledged_at_ms": timestamp_ms,
                 "acknowledged_at_iso": iso_from_ms(timestamp_ms),
@@ -3856,7 +4324,7 @@ def mark_smoke_safe(home_id: str) -> dict[str, Any]:
             f"/homes/{home_id}/alerts/history/alert_{timestamp_ms}_{SMOKE_ALERT_ID}",
             {
                 **alert,
-                "status": "resolved",
+                "status": "RESOLVED",
                 "resolved_at_ms": timestamp_ms,
                 "resolved_at_iso": iso_from_ms(timestamp_ms),
                 "updated_at_ms": timestamp_ms,
@@ -3936,6 +4404,75 @@ def register_notification_token(home_id: str, request: NotificationTokenRequest)
     return {"success": True, "home_id": home_id, "token_id": token_id}
 
 
+@app.get("/api/users/me/notifications")
+def list_my_notifications(
+    limit: int = Query(50, ge=1, le=100),
+    unread_only: bool = False,
+    actor: AuthContext = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    raw_notifications = object_to_list(safe_get(f"/users/{actor.uid}/notifications", {}))
+    notifications = [
+        item
+        for item in raw_notifications
+        if isinstance(item, dict) and (not unread_only or item.get("read") is not True)
+    ]
+    notifications.sort(key=user_notification_sort_key, reverse=True)
+    limited = notifications[:limit]
+    unread_count = sum(1 for item in raw_notifications if isinstance(item, dict) and item.get("read") is not True)
+    return {
+        "success": True,
+        "uid": actor.uid,
+        "count": len(limited),
+        "unread_count": unread_count,
+        "notifications": limited,
+    }
+
+
+@app.post("/api/users/me/notifications/{notification_id}/read")
+def mark_my_notification_read(
+    notification_id: str,
+    actor: AuthContext = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    notification = as_dict(safe_get(f"/users/{actor.uid}/notifications/{notification_id}", {}))
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification does not exist.")
+    safe_update(
+        f"/users/{actor.uid}/notifications/{notification_id}",
+        {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
+    )
+    home_id = str(notification.get("home_id") or "")
+    if home_id:
+        safe_update(
+            f"/homes/{home_id}/notifications/{notification_id}",
+            {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
+        )
+    return {"success": True, "notification_id": notification_id}
+
+
+@app.post("/api/users/me/notifications/read-all")
+def mark_my_notifications_read_all(actor: AuthContext = Depends(require_authenticated_user)) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    notifications = as_dict(safe_get(f"/users/{actor.uid}/notifications", {}))
+    updated = 0
+    for notification_id, raw_notification in notifications.items():
+        notification = as_dict(raw_notification)
+        if notification.get("read") is True:
+            continue
+        updated += 1
+        safe_update(
+            f"/users/{actor.uid}/notifications/{notification_id}",
+            {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
+        )
+        home_id = str(notification.get("home_id") or "")
+        if home_id:
+            safe_update(
+                f"/homes/{home_id}/notifications/{notification_id}",
+                {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
+            )
+    return {"success": True, "updated": updated}
+
+
 @app.get("/api/home/{home_id}/notifications", dependencies=[Depends(require_home_permission("can_view"))])
 def list_notifications(home_id: str, limit: int = 50, unread_only: bool = False) -> dict[str, Any]:
     raw_notifications = object_to_list(safe_get(f"/homes/{home_id}/notifications", {}))
@@ -3959,6 +4496,11 @@ def list_notifications(home_id: str, limit: int = 50, unread_only: bool = False)
 @app.post("/api/home/{home_id}/notifications/{notification_id}/read", dependencies=[Depends(require_home_permission("can_view"))])
 def mark_notification_read(home_id: str, notification_id: str) -> dict[str, Any]:
     timestamp_ms = now_ms()
+    for user_id in member_user_ids(home_id):
+        safe_update(
+            f"/users/{user_id}/notifications/{notification_id}",
+            {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
+        )
     safe_update(
         f"/homes/{home_id}/notifications/{notification_id}",
         {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
@@ -4129,6 +4671,7 @@ def acknowledge_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert does not exist.")
     update = {
+        "status": "ACKNOWLEDGED",
         "acknowledged": True,
         "acknowledged_by": actor.actor_id,
         "acknowledged_at_ms": timestamp_ms,
@@ -4240,6 +4783,155 @@ def write_command_record(
     )
 
 
+def queue_remote_device_command(
+    home_id: str,
+    device_id: str,
+    device: dict[str, Any],
+    request: DeviceCommandRequest,
+    command: str,
+    requested_by: str,
+) -> DeviceCommandResponse:
+    formatted_device = format_device(device_id, device)
+    target_state = command_to_target_state(command)
+    current_state = str(formatted_device.get("state", "unknown")).lower()
+    device_name = device_message_name(device_id, device)
+    command_record = create_remote_command(
+        home_id,
+        device_id,
+        command,
+        requested_by=requested_by,
+        source=request.source or "cloud_remote_api",
+        emergency=request.emergency,
+        alert_id=request.alert_id,
+        reason=request.reason,
+    )
+    command_id = str(command_record["command_id"])
+    pending_record = {
+        "timestamp_ms": command_record["requested_at_ms"],
+        "timestamp_iso": command_record["requested_at_iso"],
+        "timezone": TIMEZONE,
+        "command_id": command_id,
+        "home_id": home_id,
+        "device_id": device_id,
+        "device_name": device_name,
+        "command": command,
+        "action": command,
+        "target_state": target_state,
+        "previous_state": current_state,
+        "requested_by": request.requested_by,
+        "reason": request.reason,
+        "source": request.source or "cloud_remote_api",
+        "emergency": request.emergency,
+        "alert_id": request.alert_id,
+        "source_suggestion_id": request.source_suggestion_id,
+        "control_method": str(formatted_device.get("control_method") or device.get("control_method") or "home_assistant"),
+        "ha_entity_id": device.get("ha_entity_id"),
+        "status": COMMAND_STATUS_PENDING,
+        "requested_at_ms": command_record["requested_at_ms"],
+        "requested_at_iso": command_record["requested_at_iso"],
+        "expires_at_ms": command_record.get("expires_at_ms"),
+        "expires_at_iso": command_record.get("expires_at_iso"),
+        "result": command_record.get("result") or {},
+    }
+    write_command_record(home_id, device_id, pending_record, pending=True)
+    safe_update(
+        f"/homes/{home_id}/devices/{device_id}",
+        {
+            "command_in_progress": True,
+            "pending_command_id": command_id,
+            "pending_target_state": target_state,
+            "last_requested_state": target_state,
+            "last_command_status": COMMAND_STATUS_PENDING,
+            "last_command_message": "Command queued for the Raspberry Pi.",
+            "last_command": {
+                "status": COMMAND_STATUS_PENDING,
+                "user_message": None,
+                "error_code": None,
+            },
+        },
+    )
+    if is_auto_requester(requested_by):
+        write_automation_log(home_id, device_id, device_name, command, command_id, request.reason)
+    return DeviceCommandResponse(
+        success=True,
+        no_action=False,
+        command_id=command_id,
+        device_id=device_id,
+        command=command,
+        target_state=target_state,
+        previous_state=current_state,
+        status=COMMAND_STATUS_PENDING,
+        message="Command queued for the Raspberry Pi.",
+    )
+
+
+def sync_remote_command_projection(home_id: str, command: dict[str, Any]) -> None:
+    command_id = str(command.get("command_id") or command.get("commandId") or "").strip()
+    device_id = str(command.get("device_id") or command.get("deviceId") or "").strip()
+    if not command_id or not device_id:
+        return
+    status = normalize_command_status(command.get("status"))
+    result = as_dict(command.get("result"))
+    message = str(first_present(command.get("message"), result.get("user_message"), "")).strip() or None
+    target_state = str(first_present(command.get("target_state"), command.get("targetState"), "")).strip().lower() or None
+    actual_state = str(first_present(result.get("actual_state"), target_state, "")).strip().lower() or None
+    projection = {
+        "timestamp_ms": first_present(command.get("requested_at_ms"), command.get("requestedAtMs"), command.get("updated_at_ms"), now_ms()),
+        "timestamp_iso": first_present(command.get("requested_at_iso"), command.get("requestedAt"), command.get("updated_at_iso"), iso_from_ms(now_ms())),
+        "timezone": TIMEZONE,
+        "command_id": command_id,
+        "home_id": home_id,
+        "device_id": device_id,
+        "device_name": first_present(command.get("device_name"), command.get("deviceName"), device_id),
+        "command": first_present(command.get("command"), command.get("action")),
+        "action": first_present(command.get("command"), command.get("action")),
+        "target_state": target_state,
+        "previous_state": first_present(command.get("previous_state"), command.get("previousState"), None),
+        "requested_by": first_present(command.get("requested_by"), command.get("requestedBy"), "cloud_remote_api"),
+        "reason": command.get("reason"),
+        "source": command.get("source"),
+        "emergency": bool(command.get("emergency")),
+        "alert_id": first_present(command.get("alert_id"), command.get("alertId"), None),
+        "control_method": command.get("control_method"),
+        "ha_entity_id": command.get("ha_entity_id"),
+        "status": status,
+        "requested_at_ms": first_present(command.get("requested_at_ms"), command.get("requestedAtMs"), None),
+        "requested_at_iso": first_present(command.get("requested_at_iso"), command.get("requestedAt"), None),
+        "expires_at_ms": first_present(command.get("expires_at_ms"), command.get("expiresAtMs"), None),
+        "expires_at_iso": first_present(command.get("expires_at_iso"), command.get("expiresAt"), None),
+        "claimed_at_ms": first_present(command.get("claimed_at_ms"), command.get("claimedAtMs"), None),
+        "claimed_at_iso": first_present(command.get("claimed_at_iso"), command.get("claimedAt"), None),
+        "started_at_ms": first_present(command.get("started_at_ms"), command.get("startedAtMs"), None),
+        "started_at_iso": first_present(command.get("started_at_iso"), command.get("startedAt"), None),
+        "completed_at_ms": first_present(command.get("executed_at_ms"), command.get("executedAtMs"), command.get("expired_at_ms"), None),
+        "completed_at_iso": first_present(command.get("executed_at_iso"), command.get("executedAt"), command.get("expired_at_iso"), None),
+        "result": result,
+    }
+    write_command_record(home_id, device_id, projection, pending=status in ACTIVE_COMMAND_STATUSES)
+    device_updates = {
+        "command_in_progress": status in ACTIVE_COMMAND_STATUSES,
+        "pending_command_id": command_id if status in ACTIVE_COMMAND_STATUSES else None,
+        "pending_target_state": target_state if status in ACTIVE_COMMAND_STATUSES else None,
+        "last_requested_state": target_state,
+        "last_command_status": status,
+        "last_command_message": message,
+        "last_command": {
+            "status": status,
+            "user_message": message,
+            "error_code": result.get("error_code"),
+        },
+    }
+    if status == COMMAND_STATUS_SUCCEEDED and actual_state in {"on", "off"}:
+        device_updates.update(
+            {
+                "state": actual_state,
+                "display_state": actual_state,
+                "is_on": actual_state == "on",
+            }
+        )
+    safe_update(f"/homes/{home_id}/devices/{device_id}", device_updates)
+
+
 def execute_home_assistant_device_command(
     home_id: str,
     device_id: str,
@@ -4252,7 +4944,7 @@ def execute_home_assistant_device_command(
     if not entity_id:
         error = HomeAssistantError(
             "HA_ENTITY_NOT_FOUND",
-            "Matter switch was not found in Home Assistant.",
+            "Home Assistant switch was not found.",
             "Missing ha_entity_id.",
         )
         mark_ha_device_error(home_id, device_id, error)
@@ -4368,7 +5060,7 @@ def execute_home_assistant_device_command(
         if actual_state != target_state:
             raise HomeAssistantError(
                 "HA_COMMAND_FAILED",
-                "Matter switch command failed. Please try again.",
+                "Home Assistant switch command failed. Please try again.",
                 f"Expected {target_state}, got {actual_state}.",
             )
 
@@ -4488,7 +5180,7 @@ def queue_home_assistant_device_command(
             detail={
                 "success": False,
                 "status": "HA_ENTITY_NOT_FOUND",
-                "message": "Matter switch was not found in Home Assistant.",
+                "message": "Home Assistant switch was not found.",
             },
         )
 
@@ -4566,7 +5258,7 @@ def queue_home_assistant_device_command(
             "pending_target_state": target_state,
             "last_requested_state": target_state,
             "last_command_status": "pending",
-            "last_command_message": "Command queued for local Matter controller.",
+            "last_command_message": "Command queued for local Home Assistant controller.",
             "last_command": {
                 "status": "pending",
                 "user_message": None,
@@ -4585,7 +5277,7 @@ def queue_home_assistant_device_command(
         target_state=target_state,
         previous_state=current_state,
         status="pending",
-        message="Command queued for local Matter controller.",
+        message="Command queued for local Home Assistant controller.",
     )
 
 
@@ -4599,6 +5291,7 @@ def create_device_command(
     device_id: str,
     request: DeviceCommandRequest,
 ) -> DeviceCommandResponse:
+    device_id = DEVICE_ALIASES.get(device_id, device_id)
     command = request.command.strip().lower()
     requested_by = request.requested_by.strip().lower()
 
@@ -4628,7 +5321,14 @@ def create_device_command(
         check_auto_safety(home_id, device_id, command, device)
 
     control_method = str(
-        device.get("control_method") or ("tuya_cloud" if device_id.startswith("breaker_") else "")
+        device.get("control_method")
+        or (
+            "home_assistant"
+            if device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS
+            else "tuya_cloud"
+            if device_id.startswith("breaker_") and USE_TUYA_CLOUD_FOR_BREAKERS
+            else ""
+        )
     ).strip().lower()
     formatted_device = format_device(device_id, device)
 
@@ -4661,17 +5361,7 @@ def create_device_command(
         )
 
     if control_method == "home_assistant":
-        ha_mode = os.environ.get("HOME_ASSISTANT_COMMAND_MODE", "auto").strip().lower()
-        if ha_mode == "queue" or not is_home_assistant_configured():
-            return queue_home_assistant_device_command(
-                home_id,
-                device_id,
-                device,
-                request,
-                command,
-                requested_by,
-            )
-        return execute_home_assistant_device_command(
+        return queue_remote_device_command(
             home_id,
             device_id,
             device,
@@ -4764,72 +5454,13 @@ def create_device_command(
             message=f"{device_name} is already {target_state}.",
         )
 
-    command_record = build_command_record(
+    return queue_remote_device_command(
         home_id,
         device_id,
-        device_name,
-        command,
-        target_state,
-        current_state,
+        device,
         request,
-        control_method="tuya_cloud",
-    )
-    command_id = str(command_record["command_id"])
-    timestamp_ms = int(command_record["requested_at_ms"])
-    timestamp_iso = str(command_record["requested_at_iso"])
-
-    safe_set(f"/homes/{home_id}/commands/pending/{command_id}", command_record)
-    safe_set(f"/homes/{home_id}/commands/history/{command_id}", command_record)
-    safe_set(f"/homes/{home_id}/commands/latest_by_device/{device_id}", command_record)
-    safe_update(
-        f"/homes/{home_id}/devices/{device_id}",
-        {
-            "command_in_progress": True,
-            "pending_command_id": command_id,
-            "pending_target_state": target_state,
-            "last_requested_state": target_state,
-            "last_command_status": "pending",
-            "last_command_message": "Command sent. Waiting for breaker confirmation.",
-            "last_command": {
-                "status": "pending",
-                "user_message": None,
-                "error_code": None,
-            },
-        },
-    )
-
-    # Compatibility with the current Raspberry Pi Tuya controller, which watches
-    # /commands/{device_id}/latest and expects the field name "action".
-    legacy_command = {
-        **command_record,
-        "action": command,
-        "created_at": timestamp_ms,
-        "created_at_ms": timestamp_ms,
-        "created_at_iso": timestamp_iso,
-        "source": request.requested_by,
-    }
-    safe_set(f"/homes/{home_id}/commands/{device_id}/latest", legacy_command)
-
-    if is_auto_requester(requested_by):
-        write_automation_log(
-            home_id,
-            device_id,
-            device_name,
-            command,
-            command_id,
-            request.reason,
-        )
-
-    return DeviceCommandResponse(
-        success=True,
-        no_action=False,
-        command_id=command_id,
-        device_id=device_id,
-        command=command,
-        target_state=target_state,
-        previous_state=current_state,
-        status="pending",
-        message="Command sent. Waiting for breaker confirmation.",
+        command,
+        requested_by,
     )
 
 

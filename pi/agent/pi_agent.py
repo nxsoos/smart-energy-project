@@ -142,7 +142,6 @@ def build_live_state() -> dict[str, Any]:
     home_id = HOME_ID or str(_agent_state.get("home_id") or "home_001")
     if build_live_payload is not None:
         payload = build_live_payload()
-        home = home_snapshot(home_id)
         return {
             "home_id": home_id,
             "dashboard": payload.get("dashboard") if isinstance(payload.get("dashboard"), dict) else {},
@@ -153,9 +152,7 @@ def build_live_state() -> dict[str, Any]:
             "alerts": list((payload.get("alerts") or {}).get("active", {}).values())
             if isinstance(payload.get("alerts"), dict)
             else payload.get("alerts", []),
-            "notifications": list((home.get("notifications") or {}).values())
-            if isinstance(home.get("notifications"), dict)
-            else [],
+            "notifications": [],
             "occupancy": payload.get("occupancy") if isinstance(payload.get("occupancy"), dict) else {},
             "safety": payload.get("safety") if isinstance(payload.get("safety"), dict) else {},
             "updated_at_ms": payload.get("timestamp_ms") or payload.get("timestampMs") or now_ms(),
@@ -169,7 +166,7 @@ def build_live_state() -> dict[str, Any]:
         "room": esp32.get("sensors") if isinstance(esp32.get("sensors"), dict) else {},
         "devices": devices,
         "alerts": list((home.get("alerts") or {}).get("active", {}).values()) if isinstance(home.get("alerts"), dict) else [],
-        "notifications": list(home.get("notifications", {}).values()) if isinstance(home.get("notifications"), dict) else [],
+        "notifications": [],
         "occupancy": (home.get("occupancy") or {}).get("room1", {}) if isinstance(home.get("occupancy"), dict) else {},
         "safety": home.get("safety") if isinstance(home.get("safety"), dict) else {},
         "updated_at_ms": now_ms(),
@@ -488,6 +485,51 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       color: var(--red);
     }
 
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 6, 27, 0.82);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 20;
+    }
+
+    .overlay.visible {
+      display: flex;
+    }
+
+    .modal {
+      width: min(520px, 100%);
+      background: #111827;
+      border: 1px solid rgba(248, 113, 113, 0.5);
+      border-radius: 20px;
+      padding: 24px;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+      text-align: center;
+    }
+
+    .modal h2 {
+      margin: 0 0 12px;
+      color: #fecaca;
+    }
+
+    .modal p {
+      margin: 0 0 18px;
+      line-height: 1.5;
+      color: #e5e7eb;
+    }
+
+    .modal button {
+      border: none;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: #dc2626;
+      color: white;
+      font-weight: 700;
+    }
+
     @media (max-width: 820px) {
       header { align-items: flex-start; flex-direction: column; }
       .hero, .room { grid-column: span 12; }
@@ -496,6 +538,13 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   </style>
 </head>
 <body>
+  <div class="overlay" id="alertOverlay">
+    <div class="modal">
+      <h2>Smoke/Gas Detected</h2>
+      <p id="alertOverlayMessage">Smoke or gas was detected. Check the area immediately.</p>
+      <button type="button" id="alertOverlayButton">I understand</button>
+    </div>
+  </div>
   <main class="shell">
     <header>
       <div>
@@ -561,6 +610,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
   <script>
     const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+    let overlayDismissedForAlertId = null;
 
     function text(id, value) {
       document.getElementById(id).textContent = value;
@@ -641,6 +691,29 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
         notes.push(`<span class="error">${alert.title || alert.message || "Active alert"}</span>`);
       }
       document.getElementById("alerts").innerHTML = notes.length ? notes.join("<br>") : "No active alerts.";
+
+      const overlay = document.getElementById("alertOverlay");
+      const overlayMessage = document.getElementById("alertOverlayMessage");
+      const criticalAlert = alerts.find((alert) => {
+        const severity = String(alert.severity || alert.level || "").toLowerCase();
+        const alertType = String(alert.alert_type || alert.type || alert.category || "").toLowerCase();
+        const message = String(alert.message || alert.title || "").toLowerCase();
+        return severity === "critical" || alertType.includes("smoke") || alertType.includes("gas") || message.includes("smoke") || message.includes("gas");
+      });
+      if (!criticalAlert) {
+        overlay.classList.remove("visible");
+        overlayDismissedForAlertId = null;
+      } else {
+        const alertId = String(criticalAlert.alert_id || criticalAlert.id || "critical_alert");
+        overlayMessage.textContent = criticalAlert.message || criticalAlert.title || "Smoke or gas was detected. Check the area immediately.";
+        if (overlayDismissedForAlertId !== alertId) {
+          overlay.classList.add("visible");
+        }
+        document.getElementById("alertOverlayButton").onclick = () => {
+          overlayDismissedForAlertId = alertId;
+          overlay.classList.remove("visible");
+        };
+      }
     }
 
     async function refresh() {

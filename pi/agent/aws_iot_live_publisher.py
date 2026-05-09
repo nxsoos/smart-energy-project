@@ -34,6 +34,12 @@ AWS_IOT_RETAIN_LIVE_STATE = os.environ.get("AWS_IOT_RETAIN_LIVE_STATE", "false")
 AWS_IOT_PUBLISH_LOG_EVERY = max(1, int(os.environ.get("AWS_IOT_PUBLISH_LOG_EVERY", "10")))
 ESP32_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
 SENSOR_STALE_AFTER_SECONDS = float(os.environ.get("SENSOR_STALE_AFTER_SECONDS", "45"))
+USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKERS", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 DEVICE_ORDER = (
     "matter_socket_switch",
@@ -64,22 +70,22 @@ DEVICE_DEFAULTS = {
     },
     "breaker_01": {
         "id": "breaker_01",
-        "name": "Switch Breaker",
+        "name": "AC Breaker",
         "type": "smart_breaker",
-        "branch": "Branch 1",
-        "control_method": "tuya_cloud",
+        "branch": "AC",
+        "control_method": "home_assistant",
         "energy_supported": True,
-        "cloud_online": True,
+        "cloud_online": False,
         "controllable": True,
     },
     "breaker_02": {
         "id": "breaker_02",
-        "name": "AC Breaker",
+        "name": "Socket Breaker",
         "type": "smart_breaker",
-        "branch": "Branch 2",
-        "control_method": "tuya_cloud",
+        "branch": "Socket",
+        "control_method": "home_assistant",
         "energy_supported": True,
-        "cloud_online": True,
+        "cloud_online": False,
         "controllable": True,
     },
 }
@@ -137,6 +143,71 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+def compact_dict(source: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: source[key] for key in keys if key in source and source[key] is not None}
+
+
+def compact_status(status: dict[str, Any]) -> dict[str, Any]:
+    return compact_dict(
+        status,
+        (
+            "online",
+            "switch",
+            "relay_status",
+            "lastSeenMs",
+            "last_seen_ms",
+            "last_seen_iso",
+            "error_code",
+            "message",
+        ),
+    )
+
+
+def compact_sensor_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return compact_dict(
+        payload,
+        (
+            "device_id",
+            "home_id",
+            "pi_id",
+            "temperature",
+            "humidity",
+            "heatIndex",
+            "heat_index",
+            "gasResistance",
+            "gas_resistance",
+            "airQuality",
+            "air_quality",
+            "airQualityLabel",
+            "air_quality_label",
+            "smokeDetected",
+            "smoke_detected",
+            "gasDetected",
+            "gas_detected",
+            "motionDetected",
+            "motion_detected",
+            "soundLevel",
+            "sound_level",
+            "lightLevel",
+            "light_level",
+            "occupancy",
+            "occupied",
+            "online",
+            "sensorOnline",
+            "sensor_online",
+            "stale",
+            "ahtOk",
+            "ens160Ok",
+            "timestampMs",
+            "timestamp_ms",
+            "timestampIso",
+            "timestamp_iso",
+            "readableTime",
+            "readable_time",
+        ),
+    )
+
+
 def latest_sensor_payload(home: dict[str, Any]) -> dict[str, Any]:
     devices = as_dict(home.get("devices"))
     esp32 = as_dict(devices.get(ESP32_DEVICE_ID))
@@ -183,7 +254,7 @@ def annotate_sensor_freshness(payload: dict[str, Any]) -> dict[str, Any]:
         }
     timestamp_ms = sensor_timestamp_ms(payload)
     stale = not timestamp_ms or now_ms() - timestamp_ms > SENSOR_STALE_AFTER_SECONDS * 1000
-    return {
+    return compact_sensor_payload({
         **payload,
         "timestampMs": timestamp_ms or payload.get("timestampMs"),
         "timestamp_ms": timestamp_ms or payload.get("timestamp_ms"),
@@ -191,7 +262,7 @@ def annotate_sensor_freshness(payload: dict[str, Any]) -> dict[str, Any]:
         "sensorOnline": not stale,
         "sensor_online": not stale,
         "stale": stale,
-    }
+    })
 
 
 def normalize_device(device_id: str, raw_device: dict[str, Any]) -> dict[str, Any]:
@@ -199,6 +270,13 @@ def normalize_device(device_id: str, raw_device: dict[str, Any]) -> dict[str, An
     device = {**defaults, **raw_device, "id": raw_device.get("id") or defaults.get("id") or device_id}
     status = as_dict(device.get("status"))
     metering = as_dict(device.get("metering"))
+    if device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS:
+        device["control_method"] = "home_assistant"
+        device["cloud_online"] = False
+        if str(device.get("name") or "").lower() in {"switch breaker", "ac breaker"}:
+            device["name"] = defaults.get("name") or device.get("name")
+        if str(device.get("branch") or "").lower().startswith("branch"):
+            device["branch"] = defaults.get("branch") or device.get("branch")
     state = str(first_present(device.get("state"), device.get("display_state"), "")).lower()
     switch = first_present(status.get("switch"), status.get("relay_status"), device.get("switch"))
     switch_on = as_bool(switch, fallback=state == "on")
@@ -218,22 +296,22 @@ def normalize_device(device_id: str, raw_device: dict[str, Any]) -> dict[str, An
         first_present(device.get("energy_kWh"), device.get("energy_kwh"), device.get("today_kwh"), metering.get("energy_kWh"), metering.get("energy_kwh"))
     )
 
-    normalized_status = {
-        **status,
+    normalized_status = compact_status({
+        **compact_status(status),
         "switch": switch_on,
         "relay_status": "on" if switch_on else "off",
         "online": online,
-    }
+    })
     normalized_metering = {
-        **metering,
         "power_W": round(power_w, 3),
         "voltage_V": round(voltage_v, 3),
         "current_A": round(current_a, 3),
         "energy_kWh": round(energy_kwh, 6),
     }
     return {
-        **device,
         "name": device.get("name") or device.get("label") or device_id,
+        "id": device_id,
+        "device_id": device_id,
         "type": device.get("type") or defaults.get("type", "device"),
         "branch": device.get("branch") or defaults.get("branch", "Main"),
         "state": "on" if switch_on else "off",
@@ -249,6 +327,9 @@ def normalize_device(device_id: str, raw_device: dict[str, Any]) -> dict[str, An
         "voltage_V": round(voltage_v, 3),
         "current_A": round(current_a, 3),
         "energy_kWh": round(energy_kwh, 6),
+        "ha_entity_id": device.get("ha_entity_id"),
+        "last_command_status": device.get("last_command_status"),
+        "last_command_message": str(device.get("last_command_message") or "")[:160] or None,
     }
 
 
@@ -262,7 +343,16 @@ def collect_devices(home: dict[str, Any]) -> dict[str, Any]:
             continue
         devices[device_id] = normalize_device(device_id, as_dict(raw_devices.get(device_id)))
     if ESP32_DEVICE_ID in raw_devices:
-        devices[ESP32_DEVICE_ID] = as_dict(raw_devices.get(ESP32_DEVICE_ID))
+        esp32 = as_dict(raw_devices.get(ESP32_DEVICE_ID))
+        devices[ESP32_DEVICE_ID] = {
+            "id": ESP32_DEVICE_ID,
+            "device_id": ESP32_DEVICE_ID,
+            "name": "Room Sensor",
+            "type": "sensor_hub",
+            "online": as_bool(first_present(as_dict(esp32.get("status")).get("online"), esp32.get("online")), fallback=False),
+            "status": compact_status(as_dict(esp32.get("status"))),
+            "sensors": compact_sensor_payload(as_dict(esp32.get("sensors"))),
+        }
     return devices
 
 
@@ -323,8 +413,78 @@ def energy_summary(devices: dict[str, Any], home: dict[str, Any]) -> dict[str, A
 
 
 def command_summary(home: dict[str, Any]) -> dict[str, Any]:
-    latest = as_dict(as_dict(home.get("commands")).get("latest_by_device"))
-    return {device_id: {"latest": as_dict(value)} for device_id, value in latest.items()}
+    return {}
+
+
+def compact_alerts(home: dict[str, Any]) -> list[dict[str, Any]]:
+    active = as_dict(as_dict(home.get("alerts")).get("active"))
+    alerts: list[dict[str, Any]] = []
+    for alert_id, alert in list(active.items())[:10]:
+        compact = compact_dict(
+            as_dict(alert),
+            (
+                "id",
+                "alert_id",
+                "type",
+                "alert_type",
+                "severity",
+                "status",
+                "title",
+                "message",
+                "timestamp_ms",
+                "timestamp_iso",
+                "updated_at_ms",
+                "updated_at_iso",
+            ),
+        )
+        compact["id"] = str(compact.get("id") or compact.get("alert_id") or alert_id)
+        if "message" in compact:
+            compact["message"] = str(compact["message"])[:180]
+        if "title" in compact:
+            compact["title"] = str(compact["title"])[:80]
+        alerts.append(compact)
+    return alerts
+
+
+def compact_safety(home: dict[str, Any]) -> dict[str, Any]:
+    safety = as_dict(home.get("safety"))
+    return {
+        "smoke_state": compact_dict(
+            as_dict(safety.get("smoke_state")),
+            ("active", "smoke_detected", "gas_detected", "updated_at_ms", "updated_at_iso"),
+        ),
+        "emergency_mode": compact_dict(
+            as_dict(safety.get("emergency_mode")),
+            ("active", "reason", "updated_at_ms", "updated_at_iso"),
+        ),
+    }
+
+
+def compact_control(home: dict[str, Any]) -> dict[str, Any]:
+    return compact_dict(
+        as_dict(home.get("control")),
+        (
+            "mode",
+            "updated_at_ms",
+            "updated_at_iso",
+        ),
+    )
+
+
+def compact_occupancy(home: dict[str, Any]) -> dict[str, Any]:
+    return compact_dict(
+        as_dict(as_dict(home.get("occupancy")).get("room1")),
+        (
+            "occupied",
+            "is_occupied",
+            "confidence",
+            "motion_recent",
+            "sound_recent",
+            "light_level",
+            "updated_at_ms",
+            "updated_at_iso",
+        ),
+    )
 
 
 def build_live_payload() -> dict[str, Any]:
@@ -332,9 +492,8 @@ def build_live_payload() -> dict[str, Any]:
     home = home_snapshot(HOME_ID)
     devices = collect_devices(home)
     room = latest_sensor_payload(home)
-    occupancy = as_dict(as_dict(home.get("occupancy")).get("room1"))
-    safety = as_dict(home.get("safety"))
-    dashboard = as_dict(home.get("dashboard"))
+    occupancy = compact_occupancy(home)
+    safety = compact_safety(home)
     return json_safe(
         {
             "schema": "smart_energy_live_state_v1",
@@ -350,12 +509,10 @@ def build_live_payload() -> dict[str, Any]:
             "devices": devices,
             "energy": energy_summary(devices, home),
             "commands": command_summary(home),
-            "alerts": as_dict(home.get("alerts")),
+            "alerts": compact_alerts(home),
             "occupancy": occupancy,
             "safety": safety,
-            "control": as_dict(home.get("control")),
-            "settings": as_dict(home.get("settings")),
-            "ai": as_dict(dashboard.get("ai")),
+            "control": compact_control(home),
         }
     )
 

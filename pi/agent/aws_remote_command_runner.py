@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 import requests
-from local_command_controller import execute_local_command
+from local_command_controller import execute_local_command, sync_home_assistant_device_states
 
 import sys
 from pathlib import Path
@@ -31,8 +31,24 @@ REMOTE_COMMAND_SOURCE = os.environ.get("REMOTE_COMMAND_SOURCE", "dynamodb").stri
 KAHRABAIQ_API_URL = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
 PI_ID = os.environ.get("PI_ID", "pi_local_001")
 PI_DEVICE_TOKEN = os.environ.get("PI_DEVICE_TOKEN", "")
-ALLOWED_DEVICES = {"breaker_01", "breaker_02", "matter_socket_switch", "matter_ac_switch"}
+DEVICE_ALIASES = {
+    "ac_breaker": "breaker_01",
+    "socket_breaker": "breaker_02",
+}
+ALLOWED_DEVICES = {
+    "breaker_01",
+    "breaker_02",
+    "ac_breaker",
+    "socket_breaker",
+    "matter_socket_switch",
+    "matter_ac_switch",
+}
 ALLOWED_COMMANDS = {"turn_on", "turn_off"}
+STATUS_PENDING = "PENDING"
+STATUS_CLAIMED = "CLAIMED"
+STATUS_EXECUTING = "EXECUTING"
+STATUS_SUCCEEDED = "SUCCEEDED"
+STATUS_FAILED = "FAILED"
 
 
 def log(message: str) -> None:
@@ -53,6 +69,22 @@ def api_request(method: str, path: str, **kwargs: Any) -> requests.Response:
     if not KAHRABAIQ_API_URL:
         raise RuntimeError("KAHRABAIQ_API_URL is required when REMOTE_COMMAND_SOURCE=ec2.")
     return requests.request(method, f"{KAHRABAIQ_API_URL}{path}", timeout=15, **kwargs)
+
+
+def response_error_message(response: requests.Response, fallback: str | None = None) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    if isinstance(data, dict):
+        detail = data.get("detail")
+        if isinstance(detail, dict):
+            return str(detail.get("message") or detail)
+        if detail:
+            return str(detail)
+        if data.get("message"):
+            return str(data["message"])
+    return fallback or response.text or f"HTTP {response.status_code}"
 
 
 def from_dynamodb(value: Any) -> Any:
@@ -95,7 +127,7 @@ def query_pending_commands() -> list[dict[str, Any]]:
         commands = [
             item
             for item in data.get("commands") or []
-            if isinstance(item, dict) and str(item.get("status")) == "pending"
+            if isinstance(item, dict) and str(item.get("status")).upper() == STATUS_PENDING
         ]
         if commands:
             log(
@@ -111,13 +143,13 @@ def query_pending_commands() -> list[dict[str, Any]]:
         KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
         ExpressionAttributeValues={
             ":pk": home_pk(),
-            ":sk": "COMMAND#REMOTE#",
+            ":sk": "COMMAND#",
         },
         ScanIndexForward=False,
         Limit=max(1, min(REMOTE_COMMAND_QUERY_LIMIT, 100)),
     )
     items = [from_dynamodb(item) for item in response.get("Items", [])]
-    commands = [item for item in items if str(item.get("status")) == "pending"]
+    commands = [item for item in items if str(item.get("status")).upper() == STATUS_PENDING]
     if commands:
         log(
             "Fetched pending command(s) from DynamoDB: "
@@ -152,22 +184,62 @@ def mark_processing(command: dict[str, Any]) -> dict[str, Any]:
             f"/api/pi/{PI_ID}/remote-commands/{command_id}/claim",
             headers=pi_headers(),
         )
+        if response.status_code == 404:
+            log(
+                f"EC2 backend does not support remote command claim for {command_id}; "
+                "executing command without claim step"
+            )
+            return {**command, "status": STATUS_CLAIMED}
         data = response.json()
         if not response.ok or data.get("success") is False:
-            raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+            raise RuntimeError(response_error_message(response))
         claimed = data.get("command")
-        return claimed if isinstance(claimed, dict) else {**command, "status": "processing"}
+        return claimed if isinstance(claimed, dict) else {**command, "status": STATUS_CLAIMED}
 
     return write_command(
         command,
         {
-            "status": "processing",
+            "status": STATUS_CLAIMED,
             "claimedBy": "raspberry_pi",
             "claimed_by": "raspberry_pi",
             "claimedAtMs": timestamp_ms,
             "claimed_at_ms": timestamp_ms,
             "claimedAt": ms_to_iso(timestamp_ms),
             "claimed_at_iso": ms_to_iso(timestamp_ms),
+            "timezone": TIMEZONE,
+        },
+    )
+
+
+def mark_executing(command: dict[str, Any]) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    if REMOTE_COMMAND_SOURCE == "ec2":
+        command_id = str(command.get("command_id") or command.get("commandId") or "")
+        response = api_request(
+            "POST",
+            f"/api/pi/{PI_ID}/remote-commands/{command_id}/executing",
+            headers=pi_headers(),
+        )
+        if response.status_code == 404:
+            log(
+                f"EC2 backend does not support remote command executing state for {command_id}; "
+                "continuing with local execution"
+            )
+            return {**command, "status": STATUS_EXECUTING}
+        data = response.json()
+        if not response.ok or data.get("success") is False:
+            raise RuntimeError(response_error_message(response))
+        updated = data.get("command")
+        return updated if isinstance(updated, dict) else {**command, "status": STATUS_EXECUTING}
+
+    return write_command(
+        command,
+        {
+            "status": STATUS_EXECUTING,
+            "startedAtMs": timestamp_ms,
+            "started_at_ms": timestamp_ms,
+            "startedAt": ms_to_iso(timestamp_ms),
+            "started_at_iso": ms_to_iso(timestamp_ms),
             "timezone": TIMEZONE,
         },
     )
@@ -199,13 +271,13 @@ def mark_done(command: dict[str, Any], result: dict[str, Any]) -> None:
         )
         data = response.json()
         if not response.ok or data.get("success") is False:
-            raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+            raise RuntimeError(response_error_message(response))
         return
 
     write_command(
         command,
         {
-            "status": "confirmed" if result.get("success") else "failed",
+            "status": STATUS_SUCCEEDED if result.get("success") else STATUS_FAILED,
             "executedAtMs": timestamp_ms,
             "executed_at_ms": timestamp_ms,
             "executedAt": ms_to_iso(timestamp_ms),
@@ -250,13 +322,13 @@ def mark_failed(command: dict[str, Any], error: Any) -> None:
         )
         data = response.json()
         if not response.ok or data.get("success") is False:
-            raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+            raise RuntimeError(response_error_message(response))
         return
 
     write_command(
         command,
         {
-            "status": "failed",
+            "status": STATUS_FAILED,
             "failedAtMs": timestamp_ms,
             "failed_at_ms": timestamp_ms,
             "failedAt": ms_to_iso(timestamp_ms),
@@ -274,40 +346,44 @@ def mark_failed(command: dict[str, Any], error: Any) -> None:
 
 
 def process_command(command: dict[str, Any]) -> None:
-    device_id = str(command.get("device_id") or command.get("deviceId") or "").strip()
+    raw_device_id = str(command.get("device_id") or command.get("deviceId") or "").strip()
+    device_id = DEVICE_ALIASES.get(raw_device_id, raw_device_id)
     action = str(command.get("command") or command.get("action") or "").strip().lower()
     command_id = str(command.get("command_id") or command.get("commandId") or "")
     log(
         "Received command "
-        f"id={command_id or '<missing>'} device={device_id or '<missing>'} "
+        f"id={command_id or '<missing>'} device={raw_device_id or '<missing>'} "
+        f"canonical_device={device_id or '<missing>'} "
         f"action={action or '<missing>'} source={command.get('source')} "
         f"requested_by={command.get('requested_by') or command.get('requestedBy')}"
     )
 
-    if device_id not in ALLOWED_DEVICES or action not in ALLOWED_COMMANDS:
-        log(f"Rejecting unsupported command id={command_id}: {device_id} {action}")
-        mark_failed(command, f"Unsupported remote command: {device_id} {action}")
+    if raw_device_id not in ALLOWED_DEVICES or action not in ALLOWED_COMMANDS:
+        log(f"Rejecting unsupported command id={command_id}: {raw_device_id} {action}")
+        mark_failed(command, f"Unsupported remote command: {raw_device_id} {action}")
         return
 
     processing = mark_processing(command)
+    executing = mark_executing(processing)
     log(f"Executing {command_id}: {device_id} {action}")
     try:
         result = execute_local_command(
             device_id,
             action,
-            requested_by=str(command.get("requested_by") or command.get("requestedBy") or "cloud_remote_api"),
-            source=str(command.get("source") or "cloud_remote_api"),
-            emergency=bool(command.get("emergency")),
-            alert_id=command.get("alert_id") or command.get("alertId"),
+            requested_by=str(executing.get("requested_by") or executing.get("requestedBy") or "cloud_remote_api"),
+            source=str(executing.get("source") or "cloud_remote_api"),
+            emergency=bool(executing.get("emergency")),
+            alert_id=executing.get("alert_id") or executing.get("alertId"),
         )
-        mark_done(processing, result)
+        mark_done(executing, result)
         log(f"Completed {command_id}: {result.get('status')} {result.get('message')}")
     except Exception as error:
-        mark_failed(processing, error)
+        mark_failed(executing, error)
         log(f"Failed {command_id}: {error}")
 
 
 def run_once() -> int:
+    sync_home_assistant_device_states()
     commands = query_pending_commands()
     for command in commands:
         process_command(command)

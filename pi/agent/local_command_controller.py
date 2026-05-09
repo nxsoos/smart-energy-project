@@ -22,6 +22,7 @@ load_dotenv()
 from home_assistant_controller import (  # noqa: E402
     HomeAssistantError,
     execute_home_assistant_command,
+    get_entity_payload,
     get_entity_state,
 )
 from timestamp_utils import TIMEZONE, ms_to_iso, now_ms  # noqa: E402
@@ -34,16 +35,33 @@ TUYA_API_ENDPOINT = os.environ.get("TUYA_API_ENDPOINT", "https://openapi.tuyaeu.
 TUYA_VERIFY_ATTEMPTS = int(os.environ.get("TUYA_VERIFY_ATTEMPTS", "7"))
 LOCAL_COMMAND_VERIFY_DELAY_SECONDS = float(os.environ.get("LOCAL_COMMAND_VERIFY_DELAY_SECONDS", "1.5"))
 LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS = float(os.environ.get("LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS", "5"))
+USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKERS", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+USE_TUYA_CLOUD_FOR_BREAKERS = os.environ.get("USE_TUYA_CLOUD_FOR_BREAKERS", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+DEVICE_ALIASES = {
+    "ac_breaker": "breaker_01",
+    "socket_breaker": "breaker_02",
+}
 
 TUYA_DEVICES = {
     "breaker_01": {
-        "name": "Switch Breaker",
+        "name": "AC Breaker",
         "tuya_device_id": os.environ.get("TUYA_BREAKER_01_DEVICE_ID", ""),
         "command_code": "switch",
         "fallback_codes": ["switch_1"],
     },
     "breaker_02": {
-        "name": "AC Breaker",
+        "name": "Socket Breaker",
         "tuya_device_id": os.environ.get("TUYA_BREAKER_02_DEVICE_ID", ""),
         "command_code": "switch",
         "fallback_codes": ["switch_1"],
@@ -51,12 +69,36 @@ TUYA_DEVICES = {
 }
 
 HA_ENTITY_ENV = {
+    "breaker_01": "AC_BREAKER_ENTITY_ID",
+    "breaker_02": "SOCKET_BREAKER_ENTITY_ID",
     "matter_socket_switch": "MATTER_SOCKET_SWITCH_ENTITY_ID",
     "matter_ac_switch": "MATTER_AC_SWITCH_ENTITY_ID",
 }
+HA_ENTITY_ENV_FALLBACKS = {
+    "breaker_01": ("AC_BREAKER_ENTITY_ID", "BREAKER_01_ENTITY_ID", "MATTER_AC_SWITCH_ENTITY_ID"),
+    "breaker_02": ("SOCKET_BREAKER_ENTITY_ID", "BREAKER_02_ENTITY_ID", "MATTER_SOCKET_SWITCH_ENTITY_ID"),
+    "matter_socket_switch": ("MATTER_SOCKET_SWITCH_ENTITY_ID", "SOCKET_BREAKER_ENTITY_ID"),
+    "matter_ac_switch": ("MATTER_AC_SWITCH_ENTITY_ID", "AC_BREAKER_ENTITY_ID"),
+}
 HA_DEVICE_NAMES = {
+    "breaker_01": "AC Breaker",
+    "breaker_02": "Socket Breaker",
     "matter_socket_switch": "Socket Switch",
     "matter_ac_switch": "AC Switch",
+}
+HA_BREAKER_SENSOR_ENV = {
+    "breaker_01": {
+        "power_W": ("AC_BREAKER_POWER_ENTITY_ID", "sensor.ac_breaker_power"),
+        "current_A": ("AC_BREAKER_CURRENT_ENTITY_ID", "sensor.ac_breaker_current"),
+        "voltage_V": ("AC_BREAKER_VOLTAGE_ENTITY_ID", "sensor.ac_breaker_voltage"),
+        "energy_kWh": ("AC_BREAKER_ENERGY_ENTITY_ID", "sensor.ac_breaker_energy"),
+    },
+    "breaker_02": {
+        "power_W": ("SOCKET_BREAKER_POWER_ENTITY_ID", "sensor.socket_breaker_power"),
+        "current_A": ("SOCKET_BREAKER_CURRENT_ENTITY_ID", "sensor.socket_breaker_current"),
+        "voltage_V": ("SOCKET_BREAKER_VOLTAGE_ENTITY_ID", "sensor.socket_breaker_voltage"),
+        "energy_kWh": ("SOCKET_BREAKER_ENERGY_ENTITY_ID", "sensor.socket_breaker_energy"),
+    },
 }
 
 _TUYA_CLOUD: TuyaOpenAPI | None = None
@@ -83,6 +125,37 @@ def normalize_bool(value: Any) -> bool | None:
 
 def target_state_for_action(action: str) -> str:
     return "on" if action == "turn_on" else "off"
+
+
+def canonical_device_id(device_id: str) -> str:
+    return DEVICE_ALIASES.get(device_id, device_id)
+
+
+def env_value(*keys: str) -> str:
+    for key in keys:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def parse_ha_number(payload: dict[str, Any]) -> float | None:
+    values = [
+        payload.get("state"),
+        as_dict(payload.get("attributes")).get("native_value"),
+        as_dict(payload.get("attributes")).get("value"),
+    ]
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                continue
+    return None
 
 
 def current_state_from_device(device: dict[str, Any]) -> str:
@@ -120,12 +193,12 @@ def friendly_error(raw_error: Any, fallback_code: str = "COMMAND_FAILED") -> dic
     if "ha_entity_not_found" in text:
         return {
             "error_code": "HA_ENTITY_NOT_FOUND",
-            "user_message": "Matter switch was not found in Home Assistant.",
+            "user_message": "Home Assistant switch was not found.",
         }
     if "ha_state_unknown" in text:
         return {
             "error_code": "HA_STATE_UNKNOWN",
-            "user_message": "Matter switch state is unknown.",
+            "user_message": "Home Assistant switch state is unknown.",
         }
     if "permission" in text or "auth" in text or "sign" in text or "token" in text:
         return {
@@ -186,13 +259,20 @@ def create_pending_command(
 ) -> dict[str, Any]:
     timestamp_ms = now_ms()
     timestamp_iso = ms_to_iso(timestamp_ms)
+    device_id = canonical_device_id(device_id)
     device = as_dict(local_ref(f"devices/{device_id}").get())
     command_id = f"cmd_{timestamp_ms}_{device_id}"
     target_state = target_state_for_action(action)
     previous_state = current_state_from_device(device)
     control_method = str(
         device.get("control_method")
-        or ("tuya_cloud" if device_id.startswith("breaker_") else "home_assistant")
+        or (
+            "home_assistant"
+            if device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS
+            else "tuya_cloud"
+            if device_id.startswith("breaker_")
+            else "home_assistant"
+        )
     ).lower()
 
     command = {
@@ -453,6 +533,8 @@ def wait_for_tuya_switch_state(
 
 
 def execute_tuya_command(device_id: str, action: str, command: dict[str, Any]) -> tuple[bool, bool]:
+    if device_id.startswith("breaker_") and not USE_TUYA_CLOUD_FOR_BREAKERS:
+        raise RuntimeError("Tuya Cloud breaker control is disabled. Use Home Assistant breaker control.")
     if device_id not in TUYA_DEVICES:
         raise RuntimeError(f"Unknown Tuya device_id: {device_id}")
     config = TUYA_DEVICES[device_id]
@@ -492,11 +574,23 @@ def execute_tuya_command(device_id: str, action: str, command: dict[str, Any]) -
 
 
 def ha_entity_for_device(device_id: str, device: dict[str, Any]) -> str:
-    entity_id = str(device.get("ha_entity_id") or "").strip()
-    if entity_id:
-        return entity_id
-    env_key = HA_ENTITY_ENV.get(device_id)
-    return os.environ.get(env_key, "").strip() if env_key else ""
+    configured_entity_id = env_value(*HA_ENTITY_ENV_FALLBACKS.get(device_id, ()))
+    if configured_entity_id:
+        return configured_entity_id
+    return str(device.get("ha_entity_id") or "").strip()
+
+
+def read_ha_breaker_metering(device_id: str) -> dict[str, float]:
+    metering: dict[str, float] = {}
+    for field, (env_key, default_entity) in HA_BREAKER_SENSOR_ENV.get(device_id, {}).items():
+        entity_id = os.environ.get(env_key, "").strip() or default_entity
+        try:
+            value = parse_ha_number(get_entity_payload(entity_id))
+        except HomeAssistantError:
+            value = None
+        if value is not None:
+            metering[field] = round(value, 6 if field == "energy_kWh" else 3)
+    return metering
 
 
 def log_ha_config(device_id: str, entity_id: str) -> None:
@@ -523,18 +617,24 @@ def sync_home_assistant_device_states(force: bool = False) -> None:
     _LAST_HA_STATE_SYNC_MS = current_ms
 
     for device_id, env_key in HA_ENTITY_ENV.items():
+        if device_id.startswith("breaker_") and not USE_HOME_ASSISTANT_FOR_BREAKERS:
+            continue
         timestamp_ms = now_ms()
         timestamp_iso = ms_to_iso(timestamp_ms)
         current_device = as_dict(local_ref(f"devices/{device_id}").get())
         entity_id = ha_entity_for_device(device_id, current_device)
+        is_breaker = device_id.startswith("breaker_")
+        metering = read_ha_breaker_metering(device_id) if is_breaker else {}
         base_payload = {
-            "type": "matter_switch",
+            "type": "smart_breaker" if is_breaker else "matter_switch",
             "name": current_device.get("name") or HA_DEVICE_NAMES.get(device_id, device_id),
             "control_method": "home_assistant",
             "ha_entity_id": entity_id or os.environ.get(env_key, "").strip(),
             "cloud_online": False,
-            "energy_supported": False,
+            "energy_supported": is_breaker,
             "controllable": True,
+            "metering": {**as_dict(current_device.get("metering")), **metering},
+            **metering,
             "updated_at_ms": timestamp_ms,
             "updated_at_iso": timestamp_iso,
         }
@@ -597,13 +697,14 @@ def sync_home_assistant_device_states(force: bool = False) -> None:
 
 
 def execute_ha_command(device_id: str, action: str, command: dict[str, Any]) -> tuple[bool, bool]:
+    device_id = canonical_device_id(device_id)
     device = as_dict(local_ref(f"devices/{device_id}").get())
     entity_id = ha_entity_for_device(device_id, device)
     log_ha_config(device_id, entity_id)
     if not entity_id:
         raise HomeAssistantError(
             "HA_ENTITY_NOT_FOUND",
-            "Matter switch was not found in Home Assistant.",
+            "Home Assistant switch was not found.",
             "Missing ha_entity_id or entity-id environment variable.",
         )
 
@@ -633,7 +734,7 @@ def execute_ha_command(device_id: str, action: str, command: dict[str, Any]) -> 
     if actual_state != target_state:
         raise HomeAssistantError(
             "HA_COMMAND_FAILED",
-            "Matter switch command failed. Please try again.",
+            "Home Assistant switch command failed. Please try again.",
             f"Expected {target_state}, got {actual_state}.",
         )
     mark_command_done(device_id, sent_command, action == "turn_on")
@@ -649,7 +750,8 @@ def execute_local_command(
     emergency: bool = False,
     alert_id: str | None = None,
 ) -> dict[str, Any]:
-    if device_id.startswith("matter_"):
+    device_id = canonical_device_id(device_id)
+    if device_id.startswith("matter_") or (device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS):
         sync_home_assistant_device_states(force=True)
     command = create_pending_command(
         device_id,

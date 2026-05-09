@@ -1,10 +1,24 @@
 # Tuya Setup
 
-Tuya credentials are required only on the Raspberry Pi runtime environment. Do not commit real Tuya secrets to this repository.
+Tuya Cloud is backup only. The final breaker command path should use Home Assistant entities, not direct Tuya Cloud calls from the Pi. Do not commit real Tuya secrets to this repository.
 
-## Required Values
+For normal operation, keep:
 
-Set these in `/etc/kahrabaiq/pi.env` on the Pi:
+```env
+USE_HOME_ASSISTANT_FOR_BREAKERS=true
+USE_TUYA_CLOUD_FOR_BREAKERS=false
+```
+
+And disable the legacy poller:
+
+```bash
+sudo systemctl stop kahrabaiq-tuya-breaker-poller
+sudo systemctl disable kahrabaiq-tuya-breaker-poller
+```
+
+## Backup Values
+
+Only set these in `/etc/kahrabaiq/pi.env` if you intentionally re-enable Tuya Cloud backup control:
 
 ```env
 TUYA_ACCESS_ID=your_tuya_cloud_access_id
@@ -32,4 +46,4 @@ sudo systemctl restart kahrabaiq-command-runner
 sudo journalctl -u kahrabaiq-command-runner -f
 ```
 
-The command runner uses these values for `breaker_01` and `breaker_02`. Matter devices continue to use Home Assistant entity IDs.
+The command runner uses these values only when `USE_TUYA_CLOUD_FOR_BREAKERS=true`. By default, `breaker_01` and `breaker_02` use Home Assistant.
