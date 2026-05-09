@@ -2808,12 +2808,17 @@ a.repo-link:hover::before {
   }
 
   .architecture-network {
-    display: grid;
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    grid-template-columns: none;
+    grid-template-rows: none;
     grid-template-areas: none;
     gap: 1.05rem;
+    width: 100%;
+    max-width: 100%;
     min-height: 0;
-    padding: 1rem;
+    padding: 1.1rem clamp(0.85rem, 4vw, 1.25rem);
     overflow: hidden;
   }
 
@@ -2844,10 +2849,14 @@ a.repo-link:hover::before {
 
   .network-core,
   .network-node,
+  .network-node.top-left,
   .network-node.top,
+  .network-node.top-right,
   .network-node.left,
   .network-node.right,
+  .network-node.bottom-left,
   .network-node.bottom,
+  .network-node.bottom-right,
   .network-node.lower {
     position: relative;
     inset: auto;
@@ -2855,20 +2864,30 @@ a.repo-link:hover::before {
     right: auto;
     top: auto;
     bottom: auto;
-    width: 100%;
+    width: min(100%, 22rem);
+    max-width: calc(100vw - 2.5rem);
     min-height: 0;
     transform: none;
-    justify-self: stretch;
+    justify-self: auto;
     grid-area: auto;
   }
 
   .network-core {
     z-index: 2;
-    grid-area: auto;
+    order: 0;
     min-height: 8rem;
     margin-bottom: 0.25rem;
-    width: 100%;
   }
+
+  .network-node.top-left { order: 1; }
+  .network-node.top { order: 2; }
+  .network-node.top-right { order: 3; }
+  .network-node.left { order: 4; }
+  .network-node.right { order: 5; }
+  .network-node.bottom-left { order: 6; }
+  .network-node.bottom { order: 7; }
+  .network-node.bottom-right { order: 8; }
+  .network-node.lower { order: 9; }
 
   .network-core::after,
   .network-node::before {
@@ -2890,7 +2909,16 @@ a.repo-link:hover::before {
 
   .network-node {
     z-index: 2;
+    align-items: center;
     background: rgba(17, 17, 17, 0.97);
+  }
+
+  .network-node > div {
+    min-width: 0;
+  }
+
+  .network-node strong {
+    overflow-wrap: anywhere;
   }
 
   .network-node::before {
@@ -2913,10 +2941,14 @@ a.repo-link:hover::before {
   }
 
   .network-node:hover,
+  .network-node.top-left:hover,
   .network-node.top:hover,
+  .network-node.top-right:hover,
   .network-node.left:hover,
   .network-node.right:hover,
+  .network-node.bottom-left:hover,
   .network-node.bottom:hover,
+  .network-node.bottom-right:hover,
   .network-node.lower:hover {
     transform: translateY(-0.125rem);
   }
