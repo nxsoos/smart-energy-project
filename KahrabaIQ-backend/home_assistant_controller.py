@@ -73,13 +73,13 @@ def _request(method: str, path: str, *, json: dict[str, Any] | None = None) -> A
     if response.status_code == 404:
         raise HomeAssistantError(
             "HA_ENTITY_NOT_FOUND",
-            "Matter switch was not found in Home Assistant.",
+            "Home Assistant switch was not found.",
             response.text,
         )
     if not response.ok:
         raise HomeAssistantError(
             "HA_COMMAND_FAILED",
-            "Matter switch command failed. Please try again.",
+            "Home Assistant switch command failed. Please try again.",
             response.text,
         )
     if not response.content:
@@ -108,7 +108,7 @@ def get_entity_state(entity_id: str) -> str:
     if state == "unknown":
         raise HomeAssistantError(
             "HA_STATE_UNKNOWN",
-            "Matter switch state is unknown.",
+            "Home Assistant switch state is unknown.",
             payload,
         )
     return state
@@ -138,6 +138,6 @@ def execute_home_assistant_command(entity_id: str, command: str) -> Any:
         return turn_off(entity_id)
     raise HomeAssistantError(
         "HA_COMMAND_FAILED",
-        "Matter switch command failed. Please try again.",
+        "Home Assistant switch command failed. Please try again.",
         f"Unsupported command: {command}",
     )

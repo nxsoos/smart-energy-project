@@ -21,6 +21,26 @@ AWS_DYNAMODB_APP_TABLE = os.environ.get(
 )
 AWS_IOT_ENDPOINT = os.environ.get("AWS_IOT_ENDPOINT", "").strip()
 AWS_IOT_WEBSOCKET_EXPIRES_SECONDS = int(os.environ.get("AWS_IOT_WEBSOCKET_EXPIRES_SECONDS", "900"))
+REMOTE_COMMAND_TTL_SECONDS = int(os.environ.get("REMOTE_COMMAND_TTL_SECONDS", "60"))
+
+COMMAND_STATUS_PENDING = "PENDING"
+COMMAND_STATUS_CLAIMED = "CLAIMED"
+COMMAND_STATUS_EXECUTING = "EXECUTING"
+COMMAND_STATUS_SUCCEEDED = "SUCCEEDED"
+COMMAND_STATUS_FAILED = "FAILED"
+COMMAND_STATUS_EXPIRED = "EXPIRED"
+COMMAND_STATUS_CANCELLED = "CANCELLED"
+FINAL_COMMAND_STATUSES = {
+    COMMAND_STATUS_SUCCEEDED,
+    COMMAND_STATUS_FAILED,
+    COMMAND_STATUS_EXPIRED,
+    COMMAND_STATUS_CANCELLED,
+}
+ACTIVE_COMMAND_STATUSES = {
+    COMMAND_STATUS_PENDING,
+    COMMAND_STATUS_CLAIMED,
+    COMMAND_STATUS_EXECUTING,
+}
 
 
 def _table():
@@ -128,6 +148,16 @@ def summary_prefix(period: str) -> str:
     return f"SUMMARY#{normalized}#"
 
 
+def _summary_bucket(period: str, item: dict[str, Any]) -> int:
+    return int(
+        item.get("startAtMs")
+        or item.get("start_at_ms")
+        or item.get("timestamp_ms")
+        or item.get("updated_at_ms")
+        or 0
+    )
+
+
 def query_summaries(home_id: str, period: str, limit: int = 24) -> list[dict[str, Any]]:
     response = _table().query(
         KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
@@ -141,9 +171,93 @@ def query_summaries(home_id: str, period: str, limit: int = 24) -> list[dict[str
     return [_from_dynamodb(item) for item in response.get("Items", [])]
 
 
+def query_summaries_between(
+    home_id: str,
+    period: str,
+    *,
+    start_at_ms: int | None = None,
+    end_at_ms: int | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    items = query_summaries(home_id, period, limit=limit)
+    filtered = []
+    for item in items:
+        bucket = _summary_bucket(period, item)
+        if start_at_ms is not None and bucket < start_at_ms:
+            continue
+        if end_at_ms is not None and bucket > end_at_ms:
+            continue
+        filtered.append(item)
+    filtered.sort(key=lambda item: _summary_bucket(period, item), reverse=True)
+    return filtered
+
+
 def latest_summary(home_id: str, period: str = "hourly") -> dict[str, Any]:
     items = query_summaries(home_id, period, limit=1)
     return items[0] if items else {}
+
+
+def normalize_command_status(status: str | None, *, default: str = COMMAND_STATUS_PENDING) -> str:
+    normalized = str(status or "").strip().upper()
+    aliases = {
+        "PENDING": COMMAND_STATUS_PENDING,
+        "CLAIMED": COMMAND_STATUS_CLAIMED,
+        "PROCESSING": COMMAND_STATUS_CLAIMED,
+        "EXECUTING": COMMAND_STATUS_EXECUTING,
+        "RUNNING": COMMAND_STATUS_EXECUTING,
+        "SUCCEEDED": COMMAND_STATUS_SUCCEEDED,
+        "SUCCESS": COMMAND_STATUS_SUCCEEDED,
+        "CONFIRMED": COMMAND_STATUS_SUCCEEDED,
+        "COMPLETED": COMMAND_STATUS_SUCCEEDED,
+        "FAILED": COMMAND_STATUS_FAILED,
+        "ERROR": COMMAND_STATUS_FAILED,
+        "EXPIRED": COMMAND_STATUS_EXPIRED,
+        "CANCELLED": COMMAND_STATUS_CANCELLED,
+        "CANCELED": COMMAND_STATUS_CANCELLED,
+    }
+    return aliases.get(normalized, default)
+
+
+def command_sort_key(item: dict[str, Any]) -> int:
+    return int(
+        item.get("requestedAtMs")
+        or item.get("requested_at_ms")
+        or item.get("updatedAtMs")
+        or item.get("updated_at_ms")
+        or 0
+    )
+
+
+def command_sort_key_value(item: dict[str, Any], status: str | None = None) -> str:
+    normalized_status = normalize_command_status(status or item.get("status"))
+    timestamp_ms = command_sort_key(item)
+    command_id = str(item.get("commandId") or item.get("command_id") or uuid.uuid4().hex)
+    return f"COMMAND#{normalized_status}#{timestamp_ms:013d}#{command_id}"
+
+
+def command_is_expired(item: dict[str, Any], *, now_ms_value: int | None = None) -> bool:
+    normalized_status = normalize_command_status(item.get("status"))
+    if normalized_status in FINAL_COMMAND_STATUSES:
+        return False
+    expires_at_ms = int(item.get("expiresAtMs") or item.get("expires_at_ms") or 0)
+    if expires_at_ms <= 0:
+        return False
+    if now_ms_value is None:
+        now_ms_value = now_ms()
+    return now_ms_value >= expires_at_ms
+
+
+def _query_command_items(home_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    response = _table().query(
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues={
+            ":pk": home_pk(home_id),
+            ":sk": "COMMAND#",
+        },
+        ScanIndexForward=False,
+        Limit=max(1, min(int(limit), 100)),
+    )
+    return [_from_dynamodb(item) for item in response.get("Items", [])]
 
 
 def create_remote_command(
@@ -160,9 +274,10 @@ def create_remote_command(
     timestamp_ms = now_ms()
     command_id = f"cmd_{timestamp_ms}_{device_id}_{uuid.uuid4().hex[:8]}"
     target_state = "on" if command == "turn_on" else "off"
+    expires_at_ms = timestamp_ms + REMOTE_COMMAND_TTL_SECONDS * 1000
     item = {
         "PK": home_pk(home_id),
-        "SK": f"COMMAND#REMOTE#{timestamp_ms}#{command_id}",
+        "SK": f"COMMAND#{COMMAND_STATUS_PENDING}#{timestamp_ms:013d}#{command_id}",
         "type": "remote_command",
         "commandId": command_id,
         "command_id": command_id,
@@ -174,7 +289,7 @@ def create_remote_command(
         "action": command,
         "targetState": target_state,
         "target_state": target_state,
-        "status": "pending",
+        "status": COMMAND_STATUS_PENDING,
         "requestedBy": requested_by,
         "requested_by": requested_by,
         "source": source,
@@ -186,6 +301,10 @@ def create_remote_command(
         "requested_at_ms": timestamp_ms,
         "requestedAt": ms_to_iso(timestamp_ms),
         "requested_at_iso": ms_to_iso(timestamp_ms),
+        "expiresAtMs": expires_at_ms,
+        "expires_at_ms": expires_at_ms,
+        "expiresAt": ms_to_iso(expires_at_ms),
+        "expires_at_iso": ms_to_iso(expires_at_ms),
         "timezone": TIMEZONE,
         "result": {
             "success": None,
@@ -199,22 +318,39 @@ def create_remote_command(
 
 
 def query_recent_remote_commands(home_id: str, limit: int = 50) -> list[dict[str, Any]]:
-    response = _table().query(
-        KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
-        ExpressionAttributeValues={
-            ":pk": home_pk(home_id),
-            ":sk": "COMMAND#REMOTE#",
-        },
-        ScanIndexForward=False,
-        Limit=max(1, min(int(limit), 100)),
-    )
-    return [_from_dynamodb(item) for item in response.get("Items", [])]
+    items = _query_command_items(home_id, limit=limit)
+    now_ms_value = now_ms()
+    normalized_items = []
+    for item in items:
+        normalized = {**item, "status": normalize_command_status(item.get("status"))}
+        if command_is_expired(normalized, now_ms_value=now_ms_value):
+            normalized = update_remote_command(
+                home_id,
+                str(normalized.get("commandId") or normalized.get("command_id") or ""),
+                {
+                    "status": COMMAND_STATUS_EXPIRED,
+                    "result": {
+                        **_from_dynamodb(normalized.get("result") or {}),
+                        "success": False,
+                        "error_code": "COMMAND_EXPIRED",
+                        "user_message": "Command expired before the Raspberry Pi claimed it.",
+                    },
+                    "message": "Command expired before the Raspberry Pi claimed it.",
+                    "expiredAtMs": now_ms_value,
+                    "expired_at_ms": now_ms_value,
+                    "expiredAt": ms_to_iso(now_ms_value),
+                    "expired_at_iso": ms_to_iso(now_ms_value),
+                },
+            )
+        normalized_items.append(normalized)
+    normalized_items.sort(key=command_sort_key, reverse=True)
+    return normalized_items
 
 
 def find_remote_command(home_id: str, command_id: str) -> dict[str, Any]:
-    for item in query_recent_remote_commands(home_id, limit=100):
+    for item in _query_command_items(home_id, limit=100):
         if str(item.get("commandId") or item.get("command_id")) == command_id:
-            return item
+            return {**item, "status": normalize_command_status(item.get("status"))}
     return {}
 
 
@@ -223,15 +359,21 @@ def update_remote_command(home_id: str, command_id: str, updates: dict[str, Any]
     if not command:
         return {}
     timestamp_ms = now_ms()
+    normalized_status = normalize_command_status(updates.get("status") or command.get("status"))
     updated = {
         **command,
         **updates,
+        "status": normalized_status,
         "updatedAtMs": timestamp_ms,
         "updated_at_ms": timestamp_ms,
         "updatedAt": ms_to_iso(timestamp_ms),
         "updated_at_iso": ms_to_iso(timestamp_ms),
     }
+    previous_key = {"PK": command["PK"], "SK": command["SK"]}
+    updated["SK"] = command_sort_key_value(updated, normalized_status)
     _table().put_item(Item=_to_dynamodb(updated))
+    if updated["SK"] != command["SK"]:
+        _table().delete_item(Key=previous_key)
     return updated
 
 

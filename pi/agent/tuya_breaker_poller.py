@@ -22,6 +22,12 @@ TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "")
 TUYA_API_ENDPOINT = os.environ.get("TUYA_API_ENDPOINT", "https://openapi.tuyaeu.com")
 TUYA_BREAKER_POLL_SECONDS = float(os.environ.get("TUYA_BREAKER_POLL_SECONDS", "15"))
 LOCAL_HISTORY_MAX_RECORDS = int(os.environ.get("LOCAL_HISTORY_MAX_RECORDS", "5000"))
+USE_TUYA_CLOUD_FOR_BREAKERS = os.environ.get("USE_TUYA_CLOUD_FOR_BREAKERS", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 BREAKERS = {
     "breaker_01": {
@@ -223,6 +229,10 @@ def poll_once(cloud: TuyaOpenAPI) -> int:
 
 
 def main() -> int:
+    if not USE_TUYA_CLOUD_FOR_BREAKERS:
+        log("Tuya Cloud breaker polling is disabled. Stop/disable this service for the Home Assistant breaker path.")
+        while True:
+            time.sleep(3600)
     log(f"Started for {HOME_ID}; endpoint={TUYA_API_ENDPOINT}; interval={TUYA_BREAKER_POLL_SECONDS}s")
     cloud = create_cloud()
     while True:

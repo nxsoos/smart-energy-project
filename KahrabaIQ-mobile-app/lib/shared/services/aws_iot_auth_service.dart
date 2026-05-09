@@ -5,7 +5,6 @@ import 'package:amazon_cognito_identity_dart_2/cognito.dart';
 import 'package:aws_common/aws_common.dart';
 import 'package:aws_signature_v4/aws_signature_v4.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 
 import '../models/user_permissions.dart';
 import '../../core/utils/constants.dart';
@@ -399,64 +398,11 @@ class AuthService {
     String? alertId,
     String? reason,
   }) async {
-    final normalizedCommand = command.trim().toLowerCase();
-    final timestampMs = DateTime.now().millisecondsSinceEpoch;
-    final commandId =
-        'cmd_${timestampMs}_${deviceId}_${_randomCommandSuffix(timestampMs)}';
-    final targetState = normalizedCommand == 'turn_on' ? 'on' : 'off';
-    final item = <String, dynamic>{
-      'PK': 'HOME#$homeId',
-      'SK': 'COMMAND#REMOTE#$timestampMs#$commandId',
-      'type': 'remote_command',
-      'commandId': commandId,
-      'command_id': commandId,
-      'homeId': homeId,
-      'home_id': homeId,
-      'deviceId': deviceId,
-      'device_id': deviceId,
-      'command': normalizedCommand,
-      'action': normalizedCommand,
-      'targetState': targetState,
-      'target_state': targetState,
-      'status': 'pending',
-      'requestedBy': 'flutter_app',
-      'requested_by': 'flutter_app',
-      'source': 'flutter_remote_dynamodb',
-      'emergency': emergency,
-      'alertId': alertId,
-      'alert_id': alertId,
-      'reason': reason,
-      'requestedAtMs': timestampMs,
-      'requested_at_ms': timestampMs,
-      'requestedAt': DateTime.fromMillisecondsSinceEpoch(
-        timestampMs,
-      ).toIso8601String(),
-      'requested_at_iso': DateTime.fromMillisecondsSinceEpoch(
-        timestampMs,
-      ).toIso8601String(),
-      'timezone': 'Asia/Bahrain',
-      'result': {
-        'success': null,
-        'actual_state': null,
-        'error_code': null,
-        'user_message': null,
-      },
-    };
-    debugPrint(
-      '[KahrabaIQ REMOTE QUEUE] home=$homeId device=$deviceId '
-      'command=$normalizedCommand commandId=$commandId source=flutter_remote_dynamodb',
+    throw StateError(
+      'Direct DynamoDB command writes are disabled. Use the EC2 backend '
+      'command API so user permissions, command expiry, and audit history '
+      'are enforced centrally.',
     );
-    await _putDynamoDbItem(item);
-    debugPrint('[KahrabaIQ REMOTE QUEUE OK] commandId=$commandId');
-    return {
-      'success': true,
-      'status': 'pending',
-      'message': 'Command queued for the Raspberry Pi.',
-      'command_id': commandId,
-      'device_id': deviceId,
-      'command': normalizedCommand,
-      'target_state': targetState,
-    };
   }
 
   Future<CognitoUserSession?> _validSession() async {
@@ -544,79 +490,6 @@ class AuthService {
     _attachedPolicyIdentityId = identityId;
   }
 
-  Future<void> _putDynamoDbItem(Map<String, dynamic> item) async {
-    final credentials = await _loadAwsCredentials();
-    final body = jsonEncode({
-      'TableName': NetworkConfig.awsDynamoDbSummariesTable,
-      'Item': item.map(
-        (key, value) => MapEntry(key, _toDynamoDbAttribute(value)),
-      ),
-      'ConditionExpression':
-          'attribute_not_exists(PK) AND attribute_not_exists(SK)',
-    });
-    final signer = AWSSigV4Signer(
-      credentialsProvider: AWSCredentialsProvider(
-        AWSCredentials(
-          credentials.accessKeyId!,
-          credentials.secretAccessKey!,
-          credentials.sessionToken,
-        ),
-      ),
-    );
-    final request = AWSHttpRequest(
-      method: AWSHttpMethod.post,
-      uri: Uri.https('dynamodb.${NetworkConfig.awsRegion}.amazonaws.com', '/'),
-      headers: const {
-        'Content-Type': 'application/x-amz-json-1.0',
-        'X-Amz-Target': 'DynamoDB_20120810.PutItem',
-      },
-      body: utf8.encode(body),
-    );
-    final signedRequest = await signer.sign(
-      request,
-      credentialScope: AWSCredentialScope(
-        region: NetworkConfig.awsRegion,
-        service: AWSService.dynamoDb,
-      ),
-    );
-    await Dio(
-      BaseOptions(
-        connectTimeout: const Duration(seconds: 10),
-        receiveTimeout: const Duration(seconds: 10),
-      ),
-    ).postUri(
-      signedRequest.uri,
-      data: body,
-      options: Options(headers: signedRequest.headers),
-    );
-  }
-
-  Map<String, dynamic> _toDynamoDbAttribute(dynamic value) {
-    if (value == null) {
-      return {'NULL': true};
-    }
-    if (value is bool) {
-      return {'BOOL': value};
-    }
-    if (value is num) {
-      return {'N': value.toString()};
-    }
-    if (value is String) {
-      return {'S': value};
-    }
-    if (value is List) {
-      return {'L': value.map(_toDynamoDbAttribute).toList()};
-    }
-    if (value is Map) {
-      return {
-        'M': value.map(
-          (key, val) => MapEntry(key.toString(), _toDynamoDbAttribute(val)),
-        ),
-      };
-    }
-    return {'S': value.toString()};
-  }
-
   AppUser _userFromSession(
     CognitoUserSession session, {
     String? fallbackEmail,
@@ -701,14 +574,5 @@ class AuthService {
 
   String _safeClientSuffix(String value) {
     return value.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
-  }
-
-  String _randomCommandSuffix(int seed) {
-    final userPart = (_currentUser?.uid ?? _currentUser?.email ?? 'user')
-        .hashCode
-        .abs()
-        .toRadixString(16);
-    final timePart = seed.remainder(0xFFFFFF).toRadixString(16);
-    return '$userPart$timePart';
   }
 }

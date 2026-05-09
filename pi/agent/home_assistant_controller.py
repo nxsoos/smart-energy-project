@@ -80,14 +80,14 @@ def _request(method: str, path: str, *, json: dict[str, Any] | None = None) -> A
         _log(f"{method} {url} -> 404 {response.text[:500]}")
         raise HomeAssistantError(
             "HA_ENTITY_NOT_FOUND",
-            "Matter switch was not found in Home Assistant.",
+            "Home Assistant switch was not found.",
             response.text,
         )
     if not response.ok:
         _log(f"{method} {url} -> {response.status_code} {response.text[:500]}")
         raise HomeAssistantError(
             "HA_COMMAND_FAILED",
-            "Matter switch command failed. Please try again.",
+            "Home Assistant switch command failed. Please try again.",
             response.text,
         )
     _log(f"{method} {url} -> {response.status_code}")
@@ -110,14 +110,19 @@ def normalize_ha_state(state: Any) -> str:
     return "unknown"
 
 
-def get_entity_state(entity_id: str) -> str:
+def get_entity_payload(entity_id: str) -> dict[str, Any]:
     entity = quote(entity_id, safe="")
     payload = _request("GET", f"/api/states/{entity}")
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_entity_state(entity_id: str) -> str:
+    payload = get_entity_payload(entity_id)
     state = normalize_ha_state(payload.get("state") if isinstance(payload, dict) else None)
     if state == "unknown":
         raise HomeAssistantError(
             "HA_STATE_UNKNOWN",
-            "Matter switch state is unknown.",
+            "Home Assistant switch state is unknown.",
             payload,
         )
     return state
@@ -147,6 +152,6 @@ def execute_home_assistant_command(entity_id: str, command: str) -> Any:
         return turn_off(entity_id)
     raise HomeAssistantError(
         "HA_COMMAND_FAILED",
-        "Matter switch command failed. Please try again.",
+        "Home Assistant switch command failed. Please try again.",
         f"Unsupported command: {command}",
     )

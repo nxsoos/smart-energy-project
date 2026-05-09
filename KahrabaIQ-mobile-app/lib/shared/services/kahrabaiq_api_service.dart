@@ -1188,13 +1188,10 @@ class KahrabaIqApiService {
   }
 
   DeviceType _parseApiDeviceType(String deviceId, String name, String rawType) {
-    if (deviceId == 'breaker_01') {
-      return DeviceType.light;
-    }
-    if (deviceId == 'breaker_02' || deviceId == 'matter_ac_switch') {
+    if (deviceId == 'breaker_01' || deviceId == 'matter_ac_switch') {
       return DeviceType.airConditioner;
     }
-    if (deviceId == 'matter_socket_switch') {
+    if (deviceId == 'breaker_02' || deviceId == 'matter_socket_switch') {
       return DeviceType.socket;
     }
     final text = '$deviceId $name $rawType'.toLowerCase();
@@ -1612,7 +1609,7 @@ class KahrabaIqApiService {
     }
 
     final response = await _dio.get(
-      '/api/home/$homeId/notifications',
+      '/api/users/me/notifications',
       queryParameters: {'limit': limit, 'unread_only': unreadOnly},
       cancelToken: cancelToken,
     );
@@ -1631,7 +1628,15 @@ class KahrabaIqApiService {
       return;
     }
 
-    await _dio.post('/api/home/$homeId/notifications/$notificationId/read');
+    await _dio.post('/api/users/me/notifications/$notificationId/read');
+  }
+
+  Future<void> markAllNotificationsRead() async {
+    if (usesLocalPiApi) {
+      return;
+    }
+
+    await _dio.post('/api/users/me/notifications/read-all');
   }
 
   Future<String> updateControlMode({
@@ -1839,12 +1844,20 @@ class KahrabaIqApiService {
     bool emergency = false,
   }) async {
     try {
-      final data = await AuthService().queueAwsRemoteDeviceCommand(
-        homeId: homeId,
-        deviceId: deviceId,
-        command: action,
-        emergency: emergency,
+      final response = await _dio.post(
+        '/api/home/$homeId/cloud/commands',
+        data: {
+          'device_id': deviceId,
+          'command': action,
+          'requested_by': emergency ? 'user_emergency_action' : 'flutter_app',
+          'source': emergency ? 'smoke_emergency' : 'flutter_app',
+          'emergency': emergency,
+          if (emergency) 'alert_id': 'smoke_detected_room1',
+          if (emergency)
+            'reason': 'User emergency action from smoke/gas popup.',
+        },
       );
+      final data = _asMap(response.data);
       return DeviceCommandResult(
         success: _asBool(_pick(data, ['success']), fallback: true),
         noAction: false,
