@@ -537,7 +537,6 @@ function Footer({ content }: { content: SiteContent }) {
       <div className="footer-grid">
         <div>
           <button type="button" className="brand image-brand" onClick={() => document.getElementById("home")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
-            <Image src={content.assets.emblem} alt={content.assets.emblemAlt} width={40} height={40} className="brand-emblem" />
             <Image src={content.assets.wordmark} alt={content.assets.wordmarkAlt} width={150} height={100} className="brand-wordmark" />
           </button>
           <p>{content.footer.university}</p>
