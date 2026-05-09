@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { JetBrains_Mono, Noto_Kufi_Arabic, Orbitron, Sora } from "next/font/google";
+import { Bebas_Neue, DM_Mono, JetBrains_Mono, Noto_Kufi_Arabic, Orbitron, Sora } from "next/font/google";
 import "./globals.css";
 import en from "../data/site.en.json";
 
@@ -24,6 +24,20 @@ const mono = JetBrains_Mono({
   display: "swap",
 });
 
+const bebas = Bebas_Neue({
+  subsets: ["latin"],
+  weight: "400",
+  variable: "--font-bebas",
+  display: "swap",
+});
+
+const dmMono = DM_Mono({
+  subsets: ["latin"],
+  weight: ["300", "400", "500"],
+  variable: "--font-dm-mono",
+  display: "swap",
+});
+
 const arabic = Noto_Kufi_Arabic({
   subsets: ["arabic"],
   weight: ["400", "500", "600", "700"],
@@ -42,7 +56,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${orbitron.variable} ${sora.variable} ${mono.variable} ${arabic.variable}`}>
+    <html lang="en" className={`${orbitron.variable} ${sora.variable} ${mono.variable} ${bebas.variable} ${dmMono.variable} ${arabic.variable}`}>
       <body>{children}</body>
     </html>
   );

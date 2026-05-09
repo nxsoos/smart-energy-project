@@ -60,13 +60,13 @@
     "contact": { "label": "Contact", "title": "Get In Touch." }
   },
   "features": [
-    { "title": "Energy Optimization", "icon": "bolt", "description": "AI balances demand, schedules high-load devices, and reduces waste before it becomes visible on the bill." },
-    { "title": "Occupancy Awareness", "icon": "eye", "description": "PIR-driven intelligence adapts lighting and appliance behavior to actual room presence, not assumptions." },
-    { "title": "Overload Protection", "icon": "shield", "description": "Current sensing detects abnormal load patterns and triggers protective relay actions before damage escalates." },
-    { "title": "Fire & Emergency", "icon": "flame", "description": "Smoke, heat, and risk signals converge into fast emergency response logic with decisive alerts." },
-    { "title": "AI Decision Engine", "icon": "cpu", "description": "A Python intelligence layer evaluates live sensor context and recommends safe, efficient control actions." },
-    { "title": "Real-Time Monitoring", "icon": "activity", "description": "Dashboard telemetry exposes energy use, room states, relay activity, and risk signals as they happen." },
-    { "title": "Predictive Safety", "icon": "radar", "description": "Pattern detection identifies early warning behavior, turning electrical safety from reactive to anticipatory." }
+    { "title": "Energy Optimization", "icon": "bolt", "description": "AI balances demand across connected loads and schedules high-consumption devices with precision. Waste is identified early, before it becomes visible on the bill." },
+    { "title": "Occupancy Awareness", "icon": "eye", "description": "PIR-driven intelligence reads actual room presence instead of relying on fixed assumptions. Lighting and appliance behavior adapt only when the space is occupied." },
+    { "title": "Overload Protection", "icon": "shield", "description": "Current sensing watches for abnormal load patterns in real time. Protective relay action can be triggered before stress becomes equipment damage." },
+    { "title": "Fire & Emergency", "icon": "flame", "description": "Smoke, heat, and risk signals converge into one emergency logic layer. The system prioritizes decisive alerts and fast protective response." },
+    { "title": "AI Decision Engine", "icon": "cpu", "description": "A Python intelligence layer evaluates live sensor context and operating state. It recommends safe, efficient control actions with machine-level consistency." },
+    { "title": "Real-Time Monitoring", "icon": "activity", "description": "Dashboard telemetry exposes energy use, room states, relay activity, and risk signals as they happen. Operators see the electrical environment without delay or guesswork." },
+    { "title": "Predictive Safety", "icon": "radar", "description": "Pattern detection identifies early warning behavior before it becomes a fault. Electrical safety shifts from reactive response to anticipatory control." }
   ],
   "architecture": [
     { "layer": "Physical Layer", "title": "Sensors", "items": ["PIR / Smoke", "Current / Temp"], "icon": "sensor" },

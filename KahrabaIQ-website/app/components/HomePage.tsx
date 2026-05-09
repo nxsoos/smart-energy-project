@@ -178,73 +178,82 @@ export default function HomePage({ content, locale }: { content: SiteContent; lo
   };
 
   useEffect(() => {
+    let active = true;
     let cleanup = () => {};
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return cleanup;
 
     import("gsap").then(({ gsap }) => {
       import("gsap/ScrollTrigger").then(({ ScrollTrigger }) => {
+        if (!active) return;
         gsap.registerPlugin(ScrollTrigger);
-        gsap.from(".hero-kicker, .hero-mark, .hero-copy, .hero-actions, .scroll-indicator", {
-          y: 26,
-          opacity: 0,
-          duration: 0.8,
-          stagger: 0.14,
-          ease: "power3.out",
-        });
-        gsap.from(".word", {
-          y: 34,
-          opacity: 0,
-          duration: 0.72,
-          stagger: 0.05,
-          delay: 0.35,
-          ease: "power3.out",
-        });
-        gsap.utils.toArray<HTMLElement>(".section-header").forEach((header) => {
-          gsap.from(header, {
-            scrollTrigger: { trigger: header, start: "top 85%" },
-            y: 42,
+
+        const context = gsap.context(() => {
+          gsap.from(".hero-kicker, .hero-mark, .hero-copy, .hero-actions, .scroll-indicator", {
+            y: 26,
             opacity: 0,
-            duration: 0.75,
+            duration: 0.8,
+            stagger: 0.14,
+            ease: "power3.out",
+          });
+          gsap.from(".word", {
+            y: 34,
+            opacity: 0,
+            duration: 0.72,
+            stagger: 0.05,
+            delay: 0.35,
+            ease: "power3.out",
+          });
+          gsap.utils.toArray<HTMLElement>(".section-header").forEach((header) => {
+            gsap.from(header, {
+              scrollTrigger: { trigger: header, start: "top 85%" },
+              y: 42,
+              opacity: 0,
+              duration: 0.75,
+              ease: "power3.out",
+            });
+          });
+          gsap.from(".feature-card", {
+            scrollTrigger: { trigger: ".features-grid", start: "top 80%" },
+            y: 46,
+            opacity: 0,
+            duration: 0.58,
+            stagger: 0.06,
+            ease: "power2.out",
+          });
+          gsap.from(".arch-node", {
+            scrollTrigger: { trigger: ".arch-diagram", start: "top 75%" },
+            scale: 0.92,
+            opacity: 0,
+            duration: 0.52,
+            stagger: 0.1,
+            ease: "power3.out",
+          });
+          gsap.from(".tech-pill", {
+            scrollTrigger: { trigger: ".tech-groups", start: "top 78%" },
+            scale: 0.9,
+            opacity: 0,
+            duration: 0.38,
+            stagger: 0.035,
+            ease: "power2.out",
+          });
+          gsap.from(".mockup-frame, .team-card, .contact-card, .contact-form", {
+            scrollTrigger: { trigger: ".showcase-grid", start: "top 80%" },
+            y: 34,
+            opacity: 0,
+            duration: 0.62,
+            stagger: 0.06,
             ease: "power3.out",
           });
         });
-        gsap.from(".feature-card", {
-          scrollTrigger: { trigger: ".features-grid", start: "top 80%" },
-          y: 46,
-          opacity: 0,
-          duration: 0.58,
-          stagger: 0.06,
-          ease: "power2.out",
-        });
-        gsap.from(".arch-node", {
-          scrollTrigger: { trigger: ".arch-diagram", start: "top 75%" },
-          scale: 0.92,
-          opacity: 0,
-          duration: 0.52,
-          stagger: 0.1,
-          ease: "power3.out",
-        });
-        gsap.from(".tech-pill", {
-          scrollTrigger: { trigger: ".tech-groups", start: "top 78%" },
-          scale: 0.9,
-          opacity: 0,
-          duration: 0.38,
-          stagger: 0.035,
-          ease: "power2.out",
-        });
-        gsap.from(".mockup-frame, .team-card, .contact-card, .contact-form", {
-          scrollTrigger: { trigger: ".showcase-grid", start: "top 80%" },
-          y: 34,
-          opacity: 0,
-          duration: 0.62,
-          stagger: 0.06,
-          ease: "power3.out",
-        });
-        cleanup = () => ScrollTrigger.getAll().forEach((trigger) => trigger.kill());
+
+        cleanup = () => context.revert();
       });
     });
-    return () => cleanup();
-  }, []);
+    return () => {
+      active = false;
+      cleanup();
+    };
+  }, [locale]);
 
   useEffect(() => {
     if (!window.matchMedia("(pointer: fine)").matches) return;
