@@ -499,6 +499,18 @@ def ha_entity_for_device(device_id: str, device: dict[str, Any]) -> str:
     return os.environ.get(env_key, "").strip() if env_key else ""
 
 
+def log_ha_config(device_id: str, entity_id: str) -> None:
+    env_key = HA_ENTITY_ENV.get(device_id, "")
+    print(
+        "[LOCAL HA DEBUG] "
+        f"device={device_id} env_key={env_key or '<none>'} "
+        f"entity={entity_id or '<missing>'} "
+        f"ha_url_configured={bool(os.environ.get('HOME_ASSISTANT_URL', '').strip())} "
+        f"ha_token_configured={bool(os.environ.get('HOME_ASSISTANT_TOKEN', '').strip())}",
+        flush=True,
+    )
+
+
 def sync_home_assistant_device_states(force: bool = False) -> None:
     global _LAST_HA_STATE_SYNC_MS
 
@@ -587,6 +599,7 @@ def sync_home_assistant_device_states(force: bool = False) -> None:
 def execute_ha_command(device_id: str, action: str, command: dict[str, Any]) -> tuple[bool, bool]:
     device = as_dict(local_ref(f"devices/{device_id}").get())
     entity_id = ha_entity_for_device(device_id, device)
+    log_ha_config(device_id, entity_id)
     if not entity_id:
         raise HomeAssistantError(
             "HA_ENTITY_NOT_FOUND",
@@ -595,7 +608,16 @@ def execute_ha_command(device_id: str, action: str, command: dict[str, Any]) -> 
         )
 
     target_state = target_state_for_action(action)
+    print(
+        f"[LOCAL HA DEBUG] command={command.get('command_id')} "
+        f"device={device_id} action={action} target={target_state} entity={entity_id}",
+        flush=True,
+    )
     current_state = get_entity_state(entity_id)
+    print(
+        f"[LOCAL HA DEBUG] current_state device={device_id} entity={entity_id} state={current_state}",
+        flush=True,
+    )
     if current_state == target_state:
         mark_command_done(device_id, command, action == "turn_on", no_action=True)
         return True, True
@@ -604,6 +626,10 @@ def execute_ha_command(device_id: str, action: str, command: dict[str, Any]) -> 
     execute_home_assistant_command(entity_id, action)
     time.sleep(LOCAL_COMMAND_VERIFY_DELAY_SECONDS)
     actual_state = get_entity_state(entity_id)
+    print(
+        f"[LOCAL HA DEBUG] verified_state device={device_id} entity={entity_id} state={actual_state}",
+        flush=True,
+    )
     if actual_state != target_state:
         raise HomeAssistantError(
             "HA_COMMAND_FAILED",
@@ -623,6 +649,8 @@ def execute_local_command(
     emergency: bool = False,
     alert_id: str | None = None,
 ) -> dict[str, Any]:
+    if device_id.startswith("matter_"):
+        sync_home_assistant_device_states(force=True)
     command = create_pending_command(
         device_id,
         action,

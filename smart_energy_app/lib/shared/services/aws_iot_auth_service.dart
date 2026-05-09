@@ -5,6 +5,7 @@ import 'package:amazon_cognito_identity_dart_2/cognito.dart';
 import 'package:aws_common/aws_common.dart';
 import 'package:aws_signature_v4/aws_signature_v4.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/user_permissions.dart';
 import '../../core/utils/constants.dart';
@@ -441,7 +442,12 @@ class AuthService {
         'user_message': null,
       },
     };
+    debugPrint(
+      '[KahrabaIQ REMOTE QUEUE] home=$homeId device=$deviceId '
+      'command=$normalizedCommand commandId=$commandId source=flutter_remote_dynamodb',
+    );
     await _putDynamoDbItem(item);
+    debugPrint('[KahrabaIQ REMOTE QUEUE OK] commandId=$commandId');
     return {
       'success': true,
       'status': 'pending',

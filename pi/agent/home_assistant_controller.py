@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -8,6 +9,10 @@ import requests
 
 
 HA_TIMEOUT_SECONDS = float(os.environ.get("HOME_ASSISTANT_TIMEOUT_SECONDS", "5"))
+
+
+def _log(message: str) -> None:
+    print(f"[HOME ASSISTANT] {datetime.now().isoformat()} {message}", flush=True)
 
 
 class HomeAssistantError(RuntimeError):
@@ -49,6 +54,7 @@ def _headers() -> dict[str, str]:
 
 def _request(method: str, path: str, *, json: dict[str, Any] | None = None) -> Any:
     url = f"{_home_assistant_url()}{path}"
+    _log(f"{method} {url} body={json or {}}")
     try:
         response = requests.request(
             method,
@@ -71,17 +77,20 @@ def _request(method: str, path: str, *, json: dict[str, Any] | None = None) -> A
         ) from error
 
     if response.status_code == 404:
+        _log(f"{method} {url} -> 404 {response.text[:500]}")
         raise HomeAssistantError(
             "HA_ENTITY_NOT_FOUND",
             "Matter switch was not found in Home Assistant.",
             response.text,
         )
     if not response.ok:
+        _log(f"{method} {url} -> {response.status_code} {response.text[:500]}")
         raise HomeAssistantError(
             "HA_COMMAND_FAILED",
             "Matter switch command failed. Please try again.",
             response.text,
         )
+    _log(f"{method} {url} -> {response.status_code}")
     if not response.content:
         return {}
     try:

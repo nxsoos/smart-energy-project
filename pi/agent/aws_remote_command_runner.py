@@ -92,11 +92,20 @@ def query_pending_commands() -> list[dict[str, Any]]:
         data = response.json()
         if not response.ok or data.get("success") is False:
             raise RuntimeError(data.get("detail") or data.get("message") or response.text)
-        return [
+        commands = [
             item
             for item in data.get("commands") or []
             if isinstance(item, dict) and str(item.get("status")) == "pending"
         ]
+        if commands:
+            log(
+                "Fetched pending command(s) from EC2: "
+                + ", ".join(
+                    f"{item.get('command_id') or item.get('commandId')}:{item.get('device_id') or item.get('deviceId')}:{item.get('command') or item.get('action')}"
+                    for item in commands
+                )
+            )
+        return commands
 
     response = table().query(
         KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
@@ -108,7 +117,16 @@ def query_pending_commands() -> list[dict[str, Any]]:
         Limit=max(1, min(REMOTE_COMMAND_QUERY_LIMIT, 100)),
     )
     items = [from_dynamodb(item) for item in response.get("Items", [])]
-    return [item for item in items if str(item.get("status")) == "pending"]
+    commands = [item for item in items if str(item.get("status")) == "pending"]
+    if commands:
+        log(
+            "Fetched pending command(s) from DynamoDB: "
+            + ", ".join(
+                f"{item.get('command_id') or item.get('commandId')}:{item.get('device_id') or item.get('deviceId')}:{item.get('command') or item.get('action')}"
+                for item in commands
+            )
+        )
+    return commands
 
 
 def write_command(command: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
@@ -259,8 +277,15 @@ def process_command(command: dict[str, Any]) -> None:
     device_id = str(command.get("device_id") or command.get("deviceId") or "").strip()
     action = str(command.get("command") or command.get("action") or "").strip().lower()
     command_id = str(command.get("command_id") or command.get("commandId") or "")
+    log(
+        "Received command "
+        f"id={command_id or '<missing>'} device={device_id or '<missing>'} "
+        f"action={action or '<missing>'} source={command.get('source')} "
+        f"requested_by={command.get('requested_by') or command.get('requestedBy')}"
+    )
 
     if device_id not in ALLOWED_DEVICES or action not in ALLOWED_COMMANDS:
+        log(f"Rejecting unsupported command id={command_id}: {device_id} {action}")
         mark_failed(command, f"Unsupported remote command: {device_id} {action}")
         return
 

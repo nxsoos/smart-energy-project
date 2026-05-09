@@ -730,6 +730,7 @@ class KahrabaIqApiService {
   }
 
   Device _parseAwsIotLiveDevice(String deviceId, Map<String, dynamic> data) {
+    final metering = _asMap(data['metering']);
     final state = _asString(
       _pick(data, ['state', 'displayState']),
     ).toLowerCase();
@@ -754,7 +755,10 @@ class KahrabaIqApiService {
       type: _parseApiDeviceType(deviceId, name, rawType),
       isOn: isOn,
       currentPower: online
-          ? _asDouble(_pick(data, ['powerW', 'power_w', 'currentPower']))
+          ? _asDouble(
+              _pick(data, ['powerW', 'power_w', 'power_W', 'currentPower']) ??
+                  _pick(metering, ['power_W', 'power_w', 'power']),
+            )
           : 0,
       branch: _asString(
         _pick(data, ['branch', 'zone']),
@@ -774,10 +778,23 @@ class KahrabaIqApiService {
         _pick(data, ['energySupported', 'energy_supported']),
         fallback: true,
       ),
-      voltage: _asDouble(_pick(data, ['voltageV', 'voltage_v', 'voltage'])),
-      current: _asDouble(_pick(data, ['currentA', 'current_a', 'current'])),
+      voltage: _asDouble(
+        _pick(data, ['voltageV', 'voltage_v', 'voltage_V', 'voltage']) ??
+            _pick(metering, ['voltage_V', 'voltage_v', 'voltage']),
+      ),
+      current: _asDouble(
+        _pick(data, ['currentA', 'current_a', 'current_A', 'current']) ??
+            _pick(metering, ['current_A', 'current_a', 'current']),
+      ),
       energyToday: _asDouble(
-        _pick(data, ['energyKwh', 'energy_kwh', 'energyToday', 'today_kwh']),
+        _pick(data, [
+              'energyKwh',
+              'energy_kwh',
+              'energy_kWh',
+              'energyToday',
+              'today_kwh',
+            ]) ??
+            _pick(metering, ['energy_kWh', 'energy_kwh', 'energyToday']),
       ),
       controlMethod: _asNullableString(
         _pick(data, ['controlMethod', 'control_method']),

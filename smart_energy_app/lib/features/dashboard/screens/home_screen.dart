@@ -241,6 +241,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _toggleDevice(Device device, bool value) async {
     final action = value ? 'turn_on' : 'turn_off';
+    debugPrint(
+      '[KahrabaIQ COMMAND TAP] device=${device.id} '
+      'name=${device.name} action=$action '
+      'control=${device.controlMethod ?? 'unknown'} '
+      'home=${_homeId ?? NetworkConfig.defaultHomeId} '
+      'online=${device.online} local=${device.localOnline} cloud=${device.cloudOnline}',
+    );
     setState(() {
       _localPendingCommands.add(device.id);
       _localCommandErrors.remove(device.id);
@@ -254,12 +261,20 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) {
         return;
       }
+      debugPrint(
+        '[KahrabaIQ COMMAND QUEUED] device=${device.id} action=$action '
+        'success=${result.success} status=${result.status} '
+        'commandId=${result.commandId} message=${result.message}',
+      );
       if (!result.success) {
         setState(() {
           _localCommandErrors[device.id] = result.message;
         });
       }
     } catch (error) {
+      debugPrint(
+        '[KahrabaIQ COMMAND ERROR] device=${device.id} action=$action error=$error',
+      );
       if (!mounted) {
         return;
       }
