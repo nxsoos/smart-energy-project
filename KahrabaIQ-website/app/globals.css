@@ -59,6 +59,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+body :is(h1, h2, h3, p, a, button, label, span, strong, input, textarea) {
+  filter: none !important;
+  text-shadow: none !important;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
 img,
 svg,
 canvas,
@@ -951,7 +958,7 @@ button {
 
 .scroll-indicator {
   position: absolute;
-  bottom: max(1.5rem, env(safe-area-inset-bottom));
+  bottom: max(0.75rem, env(safe-area-inset-bottom));
   left: 50%;
   display: grid;
   justify-items: center;
@@ -2694,14 +2701,14 @@ a.repo-link:hover::before {
   }
 
   .navbar {
-    top: 0.6rem;
+    top: 0.45rem;
     right: 0.75rem;
     left: 0.75rem;
     align-items: center;
-    gap: 0.45rem;
-    min-height: 2.75rem;
-    padding: 0.24rem 0.5rem;
-    border-radius: 0.8rem;
+    gap: 0.35rem;
+    min-height: 2.35rem;
+    padding: 0.16rem 0.42rem;
+    border-radius: 0.65rem;
     background: rgba(10, 10, 10, 0.94);
     backdrop-filter: none;
     box-shadow: 0 0.75rem 1.8rem rgba(0, 0, 0, 0.5), 0 0 0.85rem rgba(255, 45, 45, 0.08);
@@ -2714,31 +2721,31 @@ a.repo-link:hover::before {
   }
 
   .brand {
-    min-height: 2.15rem;
+    min-height: 1.95rem;
   }
 
   .brand-wordmark {
-    width: clamp(5.35rem, 26vw, 6.45rem);
+    width: clamp(5rem, 24vw, 6rem);
   }
 
   .menu-toggle {
-    width: 2rem;
-    height: 2rem;
-    gap: 0.22rem;
-    border-radius: 0.5rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    gap: 0.18rem;
+    border-radius: 0.45rem;
   }
 
   .menu-toggle span {
-    width: 0.95rem;
+    width: 0.85rem;
     height: 0.0875rem;
   }
 
   .navbar.menu-open .menu-toggle span:nth-child(1) {
-    transform: translateY(0.31rem) rotate(45deg);
+    transform: translateY(0.27rem) rotate(45deg);
   }
 
   .navbar.menu-open .menu-toggle span:nth-child(3) {
-    transform: translateY(-0.31rem) rotate(-45deg);
+    transform: translateY(-0.27rem) rotate(-45deg);
   }
 
   .brand:hover,
@@ -2785,19 +2792,19 @@ a.repo-link:hover::before {
   }
 
   .navbar.menu-open .nav-links {
-    padding-top: 0.45rem;
-    padding-bottom: 0.15rem;
+    padding-top: 0.35rem;
+    padding-bottom: 0.1rem;
   }
 
   .nav-links button {
-    min-height: 2.3rem;
-    padding: 0.55rem 0.7rem;
-    font-size: 0.75rem;
+    min-height: 2.1rem;
+    padding: 0.45rem 0.62rem;
+    font-size: 0.72rem;
   }
 
   .navbar.menu-open .locale-tabs {
-    max-height: 3rem;
-    padding: 0.18rem;
+    max-height: 2.6rem;
+    padding: 0.12rem;
   }
 
   .hero {
@@ -2805,13 +2812,37 @@ a.repo-link:hover::before {
     padding-bottom: 3.5rem;
   }
 
+  .hero-content {
+    position: relative;
+    z-index: 1;
+    opacity: 1;
+    filter: none;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: geometricPrecision;
+  }
+
   .hero-kicker {
-    color: var(--chrome);
+    color: var(--chrome-bright);
+    font-size: clamp(0.72rem, 2.7vw, 0.82rem);
+    font-weight: 700;
+    letter-spacing: 0.16em;
+  }
+
+  .hero-mark div {
+    text-shadow: 0 0 0.75rem rgba(255, 45, 45, 0.18);
+  }
+
+  .hero-mark .icon {
+    filter: drop-shadow(0 0 0.25rem rgba(255, 45, 45, 0.58));
   }
 
   .hero-title {
     color: var(--text-primary);
-    text-shadow: 0 0 1.8rem rgba(255, 45, 45, 0.2);
+    font-size: clamp(2.3rem, 9vw, 3.65rem);
+    font-weight: 800;
+    letter-spacing: -0.025em;
+    line-height: 1.12;
+    text-shadow: 0 0 0.75rem rgba(255, 45, 45, 0.16);
   }
 
   .hero-title .word:nth-child(n + 5) {
@@ -2819,16 +2850,64 @@ a.repo-link:hover::before {
   }
 
   .hero-copy {
-    color: rgba(232, 234, 237, 0.9);
-    font-size: clamp(0.98rem, 4vw, 1.08rem);
+    color: rgba(232, 234, 237, 0.94);
+    font-size: clamp(1.02rem, 4vw, 1.12rem);
+    font-weight: 500;
+    line-height: 1.72;
   }
 
   .hero-grid {
-    opacity: 0.28;
+    opacity: 0.1;
+    transform: perspective(37.5rem) rotateX(48deg) scale(1.08);
   }
 
   .hero-identity-img {
-    filter: drop-shadow(0 0 1.4rem rgba(255, 45, 45, 0.12));
+    width: min(24rem, 84vw);
+    filter: drop-shadow(0 0 0.45rem rgba(255, 45, 45, 0.18));
+  }
+
+  .strip-wrap {
+    backdrop-filter: none;
+    gap: 0.6rem;
+    border: 0;
+    background: transparent;
+  }
+
+  .strip-item {
+    min-height: 7.75rem;
+    padding: 1.15rem 0.65rem;
+    border: 0.0625rem solid rgba(255, 255, 255, 0.12);
+    border-radius: 0.85rem;
+    background: rgba(17, 17, 17, 0.92);
+    box-shadow: 0 0.75rem 1.4rem rgba(0, 0, 0, 0.28), inset 0 0 0 0.0625rem rgba(255, 45, 45, 0.06);
+  }
+
+  .strip-icon {
+    width: clamp(2.35rem, 9vw, 2.85rem);
+    height: clamp(2.35rem, 9vw, 2.85rem);
+  }
+
+  .strip-icon .icon {
+    stroke-width: 1.85;
+  }
+
+  .strip-label {
+    color: rgba(255, 255, 255, 0.76);
+    font-size: clamp(0.62rem, 2.65vw, 0.76rem);
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    line-height: 1.45;
+  }
+
+  .i-energy .icon,
+  .i-occupancy .icon,
+  .i-overload .icon,
+  .i-fire .icon,
+  .i-ai .icon,
+  .i-monitor .icon,
+  .i-predict .icon,
+  .i-schedule .icon {
+    filter: drop-shadow(0 0 0.25rem currentColor);
   }
 
   .footer {
@@ -2844,6 +2923,10 @@ a.repo-link:hover::before {
   .footer-brand-panel {
     justify-items: center;
     text-align: center;
+  }
+
+  .footer-brand .brand-wordmark {
+    width: clamp(8rem, 44vw, 11rem);
   }
 
   .footer-bottom {
@@ -3099,11 +3182,19 @@ a.repo-link:hover::before {
   }
 
   .hero-title {
-    font-size: clamp(1.8rem, 12vw, 2.55rem);
+    font-size: clamp(2rem, 12vw, 2.75rem);
   }
 
   .hero-copy {
-    font-size: 0.95rem;
+    font-size: 1rem;
+  }
+
+  .hero-kicker {
+    letter-spacing: 0.12em;
+  }
+
+  .strip-item {
+    min-height: 7.25rem;
   }
 
   .button {
@@ -3145,17 +3236,21 @@ a.repo-link:hover::before {
   .navbar {
     right: 0.55rem;
     left: 0.55rem;
-    padding-left: 0.45rem;
-    padding-right: 0.45rem;
+    padding-left: 0.38rem;
+    padding-right: 0.38rem;
   }
 
   .brand-wordmark {
-    width: clamp(5rem, 32vw, 5.9rem);
+    width: clamp(4.75rem, 30vw, 5.55rem);
+  }
+
+  .footer-brand .brand-wordmark {
+    width: clamp(8.5rem, 52vw, 10.5rem);
   }
 
   .menu-toggle {
-    width: 1.95rem;
-    height: 1.95rem;
+    width: 1.75rem;
+    height: 1.75rem;
   }
 }
 
