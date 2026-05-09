@@ -7,15 +7,15 @@ function ArchitectureNetwork({ content }: { content: SiteContent["architectureNe
     <div className="architecture-network">
       <svg className="network-lines" viewBox="0 0 1000 560" preserveAspectRatio="none" aria-hidden="true">
         <ellipse className="network-orbit" cx="500" cy="280" rx="335" ry="210" />
-        <path className="network-path p-top-left" d="M500 280 C410 250 330 178 215 112" />
-        <path className="network-path p-top" d="M500 280 C500 222 500 158 500 82" />
-        <path className="network-path p-top-right" d="M500 280 C590 250 670 178 785 112" />
-        <path className="network-path p-left" d="M500 280 C390 272 282 255 165 238" />
-        <path className="network-path p-right" d="M500 280 C610 272 718 255 835 238" />
-        <path className="network-path p-bottom-left" d="M500 280 C405 322 318 390 220 462" />
-        <path className="network-path p-bottom" d="M500 280 C500 348 500 416 500 490" />
-        <path className="network-path p-bottom-right" d="M500 280 C595 322 682 390 780 462" />
-        <path className="network-path p-lower" d="M500 280 C610 304 720 326 835 360" />
+        <path className="network-path p-top-left" d="M500 280 C430 245 330 170 210 92" />
+        <path className="network-path p-top" d="M500 280 C500 220 500 150 500 82" />
+        <path className="network-path p-top-right" d="M500 280 C570 245 670 170 790 92" />
+        <path className="network-path p-left" d="M500 280 C405 280 300 280 180 280" />
+        <path className="network-path p-right" d="M500 280 C595 280 700 280 820 280" />
+        <path className="network-path p-bottom-left" d="M500 280 C425 328 328 385 220 430" />
+        <path className="network-path p-bottom" d="M500 280 C500 350 500 430 500 505" />
+        <path className="network-path p-bottom-right" d="M500 280 C575 328 672 385 780 430" />
+        <path className="network-path p-lower" d="M500 280 C560 342 650 388 735 430" />
       </svg>
       <div className="network-core">
         <Icon name={content.center.icon as IconName} />
