@@ -6,7 +6,7 @@ import '../../../core/theme/app_text_styles.dart';
 import '../../../core/theme/color_tokens.dart';
 
 /// Auth tab mode.
-enum AuthMode { login, signup }
+enum AuthMode { login, signup, verifySignup }
 
 /// Sign-in/create-account tab selector.
 class AuthModeTabs extends StatelessWidget {
@@ -17,6 +17,7 @@ class AuthModeTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final selectedMode = mode == AuthMode.verifySignup ? AuthMode.signup : mode;
     return Container(
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
@@ -25,15 +26,15 @@ class AuthModeTabs extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _tab('Sign in', AuthMode.login),
-          _tab('Create account', AuthMode.signup),
+          _tab('Sign in', AuthMode.login, selectedMode),
+          _tab('Create account', AuthMode.signup, selectedMode),
         ],
       ),
     );
   }
 
-  Widget _tab(String label, AuthMode value) {
-    final selected = mode == value;
+  Widget _tab(String label, AuthMode value, AuthMode selectedMode) {
+    final selected = selectedMode == value;
     return Expanded(
       child: GestureDetector(
         onTap: () => onChanged(value),

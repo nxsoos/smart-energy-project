@@ -21,10 +21,14 @@ class _AuthScreenState extends State<AuthScreen>
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _verificationCodeController =
+      TextEditingController();
   late final AnimationController _logoController;
   AuthMode _mode = AuthMode.login;
   bool _isBusy = false;
   String? _message;
+  String? _pendingVerificationEmail;
+  String? _pendingVerificationPassword;
 
   @override
   void initState() {
@@ -41,12 +45,18 @@ class _AuthScreenState extends State<AuthScreen>
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _verificationCodeController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final isSignup = _mode == AuthMode.signup;
+    final isVerifying = _mode == AuthMode.verifySignup;
+    final title = isVerifying ? 'Verify your email' : 'Welcome to KahrabaIQ';
+    final subtitle = isVerifying
+        ? 'Enter the code sent to ${_pendingVerificationEmail ?? 'your email'}.'
+        : 'AI-Powered Smart Energy Control';
     return Scaffold(
       body: SafeArea(
         child: Container(
@@ -70,45 +80,57 @@ class _AuthScreenState extends State<AuthScreen>
                       AuthAnimatedLogo(controller: _logoController),
                       const SizedBox(height: 24),
                       Text(
-                        'Welcome to KahrabaIQ',
+                        title,
                         style: AppTextStyles.h1,
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'AI-Powered Smart Energy Control',
+                        subtitle,
                         style: AppTextStyles.body.copyWith(
                           color: ColorTokens.textSecondary,
                         ),
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 28),
-                      AuthModeTabs(
-                        mode: _mode,
-                        onChanged: (mode) => setState(() => _mode = mode),
-                      ),
-                      const SizedBox(height: 18),
-                      if (isSignup) ...[
+                      if (!isVerifying) ...[
+                        AuthModeTabs(
+                          mode: _mode,
+                          onChanged: (mode) => setState(() {
+                            _mode = mode;
+                            _message = null;
+                          }),
+                        ),
+                        const SizedBox(height: 18),
+                        if (isSignup) ...[
+                          AuthField(
+                            controller: _nameController,
+                            label: 'Name',
+                            icon: Icons.person_outline,
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         AuthField(
-                          controller: _nameController,
-                          label: 'Name',
-                          icon: Icons.person_outline,
+                          controller: _emailController,
+                          label: 'Email',
+                          icon: Icons.email_outlined,
+                          keyboardType: TextInputType.emailAddress,
                         ),
                         const SizedBox(height: 12),
+                        AuthField(
+                          controller: _passwordController,
+                          label: 'Password',
+                          icon: Icons.lock_outline,
+                          obscureText: true,
+                        ),
+                      ] else ...[
+                        AuthField(
+                          controller: _verificationCodeController,
+                          label: 'Verification code',
+                          icon: Icons.verified_user_outlined,
+                          keyboardType: TextInputType.number,
+                        ),
                       ],
-                      AuthField(
-                        controller: _emailController,
-                        label: 'Email',
-                        icon: Icons.email_outlined,
-                        keyboardType: TextInputType.emailAddress,
-                      ),
-                      const SizedBox(height: 12),
-                      AuthField(
-                        controller: _passwordController,
-                        label: 'Password',
-                        icon: Icons.lock_outline,
-                        obscureText: true,
-                      ),
                       if (_message != null) ...[
                         const SizedBox(height: 14),
                         Text(
@@ -121,10 +143,30 @@ class _AuthScreenState extends State<AuthScreen>
                       ],
                       const SizedBox(height: 18),
                       AuthGradientButton(
-                        label: isSignup ? 'Create account' : 'Sign in',
+                        label: isVerifying
+                            ? 'Verify account'
+                            : isSignup
+                            ? 'Create account'
+                            : 'Sign in',
                         isBusy: _isBusy,
                         onPressed: _submit,
                       ),
+                      if (isVerifying) ...[
+                        const SizedBox(height: 12),
+                        TextButton(
+                          onPressed: _isBusy ? null : _resendVerificationCode,
+                          child: const Text('Resend code'),
+                        ),
+                        TextButton(
+                          onPressed: _isBusy
+                              ? null
+                              : () => setState(() {
+                                  _mode = AuthMode.signup;
+                                  _message = null;
+                                }),
+                          child: const Text('Use a different email'),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -145,16 +187,41 @@ class _AuthScreenState extends State<AuthScreen>
       _message = null;
     });
     try {
-      if (_mode == AuthMode.signup) {
-        await _authService.signUp(
+      if (_mode == AuthMode.verifySignup) {
+        final email = _pendingVerificationEmail ?? _emailController.text.trim();
+        final password =
+            _pendingVerificationPassword ?? _passwordController.text;
+        await _authService.confirmSignUp(
+          email: email,
+          code: _verificationCodeController.text.trim(),
+        );
+        if (password.isNotEmpty) {
+          await _authService.signIn(email: email, password: password);
+        } else {
+          setState(() {
+            _mode = AuthMode.login;
+            _message = 'Account verified. Sign in to continue.';
+          });
+        }
+      } else if (_mode == AuthMode.signup) {
+        final email = _emailController.text.trim();
+        final password = _passwordController.text;
+        final result = await _authService.signUp(
           name: _nameController.text.trim(),
-          email: _emailController.text.trim(),
-          password: _passwordController.text,
+          email: email,
+          password: password,
         );
-        setState(
-          () => _message =
-              'Account created. Check your email if verification is required, then sign in.',
-        );
+        if (result.userConfirmed) {
+          await _authService.signIn(email: email, password: password);
+        } else {
+          setState(() {
+            _mode = AuthMode.verifySignup;
+            _pendingVerificationEmail = email;
+            _pendingVerificationPassword = password;
+            _verificationCodeController.clear();
+            _message = 'Enter the verification code sent to your email.';
+          });
+        }
       } else {
         await _authService.signIn(
           email: _emailController.text.trim(),
@@ -170,9 +237,37 @@ class _AuthScreenState extends State<AuthScreen>
     }
   }
 
+  Future<void> _resendVerificationCode() async {
+    final email = _pendingVerificationEmail ?? _emailController.text.trim();
+    if (email.isEmpty || _isBusy) {
+      return;
+    }
+    setState(() {
+      _isBusy = true;
+      _message = null;
+    });
+    try {
+      await _authService.resendSignUpCode(email);
+      setState(() => _message = 'A new verification code was sent.');
+    } catch (error) {
+      setState(() => _message = _friendlyAuthError(error));
+    } finally {
+      if (mounted) {
+        setState(() => _isBusy = false);
+      }
+    }
+  }
+
   String _friendlyAuthError(Object error) {
     if (error is CognitoUserConfirmationNecessaryException) {
-      return 'Confirm your email, then sign in again.';
+      final email = _emailController.text.trim();
+      if (email.isNotEmpty) {
+        _pendingVerificationEmail = email;
+        _pendingVerificationPassword = _passwordController.text;
+        _verificationCodeController.clear();
+        _mode = AuthMode.verifySignup;
+      }
+      return 'Enter the verification code sent to your email.';
     }
     if (error is CognitoClientException) {
       return error.message ?? 'Authentication failed: ${error.code}';
