@@ -941,6 +941,17 @@ class _AiAnalysisSection extends StatelessWidget {
     return '${item.title}: ${item.message}$confidence';
   }
 
+  String get _scenarioSourceLabel {
+    if (dashboard.scenarioId == null) {
+      return '';
+    }
+    final label = dashboard.settingsSummary['scenario_ai_source_label'];
+    if (label is String && label.trim().isNotEmpty) {
+      return label;
+    }
+    return 'Using local demo fallback';
+  }
+
   @override
   Widget build(BuildContext context) {
     final ai = dashboard.aiDashboard;
@@ -993,21 +1004,49 @@ class _AiAnalysisSection extends StatelessWidget {
           ),
           if (dashboard.scenarioId != null) ...[
             const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: ColorTokens.warning.withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(
-                  color: ColorTokens.warning.withValues(alpha: 0.45),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: ColorTokens.warning.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: ColorTokens.warning.withValues(alpha: 0.45),
+                    ),
+                  ),
+                  child: Text(
+                    'Simulation Mode: ${dashboard.scenarioName ?? 'Demo Scenario'}',
+                    style: AppTextStyles.caption.copyWith(
+                      color: ColorTokens.warning,
+                    ),
+                  ),
                 ),
-              ),
-              child: Text(
-                'Simulation Mode: ${dashboard.scenarioName ?? 'Demo Scenario'}',
-                style: AppTextStyles.caption.copyWith(
-                  color: ColorTokens.warning,
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: ColorTokens.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: ColorTokens.primary.withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Text(
+                    _scenarioSourceLabel,
+                    style: AppTextStyles.caption.copyWith(
+                      color: ColorTokens.primary,
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
           ],
           const SizedBox(height: 14),

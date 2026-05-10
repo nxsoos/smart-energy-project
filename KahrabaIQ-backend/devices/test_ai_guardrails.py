@@ -13,6 +13,7 @@ from api_server import (
     AiScenarioPredictRequest,
     ai_notification,
     build_ai_payload_from_scenario,
+    apply_scenario_next_hour_fallback,
     run_immediate_safety_checks,
     run_lightweight_anomaly_checks,
     summary_energy_value,
@@ -160,6 +161,14 @@ def run() -> None:
     check("scenario input source is demo", scenario_source == "demo_scenario:smoke_demo")
     check("scenario smoke maps to smoke count", scenario_payload["smoke_count"] == 1.0)
     check("scenario does not require live store", scenario_payload["latest_control_mode"] == "demo")
+
+    scenario_result = {"next_hour_energy": 0, "next_hour_cost": 0, "predictions": {}}
+    apply_scenario_next_hour_fallback(
+        scenario_result,
+        {"total_power_for_guardrails_W": 1280, "tariff_BHD_per_kWh": 0.032},
+    )
+    check("scenario fallback predicts kWh from power", scenario_result["next_hour_energy"] == 1.28)
+    check("scenario fallback predicts cost from tariff", scenario_result["next_hour_cost"] == 0.04096)
 
 
 if __name__ == "__main__":

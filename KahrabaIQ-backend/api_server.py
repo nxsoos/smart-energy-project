@@ -6365,6 +6365,149 @@ def mark_scenario_ai_output(value: Any) -> Any:
     return value
 
 
+SCENARIO_AI_MESSAGES: dict[str, dict[str, str]] = {
+    "ac_left_on_empty": {
+        "severity": "high",
+        "category": "energy",
+        "title": "AC appears left on",
+        "message": "AC is drawing high power while no recent motion is detected.",
+        "recommendation": "Turn off the AC or enable automatic control if the room is empty.",
+        "recommendation_type": "turn_off_ac",
+        "status_label": "Likely Waste",
+        "status_tone": "danger",
+        "action_title": "Turn off AC",
+        "anomaly": "ac_left_on_without_occupancy",
+        "device_id": "breaker_02",
+    },
+    "socket_left_on": {
+        "severity": "medium",
+        "category": "recommendation",
+        "title": "Socket may be left on",
+        "message": "Socket breaker is active while the home appears empty.",
+        "recommendation": "Review the socket load and turn it off if it is not needed.",
+        "recommendation_type": "turn_off_socket",
+        "status_label": "Possible Waste",
+        "status_tone": "warning",
+        "action_title": "Turn off socket",
+        "anomaly": "socket_left_on_without_occupancy",
+        "device_id": "breaker_01",
+    },
+    "unusual_ac_routine": {
+        "severity": "medium",
+        "category": "routine",
+        "title": "Unusual AC routine detected",
+        "message": "AC is active outside the usual weekday pattern.",
+        "recommendation": "Confirm whether the AC should stay on or adjust the AC schedule.",
+        "recommendation_type": "review_ac_schedule",
+        "status_label": "Unusual Routine",
+        "status_tone": "warning",
+        "action_title": "Confirm AC use",
+        "anomaly": "ac_outside_weekday_routine",
+        "device_id": "breaker_02",
+    },
+    "high_energy_consumption": {
+        "severity": "medium",
+        "category": "anomaly",
+        "title": "High energy consumption detected",
+        "message": "Current power is higher than the normal same-hour pattern.",
+        "recommendation": "Check the AC and socket breakers for unnecessary load.",
+        "recommendation_type": "review_unusual_energy_usage",
+        "status_label": "Anomaly",
+        "status_tone": "warning",
+        "action_title": "Inspect breakers",
+        "anomaly": "same_hour_energy_spike",
+    },
+    "smoke_gas_safety": {
+        "severity": "critical",
+        "category": "safety",
+        "title": "Critical safety alert",
+        "message": "Smoke or gas is detected in the room.",
+        "recommendation": "Check the room immediately and turn off affected devices if safe.",
+        "recommendation_type": "check_smoke_gas_sensor",
+        "status_label": "Critical Safety",
+        "status_tone": "critical",
+        "action_title": "Check room now",
+        "anomaly": "safety_smoke_gas_warning",
+    },
+    "stale_sensor_breaker": {
+        "severity": "medium",
+        "category": "system",
+        "title": "Fresh data needed",
+        "message": "Sensor or breaker readings are stale, so AI confidence is reduced.",
+        "recommendation": "Check the ESP32, Pi agent, and breaker connection.",
+        "recommendation_type": "check_sensor_breaker_data",
+        "status_label": "Needs Data",
+        "status_tone": "warning",
+        "action_title": "Check connections",
+        "anomaly": "stale_sensor_breaker_data",
+    },
+}
+
+
+def apply_scenario_next_hour_fallback(ai_result: dict[str, Any], payload: dict[str, Any]) -> None:
+    total_power_w = as_number(payload.get("total_power_for_guardrails_W"), as_number(payload.get("total_avg_power_W")))
+    tariff = as_number(payload.get("tariff_BHD_per_kWh"), 0.032)
+    fallback_energy = round(max(0.0, total_power_w) / 1000.0, 6)
+    fallback_cost = round(fallback_energy * tariff, 6)
+    current_energy = as_number(first_present(ai_result.get("next_hour_energy"), ai_result.get("next_hour_total_energy_kWh")), 0)
+    if fallback_energy > 0 and current_energy <= 0:
+        ai_result["next_hour_energy"] = fallback_energy
+        ai_result["next_hour_cost"] = fallback_cost
+    else:
+        ai_result["next_hour_energy"] = current_energy
+        ai_result["next_hour_cost"] = as_number(first_present(ai_result.get("next_hour_cost"), ai_result.get("next_hour_total_cost_BHD")), fallback_cost)
+    ai_result["next_hour_total_energy_kWh"] = ai_result["next_hour_energy"]
+    ai_result["next_hour_total_cost_BHD"] = ai_result["next_hour_cost"]
+    predictions = as_dict(ai_result.get("predictions"))
+    predictions["next_hour_total_energy_kWh"] = {
+        **as_dict(predictions.get("next_hour_total_energy_kWh")),
+        "value": ai_result["next_hour_energy"],
+    }
+    predictions["next_hour_total_cost_BHD"] = {
+        **as_dict(predictions.get("next_hour_total_cost_BHD")),
+        "value": ai_result["next_hour_cost"],
+    }
+    ai_result["predictions"] = predictions
+
+
+def scenario_specific_notification(home_id: str, scenario_id: str) -> dict[str, Any] | None:
+    spec = SCENARIO_AI_MESSAGES.get(scenario_id)
+    if not spec:
+        return None
+    return ai_notification(
+        home_id,
+        spec["severity"],
+        spec["category"],
+        spec["title"],
+        f"{spec['message']} {spec['recommendation']}",
+        device_id=spec.get("device_id"),
+        recommendation_type=spec.get("recommendation_type"),
+        confidence=0.92 if spec["severity"] in {"high", "critical"} else 0.86,
+        explanation=spec["recommendation"],
+        notification_id=f"scenario_{scenario_id}",
+    )
+
+
+def apply_scenario_ai_overrides(ai_result: dict[str, Any], request: AiScenarioPredictRequest) -> None:
+    spec = SCENARIO_AI_MESSAGES.get(request.scenario_id)
+    if not spec:
+        return
+    recommendation = spec["recommendation"]
+    message = spec["message"]
+    ai_result["abnormal_usage"] = spec["anomaly"]
+    ai_result["recommendation_type"] = spec["recommendation_type"]
+    ai_result["ai_status_label"] = spec["status_label"]
+    ai_result["ai_status_tone"] = spec["status_tone"]
+    ai_result["ai_status_summary"] = message
+    ai_result["ai_action_title"] = spec["action_title"]
+    ai_result["explanation"] = recommendation
+    predictions = as_dict(ai_result.get("predictions"))
+    predictions["anomaly_label"] = {"value": spec["anomaly"], "confidence": 0.9, "source": "scenario_ai_override"}
+    predictions["recommendation_type"] = {"value": spec["recommendation_type"], "confidence": 0.9, "source": "scenario_ai_override"}
+    predictions["explanation"] = recommendation
+    ai_result["predictions"] = predictions
+
+
 def run_scenario_ai_prediction(home_id: str, request: AiScenarioPredictRequest) -> dict[str, Any]:
     payload, input_source = build_ai_payload_from_scenario(home_id, request)
     safety_notifications = run_immediate_safety_checks(home_id, payload)
@@ -6389,6 +6532,8 @@ def run_scenario_ai_prediction(home_id: str, request: AiScenarioPredictRequest) 
         }
     ai_result = ai_engine.build_ai_result(home_id, payload, prediction, input_source, request.scenario_id)
     ai_result = apply_ec2_ai_routine_rules(ai_result, payload)
+    apply_scenario_ai_overrides(ai_result, request)
+    apply_scenario_next_hour_fallback(ai_result, payload)
     ai_result.update(
         {
             "simulation": True,
@@ -6401,7 +6546,13 @@ def run_scenario_ai_prediction(home_id: str, request: AiScenarioPredictRequest) 
             "levels_ran": ["immediate_safety", "lightweight_routine"] + (["full_ml"] if ml_ran else []),
         }
     )
-    notifications = dedupe_ai_notifications(safety_notifications + routine_notifications + build_ai_notifications(home_id, ai_result, payload))
+    scenario_notification = scenario_specific_notification(home_id, request.scenario_id)
+    notifications = dedupe_ai_notifications(
+        ([scenario_notification] if scenario_notification else [])
+        + safety_notifications
+        + routine_notifications
+        + build_ai_notifications(home_id, ai_result, payload)
+    )
     notifications = [dict(item, source="scenario_ai", simulation=True) for item in notifications]
     alerts = [item for item in notifications if item["severity"] in {"high", "critical"}]
     suggestions = [item for item in notifications if item["category"] == "recommendation"]
