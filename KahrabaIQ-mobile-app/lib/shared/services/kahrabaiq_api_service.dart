@@ -27,6 +27,7 @@ class DashboardData {
   final AiDailySummary? aiDailySummary;
   final AiRecommendation? aiRecommendation;
   final AiAlertInsight? aiAlert;
+  final List<AiNotification> aiNotifications;
   final ControlModeInfo control;
   final List<ActionSuggestion> actionSuggestions;
   final List<AutomationLog> automationLogs;
@@ -52,6 +53,7 @@ class DashboardData {
     this.aiDailySummary,
     this.aiRecommendation,
     this.aiAlert,
+    this.aiNotifications = const [],
     this.control = const ControlModeInfo(
       mode: 'assist',
       label: 'Assist',
@@ -70,6 +72,61 @@ class DashboardData {
     this.scenarioDescription,
     this.deviceControlEnabled = true,
   });
+
+  DashboardData copyWith({
+    EnergyReading? reading,
+    SensorData? sensors,
+    List<Device>? devices,
+    List<Alert>? alerts,
+    double? tariffBhdPerKwh,
+    Set<String>? pendingDeviceCommands,
+    Map<String, String>? deviceCommandErrors,
+    AiDashboardSummary? aiDashboard,
+    AiDailySummary? aiDailySummary,
+    AiRecommendation? aiRecommendation,
+    AiAlertInsight? aiAlert,
+    List<AiNotification>? aiNotifications,
+    ControlModeInfo? control,
+    List<ActionSuggestion>? actionSuggestions,
+    List<AutomationLog>? automationLogs,
+    Map<String, dynamic>? settingsSummary,
+    Map<String, dynamic>? occupancy,
+    Map<String, dynamic>? safety,
+    List<Map<String, dynamic>>? criticalAlerts,
+    ScheduleInfo? nextSchedule,
+    String? scenarioId,
+    String? scenarioName,
+    String? scenarioDescription,
+    bool? deviceControlEnabled,
+  }) {
+    return DashboardData(
+      reading: reading ?? this.reading,
+      sensors: sensors ?? this.sensors,
+      devices: devices ?? this.devices,
+      alerts: alerts ?? this.alerts,
+      tariffBhdPerKwh: tariffBhdPerKwh ?? this.tariffBhdPerKwh,
+      pendingDeviceCommands:
+          pendingDeviceCommands ?? this.pendingDeviceCommands,
+      deviceCommandErrors: deviceCommandErrors ?? this.deviceCommandErrors,
+      aiDashboard: aiDashboard ?? this.aiDashboard,
+      aiDailySummary: aiDailySummary ?? this.aiDailySummary,
+      aiRecommendation: aiRecommendation ?? this.aiRecommendation,
+      aiAlert: aiAlert ?? this.aiAlert,
+      aiNotifications: aiNotifications ?? this.aiNotifications,
+      control: control ?? this.control,
+      actionSuggestions: actionSuggestions ?? this.actionSuggestions,
+      automationLogs: automationLogs ?? this.automationLogs,
+      settingsSummary: settingsSummary ?? this.settingsSummary,
+      occupancy: occupancy ?? this.occupancy,
+      safety: safety ?? this.safety,
+      criticalAlerts: criticalAlerts ?? this.criticalAlerts,
+      nextSchedule: nextSchedule ?? this.nextSchedule,
+      scenarioId: scenarioId ?? this.scenarioId,
+      scenarioName: scenarioName ?? this.scenarioName,
+      scenarioDescription: scenarioDescription ?? this.scenarioDescription,
+      deviceControlEnabled: deviceControlEnabled ?? this.deviceControlEnabled,
+    );
+  }
 }
 
 class HomeSettings {
@@ -343,6 +400,79 @@ class KahrabaIqApiService {
     return _asMap(response.data);
   }
 
+  Future<Map<String, dynamic>> runScenarioAiPrediction({
+    required String homeId,
+    required Map<String, dynamic> scenarioPayload,
+  }) async {
+    final response = await _dio.post(
+      '/api/homes/$homeId/ai/scenario-predict',
+      data: scenarioPayload,
+    );
+    return _asMap(response.data);
+  }
+
+  DashboardData applyScenarioAiResponse(
+    DashboardData dashboard,
+    Map<String, dynamic> response,
+  ) {
+    final aiResult = _asMap(
+      _pick(response, ['latest_prediction', 'ai_result']) ?? response,
+    );
+    final notifications = _asList(
+      response['notifications'],
+    ).map((item) => _parseAiNotification(_asMap(item))).toList();
+    final alerts = _dedupeAlerts(
+      _asList(response['active_alerts'])
+          .map(
+            (item) => _alertFromBackend(
+              _asString(_pick(_asMap(item), ['id', 'alert_id'])),
+              _asMap(item),
+            ),
+          )
+          .toList(),
+    );
+    final suggestions = _asList(response['active_suggestions'])
+        .map(_asMap)
+        .map(
+          (item) => ActionSuggestion(
+            id: _asString(
+              _pick(item, ['id', 'suggestion_id']),
+              fallback: 'scenario_ai_suggestion',
+            ),
+            deviceName: _asString(
+              _pick(item, ['device_name', 'target_type']),
+              fallback: 'AI suggestion',
+            ),
+            deviceId: _asString(_pick(item, ['device_id']), fallback: 'system'),
+            suggestedCommand: _asString(
+              _pick(item, ['recommendation_type', 'suggested_command']),
+              fallback: 'review',
+            ),
+            reason: _asString(_pick(item, ['explanation', 'message'])),
+            status: 'scenario_ai',
+          ),
+        )
+        .toList();
+
+    return dashboard.copyWith(
+      aiDashboard: _parseAiDashboard(aiResult),
+      aiRecommendation: _scenarioAiRecommendation(aiResult),
+      aiNotifications: notifications,
+      alerts: alerts.isNotEmpty ? alerts : dashboard.alerts,
+      actionSuggestions: suggestions,
+      criticalAlerts: alerts
+          .where((alert) => alert.severity.toLowerCase() == 'critical')
+          .map((alert) => alert.toJson())
+          .toList(),
+      settingsSummary: {
+        ...dashboard.settingsSummary,
+        'scenario_ai_generated': true,
+        'scenario_ai_model_info': _asMap(response['model_info']),
+      },
+      deviceControlEnabled: false,
+    );
+  }
+
   Future<Map<String, dynamic>> fetchAiLatest({required String homeId}) async {
     final response = await _dio.get('/api/homes/$homeId/ai/latest');
     return _asMap(response.data);
@@ -356,9 +486,7 @@ class KahrabaIqApiService {
       '/api/homes/$homeId/ai/notifications',
       queryParameters: {'limit': limit},
     );
-    return _asList(_asMap(response.data)['notifications'])
-        .map(_asMap)
-        .toList();
+    return _asList(_asMap(response.data)['notifications']).map(_asMap).toList();
   }
 
   Future<List<Map<String, dynamic>>> fetchAiHistory({
@@ -1002,6 +1130,7 @@ class KahrabaIqApiService {
     final actionSuggestions = _asList(data['action_suggestions']);
     final automationLogs = _asList(data['automation_logs']);
     final ai = _asMap(data['ai']);
+    final aiNotifications = _asList(data['ai_notifications']);
     final aiDailySummary = _asMap(data['ai_daily_summary']);
     final latestRecommendation = recommendations.isEmpty
         ? const <String, dynamic>{}
@@ -1132,6 +1261,9 @@ class KahrabaIqApiService {
           ? null
           : _parseAiRecommendation(latestRecommendation),
       aiAlert: null,
+      aiNotifications: aiNotifications
+          .map((item) => _parseAiNotification(_asMap(item)))
+          .toList(),
       control: _parseControl(_asMap(data['control'])),
       actionSuggestions: actionSuggestions.map(_parseActionSuggestion).toList(),
       automationLogs: automationLogs.map(_parseAutomationLog).toList()
@@ -1311,7 +1443,45 @@ class KahrabaIqApiService {
   Future<List<DemoScenario>> fetchDemoScenarios({
     CancelToken? cancelToken,
   }) async {
-    return const <DemoScenario>[];
+    return const <DemoScenario>[
+      DemoScenario(
+        id: 'normal_usage',
+        name: 'Normal Usage',
+        description:
+            'Low power, comfortable room conditions, and normal activity.',
+      ),
+      DemoScenario(
+        id: 'ac_left_on_empty',
+        name: 'AC Left On Without Occupancy',
+        description: 'AC breaker is drawing high power with no recent motion.',
+      ),
+      DemoScenario(
+        id: 'socket_left_on',
+        name: 'Socket/Device Left On',
+        description: 'Socket breaker is active with no occupancy evidence.',
+      ),
+      DemoScenario(
+        id: 'unusual_ac_routine',
+        name: 'Unusual AC Routine',
+        description: 'AC is active at 2 AM outside the usual weekday pattern.',
+      ),
+      DemoScenario(
+        id: 'high_energy_consumption',
+        name: 'High Energy Consumption',
+        description: 'Total power is much higher than recent same-hour usage.',
+      ),
+      DemoScenario(
+        id: 'smoke_gas_safety',
+        name: 'Smoke/Gas Safety Alert',
+        description: 'Smoke/gas sensor reports a critical safety condition.',
+      ),
+      DemoScenario(
+        id: 'stale_sensor_breaker',
+        name: 'Stale Breaker/Sensor Data',
+        description:
+            'Latest sensor and breaker data is old, lowering AI confidence.',
+      ),
+    ];
   }
 
   Future<List<ControlModeOption>> fetchControlModes({
@@ -2394,6 +2564,44 @@ class KahrabaIqApiService {
     );
   }
 
+  AiRecommendation? _scenarioAiRecommendation(Map<String, dynamic> data) {
+    if (data.isEmpty) {
+      return null;
+    }
+    final createdAt = _asDateTime(
+      _pick(data, ['created_at_ms', 'created_at', 'createdAt']),
+    );
+    return AiRecommendation(
+      recommendationId: _asString(
+        _pick(data, ['scenario_id']),
+        fallback: 'scenario_ai_recommendation',
+      ),
+      type: 'scenario_ai_recommendation',
+      priority: _asString(_pick(data, ['ai_status_tone']), fallback: 'medium'),
+      title: _asString(
+        _pick(data, ['ai_action_title', 'recommendation_type']),
+        fallback: 'Review AI recommendation',
+      ),
+      message: _asString(
+        _pick(data, ['explanation', 'ai_status_summary']),
+        fallback:
+            'AI generated this recommendation from simulated scenario data.',
+      ),
+      source: _asString(_pick(data, ['source']), fallback: 'scenario_ai'),
+      relatedDeviceId: _asNullableString(
+        _pick(_asMap(data['control_suggestion']), ['device_id']),
+      ),
+      aiPredictionId: _asNullableString(_pick(data, ['scenario_id'])),
+      recommendationType: _asString(
+        _pick(data, ['recommendation_type']),
+        fallback: 'review',
+      ),
+      status: 'active',
+      createdAt: createdAt,
+      updatedAt: createdAt,
+    );
+  }
+
   AiAlertInsight? _parseAiAlert(Map<String, dynamic> data) {
     if (data.isEmpty) {
       return null;
@@ -2429,6 +2637,34 @@ class KahrabaIqApiService {
       ),
       energyWaste: _asBool(_pick(data, ['energy_waste', 'energyWaste'])),
       abnormalUsage: _asBool(_pick(data, ['abnormal_usage', 'abnormalUsage'])),
+    );
+  }
+
+  AiNotification _parseAiNotification(Map<String, dynamic> data) {
+    return AiNotification(
+      id: _asString(
+        _pick(data, ['id', 'notification_id']),
+        fallback: 'ai_notification',
+      ),
+      homeId: _asString(_pick(data, ['home_id', 'homeId'])),
+      severity: _asString(_pick(data, ['severity']), fallback: 'info'),
+      category: _asString(_pick(data, ['category']), fallback: 'system'),
+      title: _asString(_pick(data, ['title']), fallback: 'AI notification'),
+      message: _asString(_pick(data, ['message'])),
+      deviceId: _asNullableString(_pick(data, ['device_id', 'deviceId'])),
+      targetType: _asNullableString(_pick(data, ['target_type', 'targetType'])),
+      recommendationType: _asNullableString(
+        _pick(data, ['recommendation_type', 'recommendationType']),
+      ),
+      createdAt: _asDateTime(
+        _pick(data, ['created_at_ms', 'created_at', 'createdAt']),
+      ),
+      acknowledged: _asBool(_pick(data, ['acknowledged'])),
+      source: _asString(_pick(data, ['source']), fallback: 'ai'),
+      confidence: _pick(data, ['confidence']) == null
+          ? null
+          : _asDouble(_pick(data, ['confidence'])),
+      explanation: _asNullableString(_pick(data, ['explanation'])),
     );
   }
 

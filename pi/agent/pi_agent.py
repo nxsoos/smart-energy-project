@@ -678,7 +678,12 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       }
 
       const alerts = dashboard.alerts || [];
+      const aiNotifications = dashboard.ai_notifications || [];
+      const ai = dashboard.ai || {};
       const notes = [];
+      if (ai.ai_status_summary || ai.summary) {
+        notes.push(`<span class="warn">AI: ${ai.ai_status_summary || ai.summary}</span>`);
+      }
       if (room.stale || room.online === false) {
         notes.push('<span class="warn">Room sensors are offline or stale.</span>');
       }
@@ -690,11 +695,16 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       for (const alert of alerts) {
         notes.push(`<span class="error">${alert.title || alert.message || "Active alert"}</span>`);
       }
+      for (const notification of aiNotifications.slice(0, 3)) {
+        const severity = String(notification.severity || "info").toLowerCase();
+        const klass = severity === "critical" || severity === "high" ? "error" : "warn";
+        notes.push(`<span class="${klass}">AI: ${notification.title || notification.message || "Notification"}</span>`);
+      }
       document.getElementById("alerts").innerHTML = notes.length ? notes.join("<br>") : "No active alerts.";
 
       const overlay = document.getElementById("alertOverlay");
       const overlayMessage = document.getElementById("alertOverlayMessage");
-      const criticalAlert = alerts.find((alert) => {
+      const criticalAlert = [...alerts, ...aiNotifications].find((alert) => {
         const severity = String(alert.severity || alert.level || "").toLowerCase();
         const alertType = String(alert.alert_type || alert.type || alert.category || "").toLowerCase();
         const message = String(alert.message || alert.title || "").toLowerCase();

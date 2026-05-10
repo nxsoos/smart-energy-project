@@ -97,6 +97,16 @@ class AppConfig {
     defaultValue: false,
   );
 
+  static const bool enableDemoScenarios = bool.fromEnvironment(
+    'ENABLE_DEMO_SCENARIOS',
+    defaultValue: false,
+  );
+
+  static const bool useBackendScenarioAi = bool.fromEnvironment(
+    'USE_BACKEND_SCENARIO_AI',
+    defaultValue: false,
+  );
+
   static const int piApiTimeoutSeconds = int.fromEnvironment(
     'PI_API_TIMEOUT_SECONDS',
     defaultValue: 6,

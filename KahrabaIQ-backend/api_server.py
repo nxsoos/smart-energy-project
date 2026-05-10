@@ -89,7 +89,19 @@ AI_AUTO_PREDICT_ENABLED = os.environ.get("AI_AUTO_PREDICT_ENABLED", "true").stri
     "yes",
     "on",
 }
-AI_PREDICTION_INTERVAL_SECONDS = max(60, int(os.environ.get("AI_PREDICTION_INTERVAL_SECONDS", "300")))
+# AI has three cadences:
+# 1. immediate rule alerts run when prediction is requested or important state is handled;
+# 2. lightweight routine/anomaly checks can run every 5-10 minutes for demo/normal use;
+# 3. full ML prediction should run hourly after a new hourly summary exists.
+AI_ROUTINE_CHECK_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get("AI_ROUTINE_CHECK_INTERVAL_SECONDS", os.environ.get("AI_PREDICTION_INTERVAL_SECONDS", "600"))),
+)
+AI_FULL_PREDICTION_INTERVAL_SECONDS = max(
+    300,
+    int(os.environ.get("AI_FULL_PREDICTION_INTERVAL_SECONDS", "3600")),
+)
+AI_PREDICTION_INTERVAL_SECONDS = AI_ROUTINE_CHECK_INTERVAL_SECONDS
 AI_PREDICTION_INITIAL_DELAY_SECONDS = max(0, int(os.environ.get("AI_PREDICTION_INITIAL_DELAY_SECONDS", "30")))
 AI_PREDICTION_HOME_IDS = [
     item.strip()
@@ -421,6 +433,19 @@ class ScenarioRunResponse(BaseModel):
     message: str
 
 
+class AiScenarioPredictRequest(BaseModel):
+    scenario_id: str
+    scenario_name: str
+    scenario_description: str | None = None
+    room: dict[str, Any] = Field(default_factory=dict)
+    energy: dict[str, Any] = Field(default_factory=dict)
+    devices: dict[str, Any] = Field(default_factory=dict)
+    occupancy: dict[str, Any] = Field(default_factory=dict)
+    recent_history: dict[str, Any] = Field(default_factory=dict)
+    routine_context: dict[str, Any] = Field(default_factory=dict)
+    store: bool = False
+
+
 class ControlModeUpdateRequest(BaseModel):
     mode: str
     updated_by: str = Field("api", description="flutter_app or pi_dashboard")
@@ -637,6 +662,7 @@ ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
 
 ROLE_ALIASES = {"admin": "home_admin"}
 _ai_prediction_scheduler_started = False
+_ai_last_full_prediction_ms_by_home: dict[str, int] = {}
 
 
 def iso_from_ms(timestamp_ms: Any) -> str | None:
@@ -3715,6 +3741,9 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     control = ensure_control(home_id)
     settings = ensure_settings(home_id)
     control_mode = str(control.get("mode", "assist")).lower()
+    canonical_ai_latest = as_dict(bundle["canonical_ai_latest"])
+    ai_latest_suggestions = object_to_list(canonical_ai_latest.get("suggestions"))
+    ai_notifications = query_ai_notifications(home_id, limit=20)
 
     alerts = dedupe_alerts(active_only(
         object_to_list(bundle["alerts_active"])
@@ -3728,7 +3757,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     recommendations = active_only(
         object_to_list(bundle["recommendations_active"])
         + object_to_list(bundle["backend_recommendations"])
-        + object_to_list(as_dict(bundle["canonical_ai_latest"]).get("suggestions"))
+        + ai_latest_suggestions
     )
 
     return {
@@ -3757,12 +3786,17 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         "action_suggestions": dedupe_action_suggestions(
             active_only(
                 object_to_list(safe_get(f"/homes/{home_id}/action_suggestions/active", {}))
+                + ai_latest_suggestions
             )
         ),
         "automation_logs": object_to_list(
             safe_get(f"/homes/{home_id}/automation_logs", {})
         )[-10:],
         "ai": build_ai(bundle),
+        "ai_notifications": ai_notifications
+        or object_to_list(canonical_ai_latest.get("notifications")),
+        "ai_alerts": object_to_list(canonical_ai_latest.get("alerts")),
+        "ai_suggestions": ai_latest_suggestions,
         "ai_daily_summary": as_dict(as_dict(bundle["backend_ai"]).get("daily_summary")),
         "system_health": bundle["system_health"] or bundle["backend_device_health"],
         "settings_summary": settings_summary(settings),
@@ -5866,20 +5900,78 @@ def summary_energy_value(summary: dict[str, Any]) -> float:
             energy.get("total_energy_kWh"),
             summary.get("total_estimated_energy_kWh"),
             summary.get("total_energy_kWh"),
+            summary.get("totalEnergyKwh"),
         )
     )
 
 
 def summary_power_value(summary: dict[str, Any]) -> float:
     energy = as_dict(summary.get("energy"))
+    breaker_summaries = as_dict(summary.get("breakerSummaries"))
+    breaker_power = sum(
+        as_number(first_present(as_dict(item).get("avgPowerW"), as_dict(item).get("avg_power_W")))
+        for item in breaker_summaries.values()
+        if isinstance(item, dict)
+    )
     return as_number(
         first_present(
             energy.get("total_avg_power_W"),
             energy.get("total_power_W"),
             summary.get("total_avg_power_W"),
             summary.get("total_power_W"),
+            breaker_power if breaker_power > 0 else None,
         )
     )
+
+
+def summary_start_ms(summary: dict[str, Any]) -> int:
+    return int(as_number(first_present(summary.get("startAtMs"), summary.get("start_at_ms"), summary.get("hour_start"), summary.get("timestamp_ms")), 0))
+
+
+def summary_hour(summary: dict[str, Any]) -> int | None:
+    raw_hour = first_present(summary.get("hour_of_day"), summary.get("hourOfDay"))
+    if raw_hour is not None:
+        return int(as_number(raw_hour, -1))
+    start_ms = summary_start_ms(summary)
+    if start_ms <= 0:
+        return None
+    return datetime.fromtimestamp(start_ms / 1000, tz=BAHRAIN_TZ).hour
+
+
+def summary_is_weekend(summary: dict[str, Any]) -> bool:
+    start_ms = summary_start_ms(summary)
+    if start_ms <= 0:
+        return False
+    day = datetime.fromtimestamp(start_ms / 1000, tz=BAHRAIN_TZ).strftime("%A")
+    return day in {"Friday", "Saturday"}
+
+
+def summary_ac_usage_minutes(summary: dict[str, Any]) -> float:
+    ac = as_dict(as_dict(summary.get("breakerSummaries")).get("breaker_02"))
+    samples = as_number(ac.get("switchOnSamples"), 0)
+    sample_count = as_number(ac.get("sampleCount"), 0)
+    if sample_count <= 0:
+        return 0.0
+    return round(min(60.0, (samples / sample_count) * 60.0), 3)
+
+
+def latest_device_context(home_id: str) -> dict[str, Any]:
+    latest_state = as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+    devices = as_dict(latest_state.get("devices"))
+    control = ensure_control(home_id)
+
+    def state_for(device_id: str) -> str:
+        device = as_dict(devices.get(device_id))
+        status = as_dict(device.get("status"))
+        return str(first_present(device.get("state"), device.get("display_state"), status.get("state"), status.get("switch"), default="unknown")).lower()
+
+    return {
+        "latest_control_mode": str(control.get("mode", "assist")),
+        "latest_ac_state": state_for("breaker_02"),
+        "latest_socket_state": state_for("breaker_01"),
+        "latest_breaker_state": state_for("breaker_01"),
+        "latest_state_age_ms": max(0, now_ms() - int(as_number(first_present(latest_state.get("updated_at_ms"), latest_state.get("timestamp_ms")), 0))) if latest_state else None,
+    }
 
 
 def mean_std(values: list[float]) -> tuple[float, float]:
@@ -5900,19 +5992,60 @@ def enrich_ai_payload_with_history(home_id: str, payload: dict[str, Any]) -> dic
     same_hour_values = [
         summary_energy_value(summary)
         for summary in recent_summaries
-        if as_number(summary.get("hour_of_day"), -1) == as_number(payload.get("hour_of_day"), -2)
+        if summary_hour(summary) == int(as_number(payload.get("hour_of_day"), -2))
     ]
     same_hour_mean, same_hour_std = mean_std(same_hour_values)
+    same_hour_7_days = same_hour_values[:7]
+    same_hour_7_mean, _ = mean_std(same_hour_7_days)
+    same_hour_ac_values = [
+        summary_ac_usage_minutes(summary)
+        for summary in recent_summaries
+        if summary_hour(summary) == int(as_number(payload.get("hour_of_day"), -2))
+    ][:7]
+    same_hour_ac_mean, _ = mean_std(same_hour_ac_values)
+    weekday_same_hour_count = sum(
+        1
+        for summary in recent_summaries
+        if summary_hour(summary) == int(as_number(payload.get("hour_of_day"), -2)) and not summary_is_weekend(summary)
+    )
+    weekend_same_hour_count = sum(
+        1
+        for summary in recent_summaries
+        if summary_hour(summary) == int(as_number(payload.get("hour_of_day"), -2)) and summary_is_weekend(summary)
+    )
     recent_commands = query_recent_remote_commands(home_id, limit=50)
     one_hour_ago = now_ms() - 60 * 60 * 1000
+    now_value = now_ms()
     recent_command_count = sum(
         1
         for command in recent_commands
         if as_number(first_present(command.get("requestedAtMs"), command.get("requested_at_ms"))) >= one_hour_ago
     )
+    failed_command_count = sum(
+        1
+        for command in recent_commands
+        if as_number(first_present(command.get("requestedAtMs"), command.get("requested_at_ms"))) >= one_hour_ago
+        and normalize_command_status(command.get("status")) == COMMAND_STATUS_FAILED
+    )
+    last_command_ms = max(
+        [int(as_number(first_present(command.get("requestedAtMs"), command.get("requested_at_ms")), 0)) for command in recent_commands]
+        or [0]
+    )
+    minutes_since_last_command = round((now_value - last_command_ms) / 60000, 3) if last_command_ms > 0 else 999999.0
+    device_context = latest_device_context(home_id)
+    sensor_staleness_seconds = round(as_number(payload.get("sensor_data_age_ms"), 0) / 1000, 3)
+    breaker_staleness_seconds = round(as_number(payload.get("energy_data_age_ms"), 0) / 1000, 3)
+    no_occupancy_power_minutes = 60.0 if str(payload.get("occupancy_state")) in {"empty", "probably_empty"} and as_number(payload.get("total_power_for_guardrails_W")) > 50 else 0.0
 
     enriched = {
         **payload,
+        "recent_energy_avg": energy_mean,
+        "recent_energy_std": energy_std,
+        "recent_power_avg": power_mean,
+        "recent_power_std": power_std,
+        "same_hour_energy_avg": same_hour_mean,
+        "same_hour_energy_std": same_hour_std,
+        "previous_hour_energy": energy_values[0] if energy_values else 0.0,
         "recent_usage_avg_kWh": energy_mean,
         "recent_usage_std_kWh": energy_std,
         "recent_power_avg_W": power_mean,
@@ -5921,7 +6054,27 @@ def enrich_ai_payload_with_history(home_id: str, payload: dict[str, Any]) -> dic
         "same_hour_usage_std_kWh": same_hour_std,
         "previous_hour_energy_kWh": energy_values[0] if energy_values else 0.0,
         "command_frequency_last_hour": recent_command_count,
+        "failed_command_count_last_hour": failed_command_count,
+        "time_since_last_command_minutes": minutes_since_last_command,
+        "ac_on_duration_minutes": round(as_number(payload.get("ac_energy_kWh"), 0) / max(as_number(payload.get("ac_avg_power_W"), 0) / 1000, 0.001) * 60, 3) if as_number(payload.get("ac_energy_kWh"), 0) > 0 else 0.0,
+        "socket_on_duration_minutes": round(as_number(payload.get("switch_energy_kWh"), 0) / max(as_number(payload.get("switch_avg_power_W"), 0) / 1000, 0.001) * 60, 3) if as_number(payload.get("switch_energy_kWh"), 0) > 0 else 0.0,
+        "device_on_duration_minutes": max(as_number(payload.get("ac_on_duration_minutes"), 0), as_number(payload.get("socket_on_duration_minutes"), 0)),
+        "no_occupancy_power_minutes": no_occupancy_power_minutes,
+        "device_left_on_without_motion_minutes": no_occupancy_power_minutes,
+        "time_since_last_motion_minutes": as_number(payload.get("minutes_since_last_activity"), 999999.0),
+        "same_hour_avg_energy_last_7_days": same_hour_7_mean,
+        "same_hour_avg_ac_usage_last_7_days": same_hour_ac_mean,
+        "weekday_routine_score": min(1.0, weekday_same_hour_count / 3),
+        "weekend_routine_score": min(1.0, weekend_same_hour_count / 2),
+        "outside_routine_score": 1.0 - min(1.0, (weekday_same_hour_count + weekend_same_hour_count) / 5),
+        "sensor_staleness_seconds": sensor_staleness_seconds,
+        "breaker_staleness_seconds": breaker_staleness_seconds,
+        **device_context,
     }
+    enriched["device_on_duration_minutes"] = max(
+        as_number(enriched.get("ac_on_duration_minutes")),
+        as_number(enriched.get("socket_on_duration_minutes")),
+    )
     return enriched
 
 
@@ -5974,9 +6127,14 @@ def ai_notification(
     message: str,
     *,
     device_id: str | None = None,
+    target_type: str | None = None,
+    recommendation_type: str | None = None,
+    confidence: float | None = None,
+    explanation: str | None = None,
+    notification_id: str | None = None,
 ) -> dict[str, Any]:
     timestamp_ms = now_ms()
-    notification_id = f"ai_{category}_{timestamp_ms}"
+    notification_id = notification_id or f"ai_{category}_{timestamp_ms}"
     return {
         "id": notification_id,
         "home_id": home_id,
@@ -5985,12 +6143,53 @@ def ai_notification(
         "title": title,
         "message": message,
         "device_id": device_id,
+        "target_type": target_type,
+        "recommendation_type": recommendation_type,
         "created_at": timestamp_ms,
         "created_at_ms": timestamp_ms,
         "created_at_iso": iso_from_ms(timestamp_ms),
         "acknowledged": False,
         "source": "ai",
+        "confidence": confidence,
+        "explanation": explanation or message,
     }
+
+
+def run_immediate_safety_checks(home_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    notifications: list[dict[str, Any]] = []
+    if as_number(payload.get("smoke_count")) > 0:
+        notifications.append(ai_notification(home_id, "critical", "safety", "Gas or smoke detected", "Check the room immediately. Energy saving is secondary to safety.", confidence=1.0, notification_id="smoke_gas_detected"))
+    if as_number(payload.get("sensor_staleness_seconds")) > 180 or payload.get("sensor_data_fresh") is False:
+        notifications.append(ai_notification(home_id, "medium", "system", "Room sensor data is stale", "The AI confidence is lower because the latest room sensor reading is old.", target_type="sensor", confidence=0.8, notification_id="sensor_data_stale"))
+    if as_number(payload.get("breaker_staleness_seconds")) > 180 or payload.get("breaker_data_fresh") is False:
+        notifications.append(ai_notification(home_id, "medium", "device", "Breaker data is stale", "The AI is waiting for fresh breaker readings before making strong energy decisions.", target_type="breaker", confidence=0.8, notification_id="breaker_data_stale"))
+    if as_number(payload.get("failed_command_count_last_hour")) >= 2:
+        notifications.append(ai_notification(home_id, "high", "device", "Repeated command failures", "Device commands failed repeatedly in the last hour. Check Pi connectivity and local controller status.", confidence=0.95, notification_id="repeated_command_failures"))
+    if str(payload.get("occupancy_state")) in {"empty", "probably_empty"} and as_number(payload.get("total_power_for_guardrails_W")) > 150:
+        notifications.append(ai_notification(home_id, "high", "energy", "High power while empty", "Power is high while occupancy appears low. Review AC, socket, and breaker state.", recommendation_type="turn_off_unused_devices", confidence=0.9, notification_id="high_power_empty_room"))
+    return notifications
+
+
+def run_lightweight_anomaly_checks(home_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    notifications: list[dict[str, Any]] = []
+    total_energy = as_number(payload.get("total_energy_kWh"))
+    total_power = as_number(payload.get("total_power_for_guardrails_W"))
+    same_hour_mean = as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("same_hour_usage_avg_kWh")))
+    same_hour_std = as_number(payload.get("same_hour_energy_std"), as_number(payload.get("same_hour_usage_std_kWh")))
+    recent_power_mean = as_number(payload.get("recent_power_avg"), as_number(payload.get("recent_power_avg_W")))
+    recent_power_std = as_number(payload.get("recent_power_std"), as_number(payload.get("recent_power_std_W")))
+    outside_routine_score = as_number(payload.get("outside_routine_score"))
+    ac_active = as_number(payload.get("ac_live_power_W"), as_number(payload.get("ac_avg_power_W"))) > 50 or str(payload.get("latest_ac_state")) == "on"
+
+    if same_hour_mean > 0 and total_energy > same_hour_mean + max(0.05, 2 * same_hour_std):
+        notifications.append(ai_notification(home_id, "medium", "anomaly", "Energy above usual same-hour pattern", "This hour's energy is higher than recent same-hour usage.", confidence=0.85, explanation=f"Current {total_energy:.3f} kWh vs same-hour average {same_hour_mean:.3f} kWh.", notification_id="same_hour_energy_spike"))
+    if recent_power_mean > 0 and total_power > recent_power_mean + max(50, 2 * recent_power_std):
+        notifications.append(ai_notification(home_id, "medium", "anomaly", "Power above recent normal range", "Current power is higher than the recent rolling average.", confidence=0.85, explanation=f"Current {total_power:.1f} W vs recent average {recent_power_mean:.1f} W.", notification_id="rolling_power_spike"))
+    if ac_active and outside_routine_score >= 0.8 and as_number(payload.get("hour_of_day")) <= 5:
+        notifications.append(ai_notification(home_id, "medium", "routine", "AC running outside routine", "The AC appears active during an unusual time compared with recent routine.", device_id="breaker_02", recommendation_type="review_ac_schedule", confidence=0.75, notification_id="ac_outside_routine"))
+    if as_number(payload.get("device_left_on_without_motion_minutes")) >= 30:
+        notifications.append(ai_notification(home_id, "low", "recommendation", "Device may be left on", "A device has been active without recent motion. Consider turning unused devices off.", recommendation_type="turn_off_unused_devices", confidence=0.8, notification_id="device_left_on_without_motion"))
+    return notifications
 
 
 def build_ai_notifications(home_id: str, result: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -6008,6 +6207,212 @@ def build_ai_notifications(home_id: str, result: dict[str, Any], payload: dict[s
     if recommendation != "none" and not any(item["category"] == "recommendation" for item in notifications):
         notifications.append(ai_notification(home_id, "low", "recommendation", "AI recommendation", explanation))
     return notifications
+
+
+def dedupe_ai_notifications(notifications: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for notification in notifications:
+        key = str(notification.get("id") or f"{notification.get('category')}:{notification.get('title')}")
+        deduped[key] = notification
+    return list(deduped.values())
+
+
+def normalized_ai_api_response(home_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    notifications = object_to_list(result.get("notifications"))
+    alerts = object_to_list(result.get("alerts")) or [
+        item for item in notifications if str(item.get("severity")).lower() in {"high", "critical"}
+    ]
+    suggestions = object_to_list(result.get("suggestions")) or [
+        item for item in notifications if str(item.get("category")).lower() == "recommendation"
+    ]
+    return {
+        "success": True,
+        "home_id": home_id,
+        "latest_prediction": result,
+        "ai_result": result,
+        "active_alerts": alerts,
+        "active_suggestions": suggestions,
+        "notifications": notifications,
+        "model_info": {
+            "model_name": result.get("model_name"),
+            "model_version": result.get("model_version"),
+            "ml_ran": result.get("ml_ran"),
+            "levels_ran": result.get("levels_ran", []),
+        },
+        "created_at": result.get("created_at"),
+        "created_at_ms": result.get("created_at_ms"),
+        "created_at_iso": result.get("created_at_iso"),
+    }
+
+
+def should_run_full_ml(home_id: str, *, force: bool = False, input_source: str = "") -> bool:
+    if force:
+        return True
+    if "latest_hourly_summary" not in input_source:
+        return False
+    last_run = _ai_last_full_prediction_ms_by_home.get(home_id, 0)
+    return now_ms() - last_run >= AI_FULL_PREDICTION_INTERVAL_SECONDS * 1000
+
+
+def scenario_device(devices: dict[str, Any], device_id: str) -> dict[str, Any]:
+    raw = as_dict(devices.get(device_id))
+    if raw:
+        return raw
+    for item in devices.values():
+        candidate = as_dict(item)
+        if str(candidate.get("id") or candidate.get("device_id")) == device_id:
+            return candidate
+    return {}
+
+
+def build_ai_payload_from_scenario(
+    home_id: str,
+    request: AiScenarioPredictRequest,
+) -> tuple[dict[str, Any], str]:
+    timestamp_ms = now_ms()
+    bahrain_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=BAHRAIN_TZ)
+    room = request.room
+    energy = request.energy
+    devices = request.devices
+    occupancy = request.occupancy
+    recent_history = request.recent_history
+    routine_context = request.routine_context
+    socket = scenario_device(devices, "breaker_01")
+    ac = scenario_device(devices, "breaker_02")
+
+    total_power = as_number(first_present(energy.get("power"), energy.get("current_power_w"), energy.get("total_power_W")))
+    socket_power = as_number(first_present(socket.get("power"), socket.get("currentPower"), socket.get("current_power_w")))
+    ac_power = as_number(first_present(ac.get("power"), ac.get("currentPower"), ac.get("current_power_w")))
+    if total_power <= 0:
+        total_power = socket_power + ac_power
+
+    occupied = bool(first_present(occupancy.get("occupied"), room.get("motion"), room.get("isOccupied"), default=False))
+    occupancy_state = str(first_present(occupancy.get("state"), "occupied" if occupied else "empty"))
+    smoke_value = first_present(room.get("smoke"), room.get("smoke_detected"), room.get("smokeStatus"), room.get("smoke_status"), default=0)
+    smoke_count = 1.0 if str(smoke_value).lower() in {"true", "1", "smoke/gas", "detected", "alert"} else as_number(smoke_value)
+    sensor_staleness = as_number(recent_history.get("sensor_staleness_seconds"), 0)
+    breaker_staleness = as_number(recent_history.get("breaker_staleness_seconds"), 0)
+
+    payload = {
+        "hour_of_day": int(as_number(routine_context.get("hour_of_day"), bahrain_time.hour)),
+        "day_of_week": str(routine_context.get("day_of_week") or bahrain_time.strftime("%A")),
+        "is_weekend": bool(routine_context.get("is_weekend", bahrain_time.strftime("%A") in {"Friday", "Saturday"})),
+        "sample_count": as_number(recent_history.get("sample_count"), 48),
+        "avg_temperature": first_present(room.get("temperature"), room.get("temp"), default=0),
+        "avg_humidity": first_present(room.get("humidity"), default=0),
+        "avg_sound_raw": first_present(room.get("soundRaw"), room.get("sound_raw"), room.get("sound"), default=0),
+        "motion_count": 1.0 if occupied else 0.0,
+        "bright_count": 1.0 if str(first_present(room.get("lightStatus"), room.get("light_status"), "")).lower() == "bright" else 0.0,
+        "smoke_count": smoke_count,
+        "noise_count": as_number(first_present(room.get("noise"), room.get("soundActive")), 1.0 if occupied else 0.0),
+        "high_temp_count": 1.0 if as_number(first_present(room.get("temperature"), room.get("temp"))) >= 27 else 0.0,
+        "occupancy_score": as_number(occupancy.get("occupancy_score"), 0.8 if occupied else 0.05),
+        "occupancy_state": occupancy_state,
+        "occupancy_confidence": as_number(occupancy.get("confidence"), 0.85),
+        "occupied": occupied,
+        "minutes_since_last_activity": as_number(occupancy.get("time_since_last_motion_minutes"), 1 if occupied else 999),
+        "motion_recent": occupied,
+        "sound_recent": occupied,
+        "sound_active": occupied,
+        "light_on_while_empty": occupancy_state in {"empty", "probably_empty"} and str(first_present(room.get("lightStatus"), room.get("light_status"), "")).lower() == "bright",
+        "device_on_while_empty": occupancy_state in {"empty", "probably_empty"} and total_power > 10,
+        "empty_room_power_w": total_power if occupancy_state in {"empty", "probably_empty"} else 0,
+        "power_is_low": total_power <= 5,
+        "total_power_for_guardrails_W": round(total_power, 3),
+        "switch_live_power_W": round(socket_power, 3),
+        "ac_live_power_W": round(ac_power, 3),
+        "breaker_data_fresh": breaker_staleness <= 180,
+        "sensor_data_fresh": sensor_staleness <= 180,
+        "energy_data_age_ms": int(breaker_staleness * 1000) if breaker_staleness > 0 else 0,
+        "sensor_data_age_ms": int(sensor_staleness * 1000) if sensor_staleness > 0 else 0,
+        "switch_avg_power_W": socket_power,
+        "switch_peak_power_W": max(socket_power, as_number(socket.get("peak_power_W"))),
+        "switch_energy_kWh": as_number(first_present(socket.get("energy"), socket.get("energyToday"), socket.get("energy_kWh"))),
+        "ac_avg_power_W": ac_power,
+        "ac_peak_power_W": max(ac_power, as_number(ac.get("peak_power_W"))),
+        "ac_energy_kWh": as_number(first_present(ac.get("energy"), ac.get("energyToday"), ac.get("energy_kWh"))),
+        "total_avg_power_W": total_power,
+        "total_peak_power_W": max(total_power, as_number(energy.get("peak_power_W"))),
+        "total_energy_kWh": as_number(first_present(energy.get("energyToday"), energy.get("total_energy_kWh"), energy.get("totalEnergyKwh"))),
+        "total_cost_BHD": as_number(first_present(energy.get("costToday"), energy.get("total_cost_BHD"))),
+        "tariff_BHD_per_kWh": as_number(energy.get("tariff_BHD_per_kWh"), 0.032),
+        "latest_control_mode": "demo",
+        "latest_ac_state": "on" if bool(ac.get("isOn") or ac.get("is_on")) else "off",
+        "latest_socket_state": "on" if bool(socket.get("isOn") or socket.get("is_on")) else "off",
+        "latest_breaker_state": "simulation",
+        "sensor_staleness_seconds": sensor_staleness,
+        "breaker_staleness_seconds": breaker_staleness,
+        **recent_history,
+        **routine_context,
+    }
+    payload.setdefault("same_hour_usage_avg_kWh", payload.get("same_hour_energy_avg", 0))
+    payload.setdefault("same_hour_usage_std_kWh", payload.get("same_hour_energy_std", 0))
+    payload.setdefault("recent_power_avg_W", payload.get("recent_power_avg", 0))
+    payload.setdefault("recent_power_std_W", payload.get("recent_power_std", 0))
+    payload.setdefault("device_left_on_without_motion_minutes", payload.get("time_since_last_motion_minutes", payload.get("minutes_since_last_activity", 0)))
+    payload.setdefault("outside_routine_score", payload.get("outside_routine_score", payload.get("routine_score", 0)))
+    return payload, f"demo_scenario:{request.scenario_id}"
+
+
+def mark_scenario_ai_output(value: Any) -> Any:
+    if isinstance(value, dict):
+        updated = {key: mark_scenario_ai_output(item) for key, item in value.items()}
+        if updated.get("source") == "ai":
+            updated["source"] = "scenario_ai"
+        return updated
+    if isinstance(value, list):
+        return [mark_scenario_ai_output(item) for item in value]
+    return value
+
+
+def run_scenario_ai_prediction(home_id: str, request: AiScenarioPredictRequest) -> dict[str, Any]:
+    payload, input_source = build_ai_payload_from_scenario(home_id, request)
+    safety_notifications = run_immediate_safety_checks(home_id, payload)
+    routine_notifications = run_lightweight_anomaly_checks(home_id, payload)
+    ml_ran = True
+    try:
+        prediction = ai_engine.run_model(payload)
+    except Exception:
+        ml_ran = False
+        prediction = {
+            "model_name": "smart_energy_ai",
+            "model_version": "scenario_rule_only",
+            "prediction_status": "scenario_rule_checks_only",
+            "waste_event": {"value": bool(safety_notifications or routine_notifications), "confidence": 0.75, "source": "scenario_rules"},
+            "anomaly_label": {"value": "scenario_rule_based_alert" if safety_notifications or routine_notifications else "normal", "confidence": 0.75, "source": "scenario_rules"},
+            "recommendation_type": {"value": "review_ai_notifications" if safety_notifications or routine_notifications else "none", "confidence": 0.75, "source": "scenario_rules"},
+            "next_hour_total_energy_kWh": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg")))},
+            "next_hour_total_cost_BHD": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg"))) * as_number(payload.get("tariff_BHD_per_kWh"), 0.032)},
+            "energy_efficiency_score": 70 if safety_notifications or routine_notifications else 95,
+            "explanation": "Scenario rule checks ran because the ML model could not be used for this simulated input.",
+            "post_processing_rules": ["scenario_rule_checks_without_full_ml"],
+        }
+    ai_result = ai_engine.build_ai_result(home_id, payload, prediction, input_source, request.scenario_id)
+    ai_result = apply_ec2_ai_routine_rules(ai_result, payload)
+    ai_result.update(
+        {
+            "simulation": True,
+            "source": "scenario_ai",
+            "input_source": input_source,
+            "scenario_id": request.scenario_id,
+            "scenario_name": request.scenario_name,
+            "scenario_description": request.scenario_description,
+            "ml_ran": ml_ran,
+            "levels_ran": ["immediate_safety", "lightweight_routine"] + (["full_ml"] if ml_ran else []),
+        }
+    )
+    notifications = dedupe_ai_notifications(safety_notifications + routine_notifications + build_ai_notifications(home_id, ai_result, payload))
+    notifications = [dict(item, source="scenario_ai", simulation=True) for item in notifications]
+    alerts = [item for item in notifications if item["severity"] in {"high", "critical"}]
+    suggestions = [item for item in notifications if item["category"] == "recommendation"]
+    ai_result["notifications"] = notifications
+    ai_result["alerts"] = alerts
+    ai_result["suggestions"] = suggestions
+    response = normalized_ai_api_response(home_id, ai_result)
+    response["simulation"] = True
+    response["scenario_id"] = request.scenario_id
+    response["scenario_name"] = request.scenario_name
+    return mark_scenario_ai_output(response)
 
 
 def start_ai_prediction_scheduler() -> None:
@@ -6038,42 +6443,69 @@ def start_ai_prediction_scheduler() -> None:
     thread.start()
 
 
-def run_ec2_ai_prediction(home_id: str) -> dict[str, Any]:
+def run_ec2_ai_prediction(home_id: str, *, force_full_ml: bool = False) -> dict[str, Any]:
     payload, input_source = ai_engine.build_ai_payload(home_id)
     payload = enrich_ai_payload_with_history(home_id, payload)
-    prediction = ai_engine.run_model(payload)
-    ai_result = ai_engine.build_ai_result(home_id, payload, prediction, input_source)
-    ai_result = apply_ec2_ai_routine_rules(ai_result, payload)
+    safety_notifications = run_immediate_safety_checks(home_id, payload)
+    routine_notifications = run_lightweight_anomaly_checks(home_id, payload)
+    ml_ran = should_run_full_ml(home_id, force=force_full_ml, input_source=input_source)
+    if ml_ran:
+        prediction = ai_engine.run_model(payload)
+        ai_result = ai_engine.build_ai_result(home_id, payload, prediction, input_source)
+        ai_result = apply_ec2_ai_routine_rules(ai_result, payload)
+        _ai_last_full_prediction_ms_by_home[home_id] = now_ms()
+    else:
+        prediction = {
+            "model_name": "smart_energy_ai",
+            "model_version": "rule_only",
+            "prediction_status": "rule_checks_only",
+            "waste_event": {"value": any(item.get("category") == "energy" for item in safety_notifications + routine_notifications), "confidence": 0.75, "source": "rule_checks"},
+            "anomaly_label": {"value": "rule_based_alert" if safety_notifications or routine_notifications else "normal", "confidence": 0.75, "source": "rule_checks"},
+            "recommendation_type": {"value": "review_ai_notifications" if safety_notifications or routine_notifications else "none", "confidence": 0.75, "source": "rule_checks"},
+            "next_hour_total_energy_kWh": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg")))},
+            "next_hour_total_cost_BHD": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg"))) * as_number(payload.get("tariff_BHD_per_kWh"), 0.032)},
+            "energy_efficiency_score": 70 if safety_notifications or routine_notifications else 95,
+            "explanation": "Rule-based AI checks ran. Full ML is scheduled hourly after hourly summaries, not on every live update.",
+            "post_processing_rules": ["rule_checks_without_full_ml"],
+        }
+        ai_result = ai_engine.build_ai_result(home_id, payload, prediction, input_source)
     ai_result["source"] = "ec2_ai_inference"
+    ai_result["ml_ran"] = ml_ran
+    ai_result["levels_ran"] = ["immediate_safety", "lightweight_routine"] + (["full_ml"] if ml_ran else [])
     ai_result["anomaly_score"] = 1.0 - as_number(ai_result.get("efficiency_score"), 100) / 100
     ai_result["anomaly_label"] = ai_result.get("abnormal_usage")
     ai_result["waste_event"] = ai_result.get("energy_waste")
     ai_result["next_hour_total_energy_kWh"] = ai_result.get("next_hour_energy")
     ai_result["next_hour_total_cost_BHD"] = ai_result.get("next_hour_cost")
-    notifications = build_ai_notifications(home_id, ai_result, payload)
+    notifications = dedupe_ai_notifications(safety_notifications + routine_notifications + build_ai_notifications(home_id, ai_result, payload))
     alerts = [item for item in notifications if item["severity"] in {"high", "critical"}]
     suggestions = [item for item in notifications if item["category"] == "recommendation"]
     ai_result["notifications"] = notifications
     ai_result["alerts"] = alerts
     ai_result["suggestions"] = suggestions
     stored = store_ai_result(home_id, ai_result, notifications=notifications, alerts=alerts, suggestions=suggestions)
-    return {"success": True, "home_id": home_id, "ai_result": stored}
+    return normalized_ai_api_response(home_id, stored)
 
 
 @app.post("/api/home/{home_id}/ai/predict", dependencies=[Depends(require_home_role("admin"))])
 def trigger_ai_prediction(home_id: str) -> dict[str, Any]:
-    return run_ec2_ai_prediction(home_id)
+    return run_ec2_ai_prediction(home_id, force_full_ml=True)
 
 
 @app.post("/api/homes/{home_id}/ai/predict", dependencies=[Depends(require_home_role("admin"))])
 def trigger_ai_prediction_plural(home_id: str) -> dict[str, Any]:
-    return run_ec2_ai_prediction(home_id)
+    return run_ec2_ai_prediction(home_id, force_full_ml=True)
+
+
+@app.post("/api/homes/{home_id}/ai/scenario-predict", dependencies=[Depends(require_home_permission("can_view"))])
+def trigger_ai_scenario_prediction(home_id: str, request: AiScenarioPredictRequest) -> dict[str, Any]:
+    return run_scenario_ai_prediction(home_id, request)
 
 
 @app.get("/api/homes/{home_id}/ai/latest", dependencies=[Depends(require_home_permission("can_view"))])
 def get_ai_latest_result(home_id: str) -> dict[str, Any]:
     latest = get_ai_latest(home_id)
-    return {"success": True, "home_id": home_id, "ai_result": latest}
+    return normalized_ai_api_response(home_id, latest)
 
 
 @app.get("/api/homes/{home_id}/ai/history", dependencies=[Depends(require_home_permission("can_view"))])
@@ -6083,8 +6515,20 @@ def get_ai_history_results(home_id: str, limit: int = Query(24, ge=1, le=100)) -
 
 
 @app.get("/api/homes/{home_id}/ai/notifications", dependencies=[Depends(require_home_permission("can_view"))])
-def get_ai_notification_results(home_id: str, limit: int = Query(50, ge=1, le=100)) -> dict[str, Any]:
+def get_ai_notification_results(
+    home_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    severity: str | None = None,
+    category: str | None = None,
+    acknowledged: bool | None = None,
+) -> dict[str, Any]:
     notifications = query_ai_notifications(home_id, limit=limit)
+    if severity:
+        notifications = [item for item in notifications if str(item.get("severity")).lower() == severity.lower()]
+    if category:
+        notifications = [item for item in notifications if str(item.get("category")).lower() == category.lower()]
+    if acknowledged is not None:
+        notifications = [item for item in notifications if bool(item.get("acknowledged")) is acknowledged]
     return {"success": True, "home_id": home_id, "count": len(notifications), "notifications": notifications}
 
 

@@ -133,3 +133,41 @@ class AiAlertInsight {
     required this.abnormalUsage,
   });
 }
+
+class AiNotification {
+  final String id;
+  final String homeId;
+  final String severity;
+  final String category;
+  final String title;
+  final String message;
+  final String? deviceId;
+  final String? targetType;
+  final String? recommendationType;
+  final DateTime createdAt;
+  final bool acknowledged;
+  final String source;
+  final double? confidence;
+  final String? explanation;
+
+  const AiNotification({
+    required this.id,
+    required this.homeId,
+    required this.severity,
+    required this.category,
+    required this.title,
+    required this.message,
+    this.deviceId,
+    this.targetType,
+    this.recommendationType,
+    required this.createdAt,
+    required this.acknowledged,
+    required this.source,
+    this.confidence,
+    this.explanation,
+  });
+
+  bool get isCritical => severity.toLowerCase() == 'critical';
+  bool get isAlert => {'high', 'critical'}.contains(severity.toLowerCase());
+  bool get isSuggestion => category.toLowerCase() == 'recommendation';
+}

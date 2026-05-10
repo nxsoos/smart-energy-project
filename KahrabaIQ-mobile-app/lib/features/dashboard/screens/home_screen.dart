@@ -16,6 +16,8 @@ import '../../../shared/services/auth_service.dart';
 import '../../../shared/services/kahrabaiq_api_service.dart';
 import '../../../shared/services/notification_service.dart';
 import '../../ai_chat/screens/ai_chatbot_screen.dart';
+import '../../demo/demo_scenarios.dart';
+import '../../demo/widgets/demo_scenario_selector.dart';
 import '../../pairing/screens/qr_scanner_screen.dart';
 import '../../sensors/screens/sensors_status_screen.dart';
 import 'breakers_screen.dart';
@@ -45,6 +47,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isPairing = false;
   String? _error;
   String? _dashboardNotice;
+  DemoScenarioData? _selectedDemoScenario;
+  bool _scenarioAiBusy = false;
   final Set<String> _localPendingCommands = {};
   final Map<String, String> _localCommandErrors = {};
   final Set<String> _dismissedAlertIds = {};
@@ -64,6 +68,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadDashboard() async {
+    if (_selectedDemoScenario != null) {
+      setState(() {
+        _dashboard = _selectedDemoScenario!.dashboard;
+        _isLoading = false;
+        _error = null;
+        _dashboardNotice =
+            'Simulation Mode is active. Live home data and device control are paused.';
+      });
+      return;
+    }
     await _liveSubscription?.cancel();
     setState(() {
       _isLoading = _dashboard == null;
@@ -139,13 +153,19 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) {
       return;
     }
-    final liveDeviceIds = dashboard.devices.map((device) => device.id).toSet();
+    if (_selectedDemoScenario != null) {
+      return;
+    }
+    final mergedDashboard = _mergeLiveDashboardData(dashboard);
+    final liveDeviceIds = mergedDashboard.devices
+        .map((device) => device.id)
+        .toSet();
     setState(() {
-      _dashboard = dashboard;
-      _syncSafetyPopup(dashboard.alerts);
+      _dashboard = mergedDashboard;
+      _syncSafetyPopup(mergedDashboard.alerts);
       _localPendingCommands.removeWhere((deviceId) {
         Device? device;
-        for (final item in dashboard.devices) {
+        for (final item in mergedDashboard.devices) {
           if (item.id == deviceId) {
             device = item;
             break;
@@ -160,6 +180,58 @@ class _HomeScreenState extends State<HomeScreen> {
       _error = null;
       _dashboardNotice = null;
     });
+  }
+
+  DashboardData _mergeLiveDashboardData(DashboardData incoming) {
+    final previous = _dashboard;
+    if (previous == null) {
+      return incoming;
+    }
+
+    final hasIntelligence =
+        incoming.aiDashboard != null ||
+        incoming.aiDailySummary != null ||
+        incoming.aiRecommendation != null ||
+        incoming.aiAlert != null ||
+        incoming.aiNotifications.isNotEmpty ||
+        incoming.actionSuggestions.isNotEmpty ||
+        incoming.automationLogs.isNotEmpty ||
+        incoming.nextSchedule != null ||
+        incoming.settingsSummary.isNotEmpty;
+    if (hasIntelligence) {
+      return incoming;
+    }
+
+    return DashboardData(
+      reading: incoming.reading,
+      sensors: incoming.sensors,
+      devices: incoming.devices,
+      alerts: incoming.alerts,
+      tariffBhdPerKwh: incoming.tariffBhdPerKwh,
+      pendingDeviceCommands: incoming.pendingDeviceCommands,
+      deviceCommandErrors: incoming.deviceCommandErrors,
+      aiDashboard: previous.aiDashboard,
+      aiDailySummary: previous.aiDailySummary,
+      aiRecommendation: previous.aiRecommendation,
+      aiAlert: previous.aiAlert,
+      aiNotifications: previous.aiNotifications,
+      control: incoming.control,
+      actionSuggestions: previous.actionSuggestions,
+      automationLogs: previous.automationLogs,
+      settingsSummary: previous.settingsSummary,
+      occupancy: incoming.occupancy.isNotEmpty
+          ? incoming.occupancy
+          : previous.occupancy,
+      safety: incoming.safety.isNotEmpty ? incoming.safety : previous.safety,
+      criticalAlerts: incoming.criticalAlerts.isNotEmpty
+          ? incoming.criticalAlerts
+          : previous.criticalAlerts,
+      nextSchedule: previous.nextSchedule,
+      scenarioId: previous.scenarioId,
+      scenarioName: previous.scenarioName,
+      scenarioDescription: previous.scenarioDescription,
+      deviceControlEnabled: incoming.deviceControlEnabled,
+    );
   }
 
   void _syncSafetyPopup(List<Alert> alerts) {
@@ -351,6 +423,16 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 16),
                       _DashboardNotice(message: _dashboardNotice!),
                     ],
+                    if (NetworkConfig.enableDemoScenarios) ...[
+                      const SizedBox(height: 16),
+                      DemoScenarioSelector(
+                        scenarios: demoScenarios,
+                        selectedScenario: _selectedDemoScenario,
+                        isGeneratingAi: _scenarioAiBusy,
+                        onSelect: _activateDemoScenario,
+                        onReturnToLive: _returnToLiveData,
+                      ),
+                    ],
                     const SizedBox(height: 24),
                     EnergyHeroCard(
                       reading: dashboard.reading,
@@ -427,6 +509,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _toggleDevice(Device device, bool value) async {
+    if (_dashboard?.scenarioId != null ||
+        _dashboard?.deviceControlEnabled == false) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Device control is disabled in Demo Mode.'),
+        ),
+      );
+      return;
+    }
     final action = value ? 'turn_on' : 'turn_off';
     debugPrint(
       '[KahrabaIQ COMMAND TAP] device=${device.id} '
@@ -480,6 +571,74 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _openChat() =>
       Navigator.of(context).push(fadeSlideRoute(const AiChatbotScreen()));
+
+  Future<void> _activateDemoScenario(DemoScenarioData scenario) async {
+    await _liveSubscription?.cancel();
+    _liveSubscription = null;
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _selectedDemoScenario = scenario;
+      _dashboard = scenario.dashboard;
+      _scenarioAiBusy = NetworkConfig.useBackendScenarioAi;
+      _isLoading = false;
+      _error = null;
+      _dashboardNotice = NetworkConfig.useBackendScenarioAi
+          ? 'Simulation Mode is active. Generating AI insight from EC2 using simulated scenario data...'
+          : 'Simulation Mode is active. Using local demo AI fallback. No real devices will be controlled.';
+      _localPendingCommands.clear();
+      _localCommandErrors.clear();
+      _dismissedAlertIds.clear();
+    });
+    _syncSafetyPopup(scenario.dashboard.alerts);
+    if (!NetworkConfig.useBackendScenarioAi) {
+      return;
+    }
+    try {
+      final response = await _api.runScenarioAiPrediction(
+        homeId: _homeId ?? NetworkConfig.defaultHomeId,
+        scenarioPayload: scenario.toBackendPayload(),
+      );
+      if (!mounted || _selectedDemoScenario?.id != scenario.id) {
+        return;
+      }
+      final generatedDashboard = _api.applyScenarioAiResponse(
+        scenario.dashboard,
+        response,
+      );
+      setState(() {
+        _dashboard = generatedDashboard;
+        _scenarioAiBusy = false;
+        _dashboardNotice =
+            'Simulation Mode is active. AI was generated by EC2 from simulated scenario data. No real devices are controlled.';
+      });
+      _syncSafetyPopup(generatedDashboard.alerts);
+    } catch (error) {
+      debugPrint('[KahrabaIQ SCENARIO AI FALLBACK] $error');
+      if (!mounted || _selectedDemoScenario?.id != scenario.id) {
+        return;
+      }
+      setState(() {
+        _scenarioAiBusy = false;
+        _dashboardNotice =
+            'Simulation Mode is active. Backend scenario AI failed, so local demo fallback is shown.';
+      });
+    }
+  }
+
+  Future<void> _returnToLiveData() async {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _selectedDemoScenario = null;
+      _scenarioAiBusy = false;
+      _dashboardNotice = 'Returning to live home data...';
+      _dismissedAlertIds.clear();
+    });
+    await _loadDashboard();
+  }
 
   void _openBreakers(List<Device> devices) {
     Navigator.of(
@@ -738,6 +897,9 @@ class _AiAnalysisSection extends StatelessWidget {
   }
 
   String get _summary {
+    if (dashboard.scenarioId != null && dashboard.aiDashboard == null) {
+      return 'Demo scenario AI result is being prepared.';
+    }
     final ai = dashboard.aiDashboard;
     if (ai != null && ai.statusSummary.trim().isNotEmpty) {
       return ai.statusSummary;
@@ -766,6 +928,17 @@ class _AiAnalysisSection extends StatelessWidget {
       return recommendation.title;
     }
     return 'Waiting for prediction';
+  }
+
+  String get _notificationText {
+    if (dashboard.aiNotifications.isEmpty) {
+      return '';
+    }
+    final item = dashboard.aiNotifications.first;
+    final confidence = item.confidence == null
+        ? ''
+        : ' Confidence ${(item.confidence! * 100).round()}%.';
+    return '${item.title}: ${item.message}$confidence';
   }
 
   @override
@@ -818,6 +991,25 @@ class _AiAnalysisSection extends StatelessWidget {
               ),
             ],
           ),
+          if (dashboard.scenarioId != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: ColorTokens.warning.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: ColorTokens.warning.withValues(alpha: 0.45),
+                ),
+              ),
+              child: Text(
+                'Simulation Mode: ${dashboard.scenarioName ?? 'Demo Scenario'}',
+                style: AppTextStyles.caption.copyWith(
+                  color: ColorTokens.warning,
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 14),
           Text(_summary, style: AppTextStyles.bodyMedium),
           const SizedBox(height: 10),
@@ -846,6 +1038,24 @@ class _AiAnalysisSection extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 14),
+          if (_notificationText.isNotEmpty) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: _toneColor.withValues(alpha: 0.10),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: _toneColor.withValues(alpha: 0.28)),
+              ),
+              child: Text(
+                _notificationText,
+                style: AppTextStyles.caption.copyWith(
+                  color: ColorTokens.textPrimary,
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+          ],
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(12),

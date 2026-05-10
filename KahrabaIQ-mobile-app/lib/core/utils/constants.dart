@@ -109,6 +109,8 @@ class NetworkConfig {
   static const String cognitoAdminGroup = AppConfig.cognitoAdminGroup;
   static const String cognitoMemberGroup = AppConfig.cognitoMemberGroup;
   static const bool remoteLiveOnly = AppConfig.remoteLiveOnly;
+  static const bool enableDemoScenarios = AppConfig.enableDemoScenarios;
+  static const bool useBackendScenarioAi = AppConfig.useBackendScenarioAi;
   static const int piApiTimeoutSeconds = AppConfig.piApiTimeoutSeconds;
   static bool get useCognitoAuth => AppConfig.useCognitoAuth;
   static bool get useAwsIotLive => AppConfig.useAwsIotLive;

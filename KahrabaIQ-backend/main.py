@@ -150,7 +150,12 @@ def first_present(*values: Any, default: Any = None) -> Any:
 
 
 def get_time_features(summary: dict[str, Any]) -> dict[str, Any]:
-    timestamp_ms = summary.get("hour_start")
+    timestamp_ms = first_present(
+        summary.get("hour_start"),
+        summary.get("startAtMs"),
+        summary.get("start_at_ms"),
+        summary.get("timestamp_ms"),
+    )
 
     if not isinstance(timestamp_ms, (int, float)):
         timestamp_ms = now_ms()
@@ -170,15 +175,25 @@ def get_branch_energy(branches: dict[str, Any], breaker_id: str) -> dict[str, fl
     if not isinstance(branch, dict):
         branch = {}
 
-    power = branch.get("avg_power_W", branch.get("power_W"))
-    peak_power = branch.get("peak_power_W", branch.get("power_W"))
-    energy = branch.get("estimated_energy_kWh", branch.get("total_estimated_energy_kWh"))
+    power = first_present(branch.get("avg_power_W"), branch.get("avgPowerW"), branch.get("power_W"))
+    peak_power = first_present(branch.get("peak_power_W"), branch.get("peakPowerW"), branch.get("power_W"))
+    energy = first_present(
+        branch.get("estimated_energy_kWh"),
+        branch.get("total_estimated_energy_kWh"),
+        branch.get("energyDeltaKwh"),
+        branch.get("energy_kWh"),
+    )
 
     return {
         "avg_power_W": as_number(power),
         "peak_power_W": as_number(peak_power),
         "energy_kWh": as_number(energy),
     }
+
+
+def summary_section(summary: dict[str, Any], key: str) -> dict[str, Any]:
+    value = summary.get(key)
+    return value if isinstance(value, dict) else {}
 
 
 def calculate_occupancy_score(
@@ -652,15 +667,30 @@ def build_ai_payload(
             detail=f"No usable backend store backend data found for home_id '{home_id}'.",
         )
 
+    sensor_summary = summary_section(latest_summary, "sensorSummary")
+    occupancy_summary = summary_section(latest_summary, "occupancySummary")
+    breaker_summaries = summary_section(latest_summary, "breakerSummaries")
     summary_energy = latest_summary.get("energy")
     if isinstance(summary_energy, dict):
         energy = {**dashboard_energy, **summary_energy}
     else:
-        energy = dashboard_energy
+        energy = {
+            **dashboard_energy,
+            "total_energy_kWh": first_present(
+                latest_summary.get("total_energy_kWh"),
+                latest_summary.get("totalEnergyKwh"),
+            ),
+            "total_estimated_energy_kWh": first_present(
+                latest_summary.get("total_estimated_energy_kWh"),
+                latest_summary.get("totalEnergyKwh"),
+            ),
+        }
 
     branches = energy.get("branches")
     if not isinstance(branches, dict):
         branches = {}
+    if not branches and breaker_summaries:
+        branches = breaker_summaries
 
     switch_branch = get_branch_energy(branches, "breaker_01")
     ac_branch = get_branch_energy(branches, "breaker_02")
@@ -671,29 +701,50 @@ def build_ai_payload(
         first_present(breaker_02_status.get("power_W"), breaker_02_status.get("power_w"))
     )
 
-    using_hourly_summary = bool(latest_summary.get("hour_id"))
+    using_hourly_summary = bool(
+        latest_summary.get("hour_id")
+        or latest_summary.get("summaryId")
+        or latest_summary.get("startAtMs")
+        or latest_summary.get("start_at_ms")
+    )
     input_source = "latest_hourly_summary" if using_hourly_summary else "dashboard_fallback"
     if scenario_id:
         input_source = f"demo_scenario:{scenario_id}:{input_source}"
 
-    sample_count = as_number(latest_summary.get("sample_count"), 1.0)
+    sample_count = as_number(
+        first_present(
+            latest_summary.get("sample_count"),
+            sensor_summary.get("sampleCount"),
+            occupancy_summary.get("sampleCount"),
+        ),
+        1.0,
+    )
     if sample_count <= 0 and dashboard_environment:
         sample_count = 1.0
 
-    motion_count = as_number(latest_summary.get("motion_count"))
+    motion_count = as_number(
+        first_present(
+            latest_summary.get("motion_count"),
+            sensor_summary.get("motionDetectedCount"),
+            occupancy_summary.get("occupiedCount"),
+        )
+    )
     if not using_hourly_summary:
         motion_count = 1.0 if dashboard_environment.get("motion") == 1 else 0.0
 
     temperature = first_present(
         latest_summary.get("avg_temperature"),
+        sensor_summary.get("avgTemperatureC"),
         dashboard_environment.get("temperature"),
     )
     humidity = first_present(
         latest_summary.get("avg_humidity"),
+        sensor_summary.get("avgHumidity"),
         dashboard_environment.get("humidity"),
     )
     sound_raw = first_present(
         latest_summary.get("avg_sound_raw"),
+        sensor_summary.get("avgSoundRaw"),
         dashboard_environment.get("sound_raw"),
         dashboard_environment.get("sound_level"),
     )
@@ -734,7 +785,11 @@ def build_ai_payload(
         )
     )
     total_avg_power_w = as_number(
-        first_present(energy.get("total_avg_power_W"), energy.get("total_power_W"))
+        first_present(
+            energy.get("total_avg_power_W"),
+            energy.get("total_power_W"),
+            switch_branch["avg_power_W"] + ac_branch["avg_power_W"] if using_hourly_summary else None,
+        )
     )
     total_power_for_guardrails = max(dashboard_current_power_w, switch_live_power_w + ac_live_power_w)
     if total_power_for_guardrails <= 0 and not breaker_data_fresh:
@@ -755,18 +810,18 @@ def build_ai_payload(
         "avg_sound_raw": sound_raw,
         "motion_count": motion_count,
         "bright_count": (
-            as_number(latest_summary.get("bright_count"))
+            as_number(first_present(latest_summary.get("bright_count"), sensor_summary.get("brightCount")))
             if using_hourly_summary
             else 1.0 if light_is_bright else 0.0
         ),
         "smoke_count": (
-            as_number(latest_summary.get("smoke_count"))
+            as_number(first_present(latest_summary.get("smoke_count"), sensor_summary.get("smokeDetectedCount")))
             if using_hourly_summary
             else as_number(dashboard_environment.get("smoke"))
         ),
         "noise_count": noise_count,
         "high_temp_count": (
-            as_number(latest_summary.get("high_temp_count"))
+            as_number(first_present(latest_summary.get("high_temp_count"), sensor_summary.get("highTempCount")))
             if using_hourly_summary
             else 1.0 if as_number(temperature) >= 27 else 0.0
         ),
@@ -806,7 +861,11 @@ def build_ai_payload(
         "ac_energy_kWh": ac_branch["energy_kWh"],
         "total_avg_power_W": total_avg_power_w,
         "total_peak_power_W": as_number(
-            first_present(energy.get("total_peak_power_W"), energy.get("total_power_W"))
+            first_present(
+                energy.get("total_peak_power_W"),
+                energy.get("total_power_W"),
+                max(switch_branch["peak_power_W"], ac_branch["peak_power_W"]),
+            )
         ),
         "total_energy_kWh": as_number(
             first_present(
@@ -818,6 +877,8 @@ def build_ai_payload(
             first_present(
                 energy.get("total_estimated_cost_BHD"),
                 energy.get("total_cost_BHD"),
+                as_number(first_present(energy.get("total_estimated_energy_kWh"), energy.get("total_energy_kWh")))
+                * as_number(energy.get("tariff_BHD_per_kWh"), 0.032),
             )
         ),
         "tariff_BHD_per_kWh": as_number(energy.get("tariff_BHD_per_kWh"), 0.032),

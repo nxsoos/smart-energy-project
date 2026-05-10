@@ -52,9 +52,27 @@ Prediction targets:
 Detection method:
 
 - `smart_energy_ai.joblib` provides lightweight scikit-learn predictions.
-- Rule-based guardrails handle safety-critical and obvious waste cases.
-- EC2 adds statistical checks using recent summaries, including rolling average/stddev and same-hour usage comparison.
-- AI runs on demand, hourly from summaries, or immediately for critical/major events. It should not run for every raw sensor message.
+- Level 1 immediate rule alerts handle safety-critical and obvious device/system cases without waiting for ML: smoke/gas, stale sensor data, stale breaker data, repeated command failures, and high power while empty.
+- Level 2 lightweight routine/anomaly checks run periodically and compare current/latest state with recent hourly history using rolling average/stddev, same-hour comparison, weekday/weekend routine scores, and threshold guardrails.
+- Level 3 full ML prediction runs manually or hourly after hourly summaries are available. It predicts `waste_event`, `anomaly_label`, `recommendation_type`, `next_hour_total_energy_kWh`, and `next_hour_total_cost_BHD`.
+- Raw ESP32 readings stay local on the Pi for the fast dashboard. EC2 AI uses hourly summaries, recent history features, command history, and compact latest-state context. Live data is only used for urgent safety checks, current context, and fallback.
+- Daily summaries are for reports, trends, and long-term recommendations, not per-reading inference.
+- AI should not run for every raw sensor message or every live IoT update.
+
+Scheduling:
+
+- `AI_ROUTINE_CHECK_INTERVAL_SECONDS`: lightweight Level 1/2 checks. Use `300` for demo or `600` for normal operation.
+- `AI_FULL_PREDICTION_INTERVAL_SECONDS`: full ML cadence. Default is hourly (`3600`).
+- `AI_PREDICTION_INTERVAL_SECONDS` remains as a compatibility alias for older deployments.
+- Daily report generation should run once per day from daily summaries.
+
+Normalized notification fields:
+
+```text
+id, home_id, severity, category, title, message, device_id,
+target_type, recommendation_type, created_at, acknowledged,
+source, confidence, explanation
+```
 
 Canonical AI storage uses the `KahrabaIQApp` DynamoDB table:
 
@@ -69,6 +87,7 @@ AI API endpoints:
 
 ```text
 POST /api/homes/{home_id}/ai/predict
+POST /api/homes/{home_id}/ai/scenario-predict
 GET  /api/homes/{home_id}/ai/latest
 GET  /api/homes/{home_id}/ai/history
 GET  /api/homes/{home_id}/ai/notifications
@@ -76,16 +95,42 @@ GET  /api/homes/{home_id}/ai/notifications
 
 The older singular `POST /api/home/{home_id}/ai/predict` remains as a compatibility alias.
 
+`POST /api/homes/{home_id}/ai/scenario-predict` is a pure simulation endpoint. It accepts simulated room, energy, device, occupancy, and recent-history data from the Flutter Demo Scenario Mode, runs the same EC2 AI rules/model against that input, and returns normalized AI output marked with `simulation: true` and `source: scenario_ai`. It does not update real live state, queue commands, control devices, or write to `AI#LATEST`.
+
 ## AI Model Scripts
 
 ```bash
 pip install -r requirements.txt
 python devices/train_ai_model.py
+python devices/evaluate_ai_model.py
 python devices/predict_ai.py
 python devices/test_ai_guardrails.py
 ```
 
-If the real dataset is missing, build hourly/time-windowed rows from DynamoDB summaries and label demo data with documented rules for `waste_event`, `anomaly_label`, and `recommendation_type`.
+Scenario AI endpoint verification:
+
+```bash
+python -m py_compile api_server.py main.py devices/test_ai_guardrails.py
+python devices/test_ai_guardrails.py
+curl -X POST http://localhost:8000/api/homes/home_001/ai/scenario-predict \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <COGNITO_ID_TOKEN>" \
+  -d '{"scenario_id":"smoke_demo","scenario_name":"Smoke Demo","room":{"temperature":29,"humidity":55,"motion":true,"smokeStatus":"Smoke/Gas"},"energy":{"power":420,"energyToday":0.4,"costToday":0.012},"devices":{"breaker_01":{"isOn":true,"power":180},"breaker_02":{"isOn":false,"power":0}},"occupancy":{"occupied":true,"state":"occupied"},"recent_history":{"sensor_staleness_seconds":0,"breaker_staleness_seconds":0}}'
+```
+
+If the real dataset is missing, build hourly/time-windowed rows from DynamoDB summaries:
+
+```bash
+python devices/build_ai_dataset.py
+```
+
+The dataset builder uses hourly summaries, not raw every-second sensor data. When real labels are unavailable, demo labels are assigned with explainable rules for safety, empty-room waste, AC waste, normal usage, and next-hour shifted energy/cost targets.
+
+App/dashboard integration:
+
+- Flutter calls `/api/homes/{home_id}/ai/latest`, `/ai/history`, `/ai/notifications`, and `/ai/predict`.
+- Flutter parses normalized AI notifications for safety alerts, anomaly alerts, recommendations, predicted energy/cost, and daily summaries.
+- The Pi dashboard keeps fast live data local and can show EC2 AI status/notifications when cloud dashboard data is available.
 
 ## Secrets
 
