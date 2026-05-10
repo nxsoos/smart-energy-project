@@ -86,7 +86,10 @@ class DemoScenarioSelector extends StatelessWidget {
                 final selected = scenario.id == selectedScenario?.id;
                 return ChoiceChip(
                   selected: selected,
-                  label: Text(scenario.name),
+                  label: Text(
+                    _shortScenarioName(scenario.name),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                   onSelected: (_) => onSelect(scenario),
                   selectedColor: ColorTokens.primary.withValues(alpha: 0.22),
                   backgroundColor: ColorTokens.surface,
@@ -147,6 +150,15 @@ class DemoScenarioSelector extends StatelessWidget {
       ),
     );
   }
+}
+
+String _shortScenarioName(String name) {
+  return switch (name) {
+    'AC Left On Without Occupancy' => 'AC Empty',
+    'Peak Load Risk' => 'Peak Load',
+    'Sensor Offline' => 'Sensor Off',
+    _ => name,
+  };
 }
 
 class _DemoBadge extends StatelessWidget {

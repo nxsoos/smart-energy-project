@@ -187,6 +187,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (previous == null) {
       return incoming;
     }
+    if (previous.scenarioId != incoming.scenarioId) {
+      return incoming;
+    }
 
     final hasIntelligence =
         incoming.aiDashboard != null ||
@@ -243,7 +246,8 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       return;
     }
-    if (_notifiedSmokeAlertIds.add(smokeAlert.id)) {
+    if (_selectedDemoScenario == null &&
+        _notifiedSmokeAlertIds.add(smokeAlert.id)) {
       unawaited(
         NotificationService.showSmokeAlert(
           alertId: smokeAlert.id,
@@ -290,6 +294,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) {
       return;
     }
+    if (_selectedDemoScenario != null) {
+      return;
+    }
     if (_dashboard == null) {
       setState(() {
         _dashboard = _offlineDashboard();
@@ -315,6 +322,8 @@ class _HomeScreenState extends State<HomeScreen> {
         power: 0,
         energyToday: 0,
         energyTotal: 0,
+        monthDataAvailable: false,
+        monthSource: 'unavailable',
       ),
       sensors: SensorData(
         timestamp: DateTime.fromMillisecondsSinceEpoch(0),
@@ -436,9 +445,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 24),
                     EnergyHeroCard(
                       reading: dashboard.reading,
-                      costToday: dashboard.reading.costToday > 0
-                          ? dashboard.reading.costToday
-                          : dashboard.reading.calculateCost(
+                      costMonth: dashboard.reading.costMonth > 0
+                          ? dashboard.reading.costMonth
+                          : dashboard.reading.calculateMonthCost(
                               dashboard.tariffBhdPerKwh,
                             ),
                     ),
@@ -569,8 +578,15 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _openChat() =>
-      Navigator.of(context).push(fadeSlideRoute(const AiChatbotScreen()));
+  void _openChat() => Navigator.of(context).push(
+    fadeSlideRoute(
+      AiChatbotScreen(
+        homeId: _homeId ?? NetworkConfig.defaultHomeId,
+        scenarioId: _selectedDemoScenario?.id,
+        scenarioName: _selectedDemoScenario?.name,
+      ),
+    ),
+  );
 
   Future<void> _activateDemoScenario(DemoScenarioData scenario) async {
     await _liveSubscription?.cancel();
@@ -590,6 +606,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _localPendingCommands.clear();
       _localCommandErrors.clear();
       _dismissedAlertIds.clear();
+      _notifiedSmokeAlertIds.clear();
     });
     _syncSafetyPopup(scenario.dashboard.alerts);
     if (!NetworkConfig.useBackendScenarioAi) {
@@ -636,6 +653,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _scenarioAiBusy = false;
       _dashboardNotice = 'Returning to live home data...';
       _dismissedAlertIds.clear();
+      _notifiedSmokeAlertIds.clear();
     });
     await _loadDashboard();
   }

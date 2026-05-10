@@ -3157,7 +3157,11 @@ def build_energy(
     }
 
 
-def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
+def build_ai(
+    bundle: dict[str, Any],
+    *,
+    smoke_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     latest = {
         **bundle["ai_latest"],
         **bundle["backend_latest_prediction"],
@@ -3166,6 +3170,21 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
     }
     if not latest:
         return {}
+    ai_ctx = ai_latest_context(latest)
+    smoke_ctx = smoke_context or {}
+    if ai_ctx.get("stale") is True:
+        print(
+            f"[KahrabaIQ AI DASHBOARD] home_ai_latest_stale age_seconds={ai_ctx.get('age_seconds')} "
+            f"source={ai_ctx.get('source')} smoke_status={smoke_ctx.get('status')}"
+        )
+        return stale_ai_dashboard(ai_ctx, smoke_ctx)
+    if smoke_ctx and smoke_ctx.get("active") is not True and item_mentions_smoke_or_gas(latest):
+        print(
+            f"[KahrabaIQ AI DASHBOARD] suppressing_stale_smoke_ai "
+            f"ai_age_seconds={ai_ctx.get('age_seconds')} smoke_status={smoke_ctx.get('status')} "
+            f"sensor_age_seconds={smoke_ctx.get('age_seconds')}"
+        )
+        return stale_ai_dashboard(ai_ctx, smoke_ctx)
     predictions = as_dict(latest.get("predictions"))
     waste = as_dict(predictions.get("waste_event"))
     anomaly = as_dict(predictions.get("anomaly_label"))
@@ -3445,8 +3464,36 @@ def create_cloud_remote_command(home_id: str, request: CloudRemoteCommandRequest
 
 
 def summary_energy_value(summary: dict[str, Any]) -> float:
-    value = as_number(first_present(summary.get("totalEnergyKwh"), summary.get("total_energy_kwh")), 0)
+    energy = as_dict(summary.get("energy"))
+    value = as_number(
+        first_present(
+            energy.get("total_estimated_energy_kWh"),
+            energy.get("total_energy_kWh"),
+            energy.get("total_energy_kwh"),
+            summary.get("total_estimated_energy_kWh"),
+            summary.get("total_energy_kWh"),
+            summary.get("total_energy_kwh"),
+            summary.get("totalEnergyKwh"),
+        ),
+        0,
+    )
     return float(value or 0)
+
+
+def summary_start_value(summary: dict[str, Any]) -> int:
+    return int(
+        as_number(
+            first_present(
+                summary.get("startAtMs"),
+                summary.get("start_at_ms"),
+                summary.get("hour_start"),
+                summary.get("timestamp_ms"),
+                summary.get("updated_at_ms"),
+            ),
+            0,
+        )
+        or 0
+    )
 
 
 def summary_command_success_rate(summaries: list[dict[str, Any]]) -> float | None:
@@ -3465,6 +3512,151 @@ def summary_command_success_rate(summaries: list[dict[str, Any]]) -> float | Non
     if total <= 0:
         return None
     return round((succeeded / total) * 100, 1)
+
+
+def build_monthly_energy_summary(home_id: str, settings: dict[str, Any]) -> dict[str, Any]:
+    now_dt = datetime.now(BAHRAIN_TZ)
+    month_start = datetime(now_dt.year, now_dt.month, 1, tzinfo=BAHRAIN_TZ)
+    start_ms = int(month_start.timestamp() * 1000)
+    end_ms = now_ms()
+    daily = query_summaries_between(
+        home_id,
+        "daily",
+        start_at_ms=start_ms,
+        end_at_ms=end_ms,
+        limit=45,
+    )
+    source = "daily_summary" if daily else "unavailable"
+    summaries = daily
+    if not summaries:
+        summaries = query_summaries_between(
+            home_id,
+            "hourly",
+            start_at_ms=start_ms,
+            end_at_ms=end_ms,
+            limit=100,
+        )
+        source = "hourly_summary" if summaries else "unavailable"
+    month_kwh = round(sum(summary_energy_value(summary) for summary in summaries), 6)
+    tariff = as_number(settings.get("cost_per_kwh"), 0.029)
+    return {
+        "month_kwh": month_kwh,
+        "month_cost_bhd": round(month_kwh * tariff, 6),
+        "month_start_ms": start_ms,
+        "month_start_iso": iso_from_ms(start_ms),
+        "month_end_ms": end_ms,
+        "month_end_iso": iso_from_ms(end_ms),
+        "month_source": source,
+        "month_data_available": bool(summaries and month_kwh > 0),
+        "month_summary_count": len(summaries),
+        "monthly_summary_count": len(summaries),
+    }
+
+
+def timestamp_from_ai_item(item: dict[str, Any]) -> int:
+    return int(
+        as_number(
+            first_present(
+                item.get("created_at_ms"),
+                item.get("created_at"),
+                item.get("updated_at_ms"),
+                item.get("last_checked_at"),
+            ),
+            0,
+        )
+        or 0
+    )
+
+
+def smoke_text_is_active(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text or any(token in text for token in ["clear", "normal", "no smoke", "no gas", "safe"]):
+        return False
+    return any(token in text for token in ["detect", "smoke", "gas"])
+
+
+def item_mentions_smoke_or_gas(item: Any) -> bool:
+    if isinstance(item, dict):
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ["id", "title", "message", "category", "type", "explanation", "recommendation_type"]
+        ).lower()
+    else:
+        text = str(item or "").lower()
+    return "smoke" in text or "gas" in text
+
+
+def dashboard_smoke_context(room: dict[str, Any], safety: dict[str, Any]) -> dict[str, Any]:
+    timestamp_ms = int(as_number(room.get("sensor_timestamp_ms"), 0) or 0)
+    age_seconds = round((now_ms() - timestamp_ms) / 1000, 3) if timestamp_ms > 0 else None
+    stale = age_seconds is None or age_seconds > 180
+    smoke_state = as_dict(safety.get("smoke_state"))
+    emergency_mode = as_dict(safety.get("emergency_mode"))
+    room_active = normalize_bool(room.get("smoke")) is True or smoke_text_is_active(room.get("smoke_text"))
+    safety_active = str(smoke_state.get("status") or "").lower() in {"pending", "confirmed", "active", "open"}
+    emergency_active = emergency_mode.get("active") is True and item_mentions_smoke_or_gas(emergency_mode)
+    active = not stale and (room_active or safety_active or emergency_active)
+    status = "active" if active else "stale" if stale else "clear"
+    return {
+        "active": active,
+        "stale": stale,
+        "status": status,
+        "sensor_timestamp_ms": timestamp_ms,
+        "age_seconds": age_seconds,
+        "room_smoke_text": room.get("smoke_text"),
+        "safety_status": smoke_state.get("status"),
+    }
+
+
+def ai_latest_context(latest: dict[str, Any]) -> dict[str, Any]:
+    timestamp_ms = timestamp_from_ai_item(latest)
+    age_seconds = round((now_ms() - timestamp_ms) / 1000, 3) if timestamp_ms > 0 else None
+    stale = age_seconds is None or age_seconds > 15 * 60
+    return {
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": iso_from_ms(timestamp_ms) if timestamp_ms > 0 else None,
+        "age_seconds": age_seconds,
+        "stale": stale,
+        "status": "stale" if stale else "fresh",
+        "source": latest.get("source") or latest.get("input_source") or "unknown",
+    }
+
+
+def stale_ai_dashboard(ai_ctx: dict[str, Any], smoke_ctx: dict[str, Any]) -> dict[str, Any]:
+    if smoke_ctx.get("stale"):
+        summary = "Room sensor data is stale. Waiting for fresh sensor data before showing safety-critical AI alerts."
+        label = "Waiting for sensors"
+        action = "Check room sensor"
+        status = "needs_fresh_sensor_data"
+    else:
+        summary = "Latest AI result is stale. Showing live dashboard data while waiting for a fresh prediction."
+        label = "AI stale"
+        action = "Run fresh AI check"
+        status = "stale_ai_result"
+    return {
+        "status": status,
+        "prediction_status": status,
+        "confidence": 0,
+        "waste_confidence": 0,
+        "abnormal_usage_confidence": 0,
+        "energy_waste": False,
+        "abnormal_usage": "normal",
+        "recommendation_type": "check_sensor_data" if smoke_ctx.get("stale") else "refresh_ai_prediction",
+        "next_hour_energy_kWh": 0,
+        "next_hour_cost_BHD": 0,
+        "efficiency_score": 0,
+        "summary": summary,
+        "ai_status_summary": summary,
+        "ai_action_title": action,
+        "recommended_action": action,
+        "control_suggestion": None,
+        "updated_at": ai_ctx.get("timestamp_ms"),
+        "ai_status_code": status,
+        "ai_status_label": label,
+        "ai_status_tone": "warning",
+        "ai_freshness_status": ai_ctx.get("status"),
+        "ai_age_seconds": ai_ctx.get("age_seconds"),
+    }
 
 
 def build_home_insights(home_id: str) -> dict[str, Any]:
@@ -3737,13 +3929,35 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     resolve_smoke_emergency_if_clear(home_id)
     bundle = read_home_bundle(home_id)
     devices = build_devices(bundle, home_id)
+    room = build_room(bundle)
     timestamp_ms = now_ms()
     control = ensure_control(home_id)
     settings = ensure_settings(home_id)
     control_mode = str(control.get("mode", "assist")).lower()
     canonical_ai_latest = as_dict(bundle["canonical_ai_latest"])
+    smoke_ctx = dashboard_smoke_context(room, as_dict(bundle["safety"]))
+    ai_ctx = ai_latest_context(canonical_ai_latest)
     ai_latest_suggestions = object_to_list(canonical_ai_latest.get("suggestions"))
-    ai_notifications = query_ai_notifications(home_id, limit=20)
+    if smoke_ctx.get("active") is not True:
+        ai_latest_suggestions = [item for item in ai_latest_suggestions if not item_mentions_smoke_or_gas(item)]
+    current_ai_notifications = [
+        item
+        for item in object_to_list(canonical_ai_latest.get("notifications"))
+        if isinstance(item, dict)
+        and str(item.get("status", "active")).lower() in {"active", "open", "pending"}
+        and item.get("acknowledged") is not True
+        and (smoke_ctx.get("active") is True or not item_mentions_smoke_or_gas(item))
+    ]
+    energy = build_energy(bundle, devices, settings)
+    monthly_energy = build_monthly_energy_summary(home_id, settings)
+    if monthly_energy.get("month_data_available") is not True and as_number(energy.get("today_kwh"), 0) > 0:
+        today_kwh = as_number(energy.get("today_kwh"), 0)
+        tariff = as_number(settings.get("cost_per_kwh"), 0.029)
+        monthly_energy["month_kwh"] = today_kwh
+        monthly_energy["month_cost_bhd"] = round(today_kwh * tariff, 6)
+        monthly_energy["month_source"] = "today_fallback"
+        monthly_energy["month_data_available"] = True
+    energy.update(monthly_energy)
 
     alerts = dedupe_alerts(active_only(
         object_to_list(bundle["alerts_active"])
@@ -3759,6 +3973,13 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         + object_to_list(bundle["backend_recommendations"])
         + ai_latest_suggestions
     )
+    print(
+        f"[KahrabaIQ DASHBOARD] home_id={home_id} ai_age_seconds={ai_ctx.get('age_seconds')} "
+        f"ai_status={ai_ctx.get('status')} smoke_status={smoke_ctx.get('status')} "
+        f"smoke_active={smoke_ctx.get('active')} sensor_age_seconds={smoke_ctx.get('age_seconds')} "
+        f"active_alerts={len(alerts)} active_suggestions={len(ai_latest_suggestions)} "
+        f"ai_notifications={len(current_ai_notifications)} month_source={energy.get('month_source')}"
+    )
 
     return {
         "home_id": home_id,
@@ -3767,9 +3988,9 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
             "label": control_label(control_mode),
             "description": control_description(control_mode),
         },
-        "room": build_room(bundle),
+        "room": room,
         "occupancy": bundle["occupancy_room1"],
-        "energy": build_energy(bundle, devices, settings),
+        "energy": energy,
         "devices": devices,
         "alerts": alerts,
         "critical_alerts": [
@@ -3781,6 +4002,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         "safety": {
             "emergency_mode": as_dict(as_dict(bundle["safety"]).get("emergency_mode")),
             "smoke_state": as_dict(as_dict(bundle["safety"]).get("smoke_state")),
+            "smoke_context": smoke_ctx,
         },
         "recommendations": recommendations,
         "action_suggestions": dedupe_action_suggestions(
@@ -3792,11 +4014,15 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         "automation_logs": object_to_list(
             safe_get(f"/homes/{home_id}/automation_logs", {})
         )[-10:],
-        "ai": build_ai(bundle),
-        "ai_notifications": ai_notifications
-        or object_to_list(canonical_ai_latest.get("notifications")),
-        "ai_alerts": object_to_list(canonical_ai_latest.get("alerts")),
+        "ai": build_ai(bundle, smoke_context=smoke_ctx),
+        "ai_notifications": current_ai_notifications,
+        "ai_alerts": [
+            item
+            for item in object_to_list(canonical_ai_latest.get("alerts"))
+            if smoke_ctx.get("active") is True or not item_mentions_smoke_or_gas(item)
+        ],
         "ai_suggestions": ai_latest_suggestions,
+        "ai_freshness": ai_ctx,
         "ai_daily_summary": as_dict(as_dict(bundle["backend_ai"]).get("daily_summary")),
         "system_health": bundle["system_health"] or bundle["backend_device_health"],
         "settings_summary": settings_summary(settings),
@@ -4483,11 +4709,17 @@ def list_my_notifications(
     notifications = [
         item
         for item in raw_notifications
-        if isinstance(item, dict) and (not unread_only or item.get("read") is not True)
+        if isinstance(item, dict)
+        and item.get("dismissed") is not True
+        and (not unread_only or item.get("read") is not True)
     ]
     notifications.sort(key=user_notification_sort_key, reverse=True)
     limited = notifications[:limit]
-    unread_count = sum(1 for item in raw_notifications if isinstance(item, dict) and item.get("read") is not True)
+    unread_count = sum(
+        1
+        for item in raw_notifications
+        if isinstance(item, dict) and item.get("dismissed") is not True and item.get("read") is not True
+    )
     return {
         "success": True,
         "uid": actor.uid,
@@ -4516,6 +4748,30 @@ def mark_my_notification_read(
             f"/homes/{home_id}/notifications/{notification_id}",
             {"read": True, "read_at_ms": timestamp_ms, "read_at_iso": iso_from_ms(timestamp_ms)},
         )
+    return {"success": True, "notification_id": notification_id}
+
+
+@app.post("/api/users/me/notifications/{notification_id}/dismiss")
+def dismiss_my_notification(
+    notification_id: str,
+    actor: AuthContext = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    notification = as_dict(safe_get(f"/users/{actor.uid}/notifications/{notification_id}", {}))
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification does not exist.")
+    updates = {
+        "dismissed": True,
+        "dismissed_at_ms": timestamp_ms,
+        "dismissed_at_iso": iso_from_ms(timestamp_ms),
+        "read": True,
+        "read_at_ms": timestamp_ms,
+        "read_at_iso": iso_from_ms(timestamp_ms),
+    }
+    safe_update(f"/users/{actor.uid}/notifications/{notification_id}", updates)
+    home_id = str(notification.get("home_id") or "")
+    if home_id:
+        safe_update(f"/homes/{home_id}/notifications/{notification_id}", updates)
     return {"success": True, "notification_id": notification_id}
 
 
@@ -4548,11 +4804,17 @@ def list_notifications(home_id: str, limit: int = 50, unread_only: bool = False)
     notifications = [
         item
         for item in raw_notifications
-        if isinstance(item, dict) and (not unread_only or item.get("read") is not True)
+        if isinstance(item, dict)
+        and item.get("dismissed") is not True
+        and (not unread_only or item.get("read") is not True)
     ]
     notifications.sort(key=notification_sort_key, reverse=True)
     limited = notifications[: max(1, min(int(limit), 100))]
-    unread_count = sum(1 for item in raw_notifications if isinstance(item, dict) and item.get("read") is not True)
+    unread_count = sum(
+        1
+        for item in raw_notifications
+        if isinstance(item, dict) and item.get("dismissed") is not True and item.get("read") is not True
+    )
     return {
         "success": True,
         "home_id": home_id,
@@ -5676,8 +5938,24 @@ def call_ai_chat_service(home_id: str, request: ChatProxyRequest, history: list[
         scenario_name=request.scenario_name,
         conversation_history=history,
     )
-    ai_response = ai_engine.chat_home(home_id, ai_request)
-    return ai_response.model_dump() if hasattr(ai_response, "model_dump") else ai_response.dict()
+    try:
+        ai_response = ai_engine.chat_home(home_id, ai_request)
+        return ai_response.model_dump() if hasattr(ai_response, "model_dump") else ai_response.dict()
+    except HTTPException as error:
+        detail = str(error.detail)
+        if "GEMINI_API_KEY" not in detail and "Gemini" not in detail:
+            raise
+        return {
+            "home_id": home_id,
+            "answer": (
+                "Gemini chat is not available from the backend right now. "
+                "The EC2 chat session and history are working, but GEMINI_API_KEY or Gemini connectivity must be fixed before I can generate a full answer."
+            ),
+            "used_data": False,
+            "timestamp": now_ms(),
+            "model": "gemini_unavailable",
+            "error": detail,
+        }
 
 
 def send_chat_session_message(
@@ -5728,7 +6006,7 @@ def send_chat_session_message(
         "created_by": "assistant",
         "created_at_ms": assistant_timestamp_ms,
         "created_at_iso": iso_from_ms(assistant_timestamp_ms),
-        "model": "gemini",
+        "model": ai_data.get("model") or "gemini",
         "used_home_context": bool(ai_data.get("used_data", True)),
         "used_recent_history_count": len(history),
         "sources": ["dashboard", "alerts", "recommendations", "ai_latest"],

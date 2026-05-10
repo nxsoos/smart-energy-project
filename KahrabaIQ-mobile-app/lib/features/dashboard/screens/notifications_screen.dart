@@ -48,6 +48,21 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     await _reload();
   }
 
+  Future<bool> _dismiss(AppNotification notification) async {
+    await _api.dismissNotification(
+      homeId: widget.homeId,
+      notificationId: notification.id,
+    );
+    await _reload();
+    if (!mounted) {
+      return true;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Notification dismissed')));
+    return true;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -107,6 +122,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                       _NotificationTile(
                         notification: notification,
                         onTap: () => _markRead(notification),
+                        onDismiss: () => _dismiss(notification),
                       ),
                 ],
               );
@@ -119,60 +135,81 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
 }
 
 class _NotificationTile extends StatelessWidget {
-  const _NotificationTile({required this.notification, required this.onTap});
+  const _NotificationTile({
+    required this.notification,
+    required this.onTap,
+    required this.onDismiss,
+  });
 
   final AppNotification notification;
   final VoidCallback onTap;
+  final Future<bool> Function() onDismiss;
 
   @override
   Widget build(BuildContext context) {
     final color = _severityColor(notification.severity);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: ColorTokens.surfaceElevated,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: notification.read
-                  ? ColorTokens.border
-                  : color.withValues(alpha: 0.55),
-            ),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(_iconFor(notification.type), color: color),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(notification.title, style: AppTextStyles.bodyMedium),
-                    const SizedBox(height: 6),
-                    Text(notification.body, style: AppTextStyles.caption),
-                    const SizedBox(height: 8),
-                    Text(
-                      _formatTime(notification.createdAt),
-                      style: AppTextStyles.caption,
-                    ),
-                  ],
-                ),
+    return Dismissible(
+      key: ValueKey(notification.id),
+      direction: DismissDirection.endToStart,
+      confirmDismiss: (_) => onDismiss(),
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        alignment: Alignment.centerRight,
+        decoration: BoxDecoration(
+          color: ColorTokens.danger.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: ColorTokens.danger.withValues(alpha: 0.35)),
+        ),
+        child: const Icon(Icons.delete_outline, color: ColorTokens.danger),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: ColorTokens.surfaceElevated,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: notification.read
+                    ? ColorTokens.border
+                    : color.withValues(alpha: 0.55),
               ),
-              if (!notification.read)
-                Container(
-                  width: 9,
-                  height: 9,
-                  decoration: BoxDecoration(
-                    color: color,
-                    shape: BoxShape.circle,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(_iconFor(notification.type), color: color),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(notification.title, style: AppTextStyles.bodyMedium),
+                      const SizedBox(height: 6),
+                      Text(notification.body, style: AppTextStyles.caption),
+                      const SizedBox(height: 8),
+                      Text(
+                        _formatTime(notification.createdAt),
+                        style: AppTextStyles.caption,
+                      ),
+                    ],
                   ),
                 ),
-            ],
+                if (!notification.read)
+                  Container(
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -309,9 +346,20 @@ IconData _iconFor(String type) {
 
 String _formatTime(DateTime time) {
   final local = time.toLocal();
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final date = DateTime(local.year, local.month, local.day);
   final hour = local.hour.toString().padLeft(2, '0');
   final minute = local.minute.toString().padLeft(2, '0');
-  return '$hour:$minute';
+  if (date == today) {
+    return 'Today $hour:$minute';
+  }
+  if (date == today.subtract(const Duration(days: 1))) {
+    return 'Yesterday $hour:$minute';
+  }
+  final day = local.day.toString().padLeft(2, '0');
+  final month = local.month.toString().padLeft(2, '0');
+  return '$day/$month/${local.year} $hour:$minute';
 }
 
 List<Alert> _dedupeAlerts(List<Alert> alerts) {

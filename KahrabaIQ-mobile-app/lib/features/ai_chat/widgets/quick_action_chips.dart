@@ -10,7 +10,7 @@ class QuickActionChips extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const actions = ['Turn off all', 'Energy report', 'Is it safe?'];
+    const actions = ['Energy report', 'Is it safe?', 'Why this AI result?'];
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: Row(

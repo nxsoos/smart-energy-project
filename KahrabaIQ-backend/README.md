@@ -97,6 +97,33 @@ The older singular `POST /api/home/{home_id}/ai/predict` remains as a compatibil
 
 `POST /api/homes/{home_id}/ai/scenario-predict` is a pure simulation endpoint. It accepts simulated room, energy, device, occupancy, and recent-history data from the Flutter Demo Scenario Mode, runs the same EC2 AI rules/model against that input, and returns normalized AI output marked with `simulation: true` and `source: scenario_ai`. It does not update real live state, queue commands, control devices, or write to `AI#LATEST`.
 
+Dashboard AI freshness:
+
+- Live dashboard AI only presents smoke/gas warnings when the current room/safety state is actively reporting smoke or gas.
+- If `AI#LATEST` is stale or the room sensor data is stale, the dashboard returns a waiting/stale AI state instead of replaying old critical text.
+- Historical smoke/gas notifications remain available through notification/history endpoints, but they are not treated as current AI card state after the condition clears.
+- Dashboard logs include AI age, smoke status, sensor age, active alert count, active suggestion count, and monthly source to simplify EC2 debugging.
+
+Monthly usage source order:
+
+- Current-month daily DynamoDB summaries.
+- Current-month hourly DynamoDB summaries when daily summaries are missing.
+- Today fallback only when cloud monthly summaries are unavailable but current dashboard energy is non-zero.
+- If no source exists, `month_data_available=false` and the Flutter dashboard should show an empty monthly state rather than a misleading zero.
+
+Chatbot endpoints:
+
+```text
+GET    /api/home/{home_id}/chat/sessions
+POST   /api/home/{home_id}/chat/sessions
+GET    /api/home/{home_id}/chat/sessions/{session_id}/messages
+POST   /api/home/{home_id}/chat/sessions/{session_id}/message
+PATCH  /api/home/{home_id}/chat/sessions/{session_id}
+DELETE /api/home/{home_id}/chat/sessions/{session_id}
+```
+
+Chat sessions and messages are stored in DynamoDB through the app path store under `/homes/{home_id}/chat/sessions`. Chat uses Cognito/home permissions (`can_use_ai_chat`) and Gemini through `GEMINI_API_KEY`; if Gemini is not configured, the endpoint keeps the session/history working and returns a clear Gemini-unavailable assistant message.
+
 ## AI Model Scripts
 
 ```bash

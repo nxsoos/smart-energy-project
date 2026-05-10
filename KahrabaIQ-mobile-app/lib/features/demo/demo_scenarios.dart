@@ -42,7 +42,9 @@ class DemoScenarioData {
         'voltage': dashboard.reading.voltage,
         'current': dashboard.reading.current,
         'energyToday': dashboard.reading.energyToday,
+        'energyMonth': dashboard.reading.energyMonth,
         'costToday': dashboard.reading.costToday,
+        'costMonth': dashboard.reading.costMonth,
         'tariff_BHD_per_kWh': dashboard.tariffBhdPerKwh,
       },
       'devices': {
@@ -407,6 +409,8 @@ DemoScenarioData _scenario({
   required double power,
   required double energyToday,
   required double costToday,
+  double? energyMonth,
+  double? costMonth,
   required double temperature,
   required double humidity,
   required bool occupied,
@@ -432,6 +436,8 @@ DemoScenarioData _scenario({
   bool breakerOnline = true,
 }) {
   final now = DateTime.now();
+  final scenarioEnergyMonth = energyMonth ?? energyToday * now.day;
+  final scenarioCostMonth = costMonth ?? costToday * now.day;
   final alerts = notifications
       .where((item) => item.isAlert)
       .map(
@@ -457,8 +463,12 @@ DemoScenarioData _scenario({
       current: breakerOnline ? power / 230 : 0,
       power: power,
       energyToday: energyToday,
+      energyMonth: scenarioEnergyMonth,
       energyTotal: energyToday,
       costToday: costToday,
+      costMonth: scenarioCostMonth,
+      monthDataAvailable: true,
+      monthSource: 'demo_scenario',
     ),
     sensors: SensorData(
       timestamp: sensorOnline ? now : now.subtract(const Duration(minutes: 16)),

@@ -352,6 +352,50 @@ class DeviceCommandResult {
   final String? commandId;
 }
 
+class ChatSessionSummary {
+  const ChatSessionSummary({
+    required this.id,
+    required this.title,
+    required this.updatedAt,
+    this.lastMessagePreview = '',
+    this.messageCount = 0,
+  });
+
+  final String id;
+  final String title;
+  final DateTime updatedAt;
+  final String lastMessagePreview;
+  final int messageCount;
+}
+
+class ChatMessageEntry {
+  const ChatMessageEntry({
+    required this.id,
+    required this.role,
+    required this.content,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String role;
+  final String content;
+  final DateTime createdAt;
+
+  bool get isUser => role == 'user';
+}
+
+class ChatSendResult {
+  const ChatSendResult({
+    required this.session,
+    required this.userMessage,
+    required this.assistantMessage,
+  });
+
+  final ChatSessionSummary session;
+  final ChatMessageEntry userMessage;
+  final ChatMessageEntry assistantMessage;
+}
+
 class KahrabaIqApiService {
   KahrabaIqApiService()
     : _dio = Dio(
@@ -528,6 +572,84 @@ class KahrabaIqApiService {
       queryParameters: {'limit': limit},
     );
     return _asList(_asMap(response.data)['history']).map(_asMap).toList();
+  }
+
+  Future<List<ChatSessionSummary>> fetchChatSessions({
+    required String homeId,
+  }) async {
+    final response = await _dio.get('/api/home/$homeId/chat/sessions');
+    return _asList(_asMap(response.data)['sessions'])
+        .map((item) => _parseChatSession(_asMap(item)))
+        .where((item) => item.id.isNotEmpty)
+        .toList();
+  }
+
+  Future<ChatSessionSummary> createChatSession({
+    required String homeId,
+    String title = 'New Chat',
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/chat/sessions',
+      data: {'title': title},
+    );
+    return _parseChatSession(_asMap(_asMap(response.data)['session']));
+  }
+
+  Future<List<ChatMessageEntry>> fetchChatMessages({
+    required String homeId,
+    required String sessionId,
+  }) async {
+    final response = await _dio.get(
+      '/api/home/$homeId/chat/sessions/$sessionId/messages',
+    );
+    return _asList(_asMap(response.data)['messages'])
+        .map((item) => _parseChatMessage(_asMap(item)))
+        .where((item) => item.id.isNotEmpty && item.content.isNotEmpty)
+        .toList();
+  }
+
+  Future<ChatSendResult> sendChatMessage({
+    required String homeId,
+    required String sessionId,
+    required String message,
+    String? homeName,
+    String? scenarioId,
+    String? scenarioName,
+  }) async {
+    final response = await _dio.post(
+      '/api/home/$homeId/chat/sessions/$sessionId/message',
+      data: {
+        'message': message,
+        'home_name': ?homeName,
+        'scenario_id': ?scenarioId,
+        'scenario_name': ?scenarioName,
+      },
+    );
+    final data = _asMap(response.data);
+    return ChatSendResult(
+      session: _parseChatSession(_asMap(data['session'])),
+      userMessage: _parseChatMessage(_asMap(data['user_message'])),
+      assistantMessage: _parseChatMessage(_asMap(data['assistant_message'])),
+    );
+  }
+
+  ChatSessionSummary _parseChatSession(Map<String, dynamic> data) {
+    return ChatSessionSummary(
+      id: _asString(_pick(data, ['session_id', 'id'])),
+      title: _asString(_pick(data, ['title']), fallback: 'New Chat'),
+      updatedAt: _asDateTime(_pick(data, ['updated_at_ms', 'updated_at_iso'])),
+      lastMessagePreview: _asString(_pick(data, ['last_message_preview'])),
+      messageCount: _asInt(_pick(data, ['message_count'])),
+    );
+  }
+
+  ChatMessageEntry _parseChatMessage(Map<String, dynamic> data) {
+    return ChatMessageEntry(
+      id: _asString(_pick(data, ['message_id', 'id'])),
+      role: _asString(_pick(data, ['role']), fallback: 'assistant'),
+      content: _asString(_pick(data, ['content', 'message', 'answer'])),
+      createdAt: _asDateTime(_pick(data, ['created_at_ms', 'created_at_iso'])),
+    );
   }
 
   Stream<Alert> watchAlerts({
@@ -915,11 +1037,21 @@ class KahrabaIqApiService {
           fallback: totalDevicePower,
         ),
         energyToday: energyToday,
+        energyMonth: _asDouble(
+          _pick(energy, ['energyMonth', 'monthKwh', 'month_kwh']),
+          fallback: energyToday,
+        ),
         energyTotal: _asDouble(
           _pick(energy, ['energyTotal', 'totalEnergyKwh', 'energyTotalKwh']),
           fallback: energyToday,
         ),
         costToday: _asDouble(_pick(energy, ['costToday', 'costTodayBhd'])),
+        costMonth: _asDouble(_pick(energy, ['costMonth', 'monthCostBhd'])),
+        monthDataAvailable: _asBool(
+          _pick(energy, ['monthDataAvailable', 'month_data_available']),
+          fallback: true,
+        ),
+        monthSource: _asString(_pick(energy, ['monthSource', 'month_source'])),
       ),
       sensors: parsedSensors,
       devices: devices,
@@ -1224,12 +1356,37 @@ class KahrabaIqApiService {
         energyToday: _asDouble(
           _pick(energy, ['today_kwh', 'total_energy_kWh']),
         ),
+        energyMonth: _asDouble(
+          _pick(energy, [
+            'month_kwh',
+            'monthly_kwh',
+            'current_month_kwh',
+            'month_energy_kWh',
+          ]),
+          fallback: _asDouble(_pick(energy, ['today_kwh', 'total_energy_kWh'])),
+        ),
         energyTotal: _asDouble(
           _pick(energy, ['today_kwh', 'total_energy_kWh']),
         ),
         costToday: _asDouble(
           _pick(energy, ['today_cost_bhd', 'total_cost_BHD']),
         ),
+        costMonth: _asDouble(
+          _pick(energy, [
+            'month_cost_bhd',
+            'monthly_cost_bhd',
+            'current_month_cost_bhd',
+            'month_cost_BHD',
+          ]),
+          fallback: _asDouble(
+            _pick(energy, ['today_cost_bhd', 'total_cost_BHD']),
+          ),
+        ),
+        monthDataAvailable: _asBool(
+          _pick(energy, ['month_data_available', 'monthDataAvailable']),
+          fallback: true,
+        ),
+        monthSource: _asString(_pick(energy, ['month_source', 'monthSource'])),
       ),
       sensors: _sensorWithSmokeOverride(
         SensorData(
@@ -1863,6 +2020,17 @@ class KahrabaIqApiService {
     }
 
     await _dio.post('/api/users/me/notifications/$notificationId/read');
+  }
+
+  Future<void> dismissNotification({
+    required String homeId,
+    required String notificationId,
+  }) async {
+    if (usesLocalPiApi) {
+      return;
+    }
+
+    await _dio.post('/api/users/me/notifications/$notificationId/dismiss');
   }
 
   Future<void> markAllNotificationsRead() async {
@@ -2788,6 +2956,15 @@ class KahrabaIqApiService {
           'energy_kwh',
         ]),
       ),
+      energyMonth: _asDouble(
+        _pick(source, [
+          'month_kwh',
+          'monthly_kwh',
+          'current_month_kwh',
+          'energyMonth',
+          'monthKwh',
+        ]),
+      ),
       energyTotal: _asDouble(
         _pick(source, [
           'total_energy_kWh',
@@ -2813,6 +2990,20 @@ class KahrabaIqApiService {
           'today_cost',
         ]),
       ),
+      costMonth: _asDouble(
+        _pick(source, [
+          'month_cost_bhd',
+          'monthly_cost_bhd',
+          'current_month_cost_bhd',
+          'costMonth',
+          'monthCostBhd',
+        ]),
+      ),
+      monthDataAvailable: _asBool(
+        _pick(source, ['month_data_available', 'monthDataAvailable']),
+        fallback: true,
+      ),
+      monthSource: _asString(_pick(source, ['month_source', 'monthSource'])),
     );
   }
 

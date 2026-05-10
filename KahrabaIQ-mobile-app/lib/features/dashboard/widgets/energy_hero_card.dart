@@ -12,16 +12,17 @@ class EnergyHeroCard extends StatelessWidget {
   const EnergyHeroCard({
     super.key,
     required this.reading,
-    required this.costToday,
+    required this.costMonth,
   });
 
   final EnergyReading reading;
-  final double costToday;
+  final double costMonth;
 
   @override
   Widget build(BuildContext context) {
     final powerKw = reading.power / 1000;
     final progress = (powerKw / 4).clamp(0.05, 1.0);
+    final hasMonth = reading.monthDataAvailable;
     return RepaintBoundary(
       child: Container(
         padding: const EdgeInsets.all(22),
@@ -59,12 +60,16 @@ class EnergyHeroCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   Text(
-                    'Today ${formatCost(costToday)}',
+                    hasMonth
+                        ? 'This month ${formatCost(costMonth)}'
+                        : 'No monthly data yet',
                     style: AppTextStyles.bodyMedium,
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '8% lower than yesterday',
+                    hasMonth
+                        ? '${reading.energyMonth.toStringAsFixed(1)} kWh this month'
+                        : 'Waiting for cloud summaries',
                     style: AppTextStyles.caption.copyWith(
                       color: ColorTokens.textPrimary,
                     ),

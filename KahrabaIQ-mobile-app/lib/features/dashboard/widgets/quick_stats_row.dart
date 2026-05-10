@@ -33,7 +33,11 @@ class QuickStatsRow extends StatelessWidget {
       0,
       (sum, device) => sum + device.energyToday,
     );
-    final energyToday = breakerEnergy > 0 ? breakerEnergy : reading.energyToday;
+    final energyMonth = reading.energyMonth > 0
+        ? reading.energyMonth
+        : breakerEnergy > 0
+        ? breakerEnergy
+        : reading.energyToday;
 
     return Row(
       children: [
@@ -68,11 +72,13 @@ class QuickStatsRow extends StatelessWidget {
         Expanded(
           child: MetricCard(
             title: 'Energy',
-            value: energyToday.toStringAsFixed(1),
-            unit: 'kWh',
+            value: reading.monthDataAvailable
+                ? energyMonth.toStringAsFixed(1)
+                : '--',
+            unit: reading.monthDataAvailable ? 'kWh' : '',
             icon: Icons.speed,
             color: ColorTokens.success,
-            trendLabel: 'today',
+            trendLabel: reading.monthDataAvailable ? 'month' : 'no data',
           ),
         ),
       ],

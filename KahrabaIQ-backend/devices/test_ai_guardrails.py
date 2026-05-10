@@ -12,12 +12,15 @@ from aws_cloud_store import ai_alert_sk, ai_prediction_sk, ai_suggestion_sk, hom
 from api_server import (
     AiScenarioPredictRequest,
     ai_notification,
+    build_ai,
     build_ai_payload_from_scenario,
+    dashboard_smoke_context,
     apply_scenario_next_hour_fallback,
     run_immediate_safety_checks,
     run_lightweight_anomaly_checks,
     summary_energy_value,
     summary_power_value,
+    now_ms,
 )
 
 
@@ -104,6 +107,27 @@ def run() -> None:
     }
     check("pi hourly energy is parsed", summary_energy_value(pi_hourly_summary) == 0.42)
     check("pi hourly power is parsed", summary_power_value(pi_hourly_summary) == 140)
+    nested_daily_summary = {"energy": {"total_estimated_energy_kWh": 2.4}}
+    check("nested summary energy is parsed", summary_energy_value(nested_daily_summary) == 2.4)
+
+    smoke_context = dashboard_smoke_context(
+        {"smoke": False, "smoke_text": "Clear", "sensor_timestamp_ms": now_ms()},
+        {"smoke_state": {"status": "clear"}},
+    )
+    stale_smoke_ai = build_ai(
+        {
+            "ai_latest": {},
+            "backend_latest_prediction": {},
+            "backend_dashboard_ai": {},
+            "canonical_ai_latest": {
+                "created_at_ms": now_ms(),
+                "ai_status_summary": "Gas or smoke detected: Check the room immediately.",
+                "explanation": "Gas or smoke detected.",
+            },
+        },
+        smoke_context=smoke_context,
+    )
+    check("clear smoke suppresses stale smoke AI", stale_smoke_ai["prediction_status"] in {"stale_ai_result", "needs_fresh_sensor_data"})
 
     notification = ai_notification(
         "home_001",
