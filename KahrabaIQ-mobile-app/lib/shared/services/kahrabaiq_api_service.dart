@@ -338,6 +338,40 @@ class KahrabaIqApiService {
 
   bool get usesLocalPiApi => NetworkConfig.useLocalPiApi;
 
+  Future<Map<String, dynamic>> runAiPrediction({required String homeId}) async {
+    final response = await _dio.post('/api/homes/$homeId/ai/predict');
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> fetchAiLatest({required String homeId}) async {
+    final response = await _dio.get('/api/homes/$homeId/ai/latest');
+    return _asMap(response.data);
+  }
+
+  Future<List<Map<String, dynamic>>> fetchAiNotifications({
+    required String homeId,
+    int limit = 50,
+  }) async {
+    final response = await _dio.get(
+      '/api/homes/$homeId/ai/notifications',
+      queryParameters: {'limit': limit},
+    );
+    return _asList(_asMap(response.data)['notifications'])
+        .map(_asMap)
+        .toList();
+  }
+
+  Future<List<Map<String, dynamic>>> fetchAiHistory({
+    required String homeId,
+    int limit = 24,
+  }) async {
+    final response = await _dio.get(
+      '/api/homes/$homeId/ai/history',
+      queryParameters: {'limit': limit},
+    );
+    return _asList(_asMap(response.data)['history']).map(_asMap).toList();
+  }
+
   Stream<Alert> watchAlerts({
     required String homeId,
     required int sinceTimestampMs,

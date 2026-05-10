@@ -5,6 +5,7 @@ import 'package:amazon_cognito_identity_dart_2/cognito.dart';
 import 'package:aws_common/aws_common.dart';
 import 'package:aws_signature_v4/aws_signature_v4.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/user_permissions.dart';
 import '../../core/utils/constants.dart';
@@ -245,7 +246,16 @@ class AuthService {
       return null;
     }
     final session = await _validSession();
-    return session?.getIdToken().getJwtToken();
+    final token = session?.getIdToken().getJwtToken();
+if (token != null) {
+  debugPrint('[COGNITO_ID_TOKEN_LENGTH] ${token.length}');
+  for (var i = 0; i < token.length; i += 500) {
+    final end = (i + 500 < token.length) ? i + 500 : token.length;
+    debugPrint('[COGNITO_ID_TOKEN_PART] ${token.substring(i, end)}');
+  }
+}
+return token;
+
   }
 
   Future<UserPermissions> loadPermissions({

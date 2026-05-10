@@ -8,6 +8,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from main import apply_post_processing_rules
+from aws_cloud_store import ai_alert_sk, ai_prediction_sk, ai_suggestion_sk, home_pk
 
 
 def base_model_result() -> dict:
@@ -60,6 +61,28 @@ def run() -> None:
     )
     check("stale breaker needs data", stale_breaker["prediction_status"] == "needs_fresh_breaker_data")
     check("stale breaker forces no waste", stale_breaker["waste_event"]["value"] is False)
+
+    smoke_alert = apply_post_processing_rules(
+        base_model_result(),
+        {
+            "breaker_data_fresh": True,
+            "power_is_low": False,
+            "avg_temperature": 25,
+            "avg_humidity": 45,
+            "avg_sound_raw": 10,
+            "motion_count": 1,
+            "bright_count": 10,
+            "smoke_count": 1,
+            "occupancy_state": "occupied",
+        },
+    )
+    check("smoke creates safety anomaly", smoke_alert["anomaly_label"]["value"] == "safety_smoke_gas_warning")
+    check("smoke is not energy-first waste", smoke_alert["waste_event"]["value"] is False)
+
+    check("home pk is canonical", home_pk("home_001") == "HOME#home_001")
+    check("ai prediction sk is canonical", ai_prediction_sk(42) == "AI#PREDICTION#0000000000042")
+    check("ai alert sk is canonical", ai_alert_sk(42, "gas") == "AI#ALERT#0000000000042#gas")
+    check("ai suggestion sk is canonical", ai_suggestion_sk(42, "save") == "AI#SUGGESTION#0000000000042#save")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import jwt
-import requests
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +32,7 @@ from home_assistant_controller import (
     get_entity_state,
     is_home_assistant_configured,
 )
+import main as ai_engine
 from aws_cloud_store import (
     ACTIVE_COMMAND_STATUSES,
     COMMAND_STATUS_CANCELLED,
@@ -47,11 +47,15 @@ from aws_cloud_store import (
     app_update_path,
     create_remote_command,
     create_iot_websocket_config,
+    get_ai_latest,
     latest_summary,
     find_remote_command,
     normalize_command_status,
+    query_ai_history,
+    query_ai_notifications,
     query_summaries_between,
     query_recent_remote_commands,
+    store_ai_result,
     update_remote_command,
 )
 
@@ -62,7 +66,7 @@ load_dotenv()
 SERVICE_NAME = "smart_energy_api"
 STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "aws").strip().lower()
 BAHRAIN_TZ = ZoneInfo(TIMEZONE)
-DEFAULT_HOME_ID = "home_001"
+DEFAULT_HOME_ID = os.environ.get("DEFAULT_HOME_ID", "home_001")
 HOME_MEMBER_LIMIT = int(os.environ.get("HOME_MEMBER_LIMIT", "3"))
 PAIRING_TOKEN_TTL_MS = int(os.environ.get("PAIRING_TOKEN_TTL_SECONDS", "900")) * 1000
 HOME_INVITE_TTL_MS = int(os.environ.get("HOME_INVITE_TTL_SECONDS", str(7 * 24 * 60 * 60))) * 1000
@@ -79,6 +83,19 @@ CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *DEVICE_ALIASES, *MATTER_DEV
 VALID_COMMANDS = {"turn_on", "turn_off"}
 DEVICE_STALE_AFTER_MS = 45 * 1000
 HA_SYNC_INTERVAL_SECONDS = int(os.environ.get("HA_SYNC_INTERVAL_SECONDS", "30"))
+AI_AUTO_PREDICT_ENABLED = os.environ.get("AI_AUTO_PREDICT_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+AI_PREDICTION_INTERVAL_SECONDS = max(60, int(os.environ.get("AI_PREDICTION_INTERVAL_SECONDS", "300")))
+AI_PREDICTION_INITIAL_DELAY_SECONDS = max(0, int(os.environ.get("AI_PREDICTION_INITIAL_DELAY_SECONDS", "30")))
+AI_PREDICTION_HOME_IDS = [
+    item.strip()
+    for item in os.environ.get("AI_PREDICTION_HOME_IDS", DEFAULT_HOME_ID).split(",")
+    if item.strip()
+]
 USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKERS", "true").strip().lower() in {
     "1",
     "true",
@@ -619,6 +636,7 @@ ROLE_PERMISSIONS: dict[str, dict[str, bool]] = {
 }
 
 ROLE_ALIASES = {"admin": "home_admin"}
+_ai_prediction_scheduler_started = False
 
 
 def iso_from_ms(timestamp_ms: Any) -> str | None:
@@ -635,6 +653,7 @@ def startup() -> None:
     initialize_storage()
     ensure_matter_devices(DEFAULT_HOME_ID)
     start_home_assistant_sync_thread(DEFAULT_HOME_ID)
+    start_ai_prediction_scheduler()
 
 
 def safe_get(path: str, default: Any = None) -> Any:
@@ -2884,6 +2903,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
     backend_energy = as_dict(backend.get("energy"))
     backend_ai = as_dict(backend.get("ai"))
     latest_state = as_dict(home.get("latest_state"))
+    canonical_ai_latest = as_dict(get_ai_latest(home_id))
 
     return {
         "home": home,
@@ -2903,6 +2923,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
         "backend_dashboard_energy": as_dict(backend_dashboard.get("energy")),
         "backend_dashboard_environment": as_dict(backend_dashboard.get("environment")),
         "backend_dashboard_ai": as_dict(backend_dashboard.get("ai")),
+        "canonical_ai_latest": canonical_ai_latest,
         "backend_active_alerts": as_dict(backend.get("active_alerts")),
         "backend_recommendations": as_dict(backend.get("recommendations")),
         "backend_latest_prediction": as_dict(backend_ai.get("latest_prediction")),
@@ -3115,6 +3136,7 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
         **bundle["ai_latest"],
         **bundle["backend_latest_prediction"],
         **bundle["backend_dashboard_ai"],
+        **bundle["canonical_ai_latest"],
     }
     if not latest:
         return {}
@@ -3159,6 +3181,18 @@ def build_ai(bundle: dict[str, Any]) -> dict[str, Any]:
             predictions.get("energy_efficiency_score"),
         ),
         "summary": first_present(latest.get("explanation"), latest.get("summary")),
+        "ai_status_summary": first_present(
+            latest.get("ai_status_summary"),
+            latest.get("explanation"),
+            latest.get("summary"),
+            default="AI is reviewing current energy use.",
+        ),
+        "ai_action_title": first_present(
+            latest.get("ai_action_title"),
+            latest.get("recommendation_type"),
+            recommendation.get("value"),
+            default="Review insight",
+        ),
         "recommended_action": first_present(
             latest.get("recommendation_type"),
             recommendation.get("value"),
@@ -3694,6 +3728,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     recommendations = active_only(
         object_to_list(bundle["recommendations_active"])
         + object_to_list(bundle["backend_recommendations"])
+        + object_to_list(as_dict(bundle["canonical_ai_latest"]).get("suggestions"))
     )
 
     return {
@@ -5599,36 +5634,16 @@ def default_chat_session(home_id: str, actor: AuthContext) -> dict[str, Any]:
 
 
 def call_ai_chat_service(home_id: str, request: ChatProxyRequest, history: list[dict[str, str]]) -> dict[str, Any]:
-    ai_service_url = os.environ.get("AI_SERVICE_URL", "").strip().rstrip("/")
-    if not ai_service_url:
-        raise HTTPException(status_code=503, detail="AI_SERVICE_URL is not configured.")
-    payload = {
-        "message": request.message,
-        "home_id": home_id,
-        "home_name": request.home_name,
-        "scenario_id": request.scenario_id,
-        "scenario_name": request.scenario_name,
-        "conversation_history": history,
-    }
-    headers = {}
-    internal_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
-    if internal_token:
-        headers["X-Service-Token"] = internal_token
-    try:
-        response = requests.post(
-            f"{ai_service_url}/chat/{home_id}",
-            json=payload,
-            headers=headers,
-            timeout=45,
-        )
-        data = response.json() if response.content else {}
-        if not response.ok:
-            raise HTTPException(status_code=response.status_code, detail=data)
-        return data
-    except HTTPException:
-        raise
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=f"AI chat request failed: {error}") from error
+    ai_request = ai_engine.ChatRequest(
+        message=request.message,
+        home_id=home_id,
+        home_name=request.home_name,
+        scenario_id=request.scenario_id,
+        scenario_name=request.scenario_name,
+        conversation_history=history,
+    )
+    ai_response = ai_engine.chat_home(home_id, ai_request)
+    return ai_response.model_dump() if hasattr(ai_response, "model_dump") else ai_response.dict()
 
 
 def send_chat_session_message(
@@ -5843,34 +5858,234 @@ def chat_with_ai(
     return send_chat_session_message(home_id, str(session["session_id"]), session_request, actor)
 
 
+def summary_energy_value(summary: dict[str, Any]) -> float:
+    energy = as_dict(summary.get("energy"))
+    return as_number(
+        first_present(
+            energy.get("total_estimated_energy_kWh"),
+            energy.get("total_energy_kWh"),
+            summary.get("total_estimated_energy_kWh"),
+            summary.get("total_energy_kWh"),
+        )
+    )
+
+
+def summary_power_value(summary: dict[str, Any]) -> float:
+    energy = as_dict(summary.get("energy"))
+    return as_number(
+        first_present(
+            energy.get("total_avg_power_W"),
+            energy.get("total_power_W"),
+            summary.get("total_avg_power_W"),
+            summary.get("total_power_W"),
+        )
+    )
+
+
+def mean_std(values: list[float]) -> tuple[float, float]:
+    usable = [value for value in values if value > 0]
+    if not usable:
+        return 0.0, 0.0
+    mean = sum(usable) / len(usable)
+    variance = sum((value - mean) ** 2 for value in usable) / len(usable)
+    return round(mean, 6), round(variance ** 0.5, 6)
+
+
+def enrich_ai_payload_with_history(home_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    recent_summaries = query_summaries_between(home_id, "hourly", limit=72)
+    energy_values = [summary_energy_value(summary) for summary in recent_summaries]
+    power_values = [summary_power_value(summary) for summary in recent_summaries]
+    energy_mean, energy_std = mean_std(energy_values)
+    power_mean, power_std = mean_std(power_values)
+    same_hour_values = [
+        summary_energy_value(summary)
+        for summary in recent_summaries
+        if as_number(summary.get("hour_of_day"), -1) == as_number(payload.get("hour_of_day"), -2)
+    ]
+    same_hour_mean, same_hour_std = mean_std(same_hour_values)
+    recent_commands = query_recent_remote_commands(home_id, limit=50)
+    one_hour_ago = now_ms() - 60 * 60 * 1000
+    recent_command_count = sum(
+        1
+        for command in recent_commands
+        if as_number(first_present(command.get("requestedAtMs"), command.get("requested_at_ms"))) >= one_hour_ago
+    )
+
+    enriched = {
+        **payload,
+        "recent_usage_avg_kWh": energy_mean,
+        "recent_usage_std_kWh": energy_std,
+        "recent_power_avg_W": power_mean,
+        "recent_power_std_W": power_std,
+        "same_hour_usage_avg_kWh": same_hour_mean,
+        "same_hour_usage_std_kWh": same_hour_std,
+        "previous_hour_energy_kWh": energy_values[0] if energy_values else 0.0,
+        "command_frequency_last_hour": recent_command_count,
+    }
+    return enriched
+
+
+def apply_ec2_ai_routine_rules(result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    predictions = result["predictions"]
+    total_energy = as_number(payload.get("total_energy_kWh"))
+    same_hour_mean = as_number(payload.get("same_hour_usage_avg_kWh"))
+    same_hour_std = as_number(payload.get("same_hour_usage_std_kWh"))
+    total_power = as_number(payload.get("total_power_for_guardrails_W"))
+    power_mean = as_number(payload.get("recent_power_avg_W"))
+    power_std = as_number(payload.get("recent_power_std_W"))
+    occupancy_state = str(payload.get("occupancy_state") or "unknown")
+    unusual_energy = same_hour_mean > 0 and same_hour_std > 0 and total_energy > same_hour_mean + 2 * same_hour_std
+    unusual_power = power_mean > 0 and power_std > 0 and total_power > power_mean + 2 * power_std
+
+    if unusual_energy or unusual_power:
+        result["energy_waste"] = True
+        result["abnormal_usage"] = "statistical_usage_anomaly"
+        result["recommendation_type"] = "review_unusual_energy_usage"
+        result["efficiency_score"] = min(as_number(result.get("efficiency_score"), 100), 55)
+        result["explanation"] = (
+            "Energy use is above the recent normal range for this home and time window."
+        )
+        predictions["waste_event"] = {"value": True, "confidence": 0.9, "source": "ec2_statistical_guardrail"}
+        predictions["anomaly_label"] = {"value": "statistical_usage_anomaly", "confidence": 0.9, "source": "ec2_statistical_guardrail"}
+        predictions["recommendation_type"] = {"value": "review_unusual_energy_usage", "confidence": 0.9, "source": "ec2_statistical_guardrail"}
+        predictions["energy_efficiency_score"] = result["efficiency_score"]
+        predictions["explanation"] = result["explanation"]
+        result.setdefault("post_processing_rules", []).append("ec2_statistical_usage_anomaly")
+
+    if occupancy_state in {"empty", "probably_empty"} and total_power > 50:
+        result["energy_waste"] = True
+        result["abnormal_usage"] = "high_power_while_empty"
+        result["recommendation_type"] = "turn_off_unused_devices"
+        result["explanation"] = "High power is active while the home appears empty."
+        predictions["waste_event"] = {"value": True, "confidence": 1.0, "source": "ec2_occupancy_guardrail"}
+        predictions["anomaly_label"] = {"value": "high_power_while_empty", "confidence": 1.0, "source": "ec2_occupancy_guardrail"}
+        predictions["recommendation_type"] = {"value": "turn_off_unused_devices", "confidence": 1.0, "source": "ec2_occupancy_guardrail"}
+        predictions["explanation"] = result["explanation"]
+        result.setdefault("post_processing_rules", []).append("ec2_high_power_while_empty")
+
+    return result
+
+
+def ai_notification(
+    home_id: str,
+    severity: str,
+    category: str,
+    title: str,
+    message: str,
+    *,
+    device_id: str | None = None,
+) -> dict[str, Any]:
+    timestamp_ms = now_ms()
+    notification_id = f"ai_{category}_{timestamp_ms}"
+    return {
+        "id": notification_id,
+        "home_id": home_id,
+        "severity": severity,
+        "category": category,
+        "title": title,
+        "message": message,
+        "device_id": device_id,
+        "created_at": timestamp_ms,
+        "created_at_ms": timestamp_ms,
+        "created_at_iso": iso_from_ms(timestamp_ms),
+        "acknowledged": False,
+        "source": "ai",
+    }
+
+
+def build_ai_notifications(home_id: str, result: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
+    notifications: list[dict[str, Any]] = []
+    anomaly = str(result.get("abnormal_usage") or "normal")
+    recommendation = str(result.get("recommendation_type") or "none")
+    explanation = str(result.get("explanation") or "AI detected an energy condition.")
+
+    if as_number(payload.get("smoke_count")) > 0 or anomaly == "safety_smoke_gas_warning":
+        notifications.append(ai_notification(home_id, "critical", "safety", "Gas or smoke detected", "Check the room immediately. Energy recommendations are secondary to safety."))
+    if anomaly in {"high_power_while_empty", "empty_room_power_active", "device_left_on_at_night"}:
+        notifications.append(ai_notification(home_id, "high", "energy", "Possible energy waste", explanation))
+    elif anomaly != "normal":
+        notifications.append(ai_notification(home_id, "medium", "anomaly", "Unusual usage detected", explanation))
+    if recommendation != "none" and not any(item["category"] == "recommendation" for item in notifications):
+        notifications.append(ai_notification(home_id, "low", "recommendation", "AI recommendation", explanation))
+    return notifications
+
+
+def start_ai_prediction_scheduler() -> None:
+    global _ai_prediction_scheduler_started
+    if _ai_prediction_scheduler_started or not AI_AUTO_PREDICT_ENABLED or not AI_PREDICTION_HOME_IDS:
+        return
+    _ai_prediction_scheduler_started = True
+
+    def prediction_loop() -> None:
+        if AI_PREDICTION_INITIAL_DELAY_SECONDS:
+            time.sleep(AI_PREDICTION_INITIAL_DELAY_SECONDS)
+        while True:
+            for home_id in AI_PREDICTION_HOME_IDS:
+                try:
+                    result = run_ec2_ai_prediction(home_id)
+                    ai_result = as_dict(result.get("ai_result"))
+                    print(
+                        "[AI SCHEDULER] "
+                        f"home={home_id} status={ai_result.get('prediction_status')} "
+                        f"summary={ai_result.get('ai_status_summary')}",
+                        flush=True,
+                    )
+                except Exception as error:
+                    print(f"[AI SCHEDULER] home={home_id} failed: {error}", flush=True)
+            time.sleep(AI_PREDICTION_INTERVAL_SECONDS)
+
+    thread = threading.Thread(target=prediction_loop, name="ai-prediction-scheduler", daemon=True)
+    thread.start()
+
+
+def run_ec2_ai_prediction(home_id: str) -> dict[str, Any]:
+    payload, input_source = ai_engine.build_ai_payload(home_id)
+    payload = enrich_ai_payload_with_history(home_id, payload)
+    prediction = ai_engine.run_model(payload)
+    ai_result = ai_engine.build_ai_result(home_id, payload, prediction, input_source)
+    ai_result = apply_ec2_ai_routine_rules(ai_result, payload)
+    ai_result["source"] = "ec2_ai_inference"
+    ai_result["anomaly_score"] = 1.0 - as_number(ai_result.get("efficiency_score"), 100) / 100
+    ai_result["anomaly_label"] = ai_result.get("abnormal_usage")
+    ai_result["waste_event"] = ai_result.get("energy_waste")
+    ai_result["next_hour_total_energy_kWh"] = ai_result.get("next_hour_energy")
+    ai_result["next_hour_total_cost_BHD"] = ai_result.get("next_hour_cost")
+    notifications = build_ai_notifications(home_id, ai_result, payload)
+    alerts = [item for item in notifications if item["severity"] in {"high", "critical"}]
+    suggestions = [item for item in notifications if item["category"] == "recommendation"]
+    ai_result["notifications"] = notifications
+    ai_result["alerts"] = alerts
+    ai_result["suggestions"] = suggestions
+    stored = store_ai_result(home_id, ai_result, notifications=notifications, alerts=alerts, suggestions=suggestions)
+    return {"success": True, "home_id": home_id, "ai_result": stored}
+
+
 @app.post("/api/home/{home_id}/ai/predict", dependencies=[Depends(require_home_role("admin"))])
 def trigger_ai_prediction(home_id: str) -> dict[str, Any]:
-    ai_service_url = os.environ.get("AI_SERVICE_URL", "").strip().rstrip("/")
-    if not ai_service_url:
-        return {
-            "success": False,
-            "home_id": home_id,
-            "message": "AI_SERVICE_URL is not configured.",
-        }
+    return run_ec2_ai_prediction(home_id)
 
-    try:
-        headers = {}
-        internal_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
-        if internal_token:
-            headers["X-Service-Token"] = internal_token
-        response = requests.post(f"{ai_service_url}/predict/{home_id}", headers=headers, timeout=30)
-        payload = response.json() if response.content else {}
-        return {
-            "success": response.ok,
-            "home_id": home_id,
-            "status_code": response.status_code,
-            "ai_response": payload,
-        }
-    except Exception as error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"AI service request failed: {error}",
-        ) from error
+
+@app.post("/api/homes/{home_id}/ai/predict", dependencies=[Depends(require_home_role("admin"))])
+def trigger_ai_prediction_plural(home_id: str) -> dict[str, Any]:
+    return run_ec2_ai_prediction(home_id)
+
+
+@app.get("/api/homes/{home_id}/ai/latest", dependencies=[Depends(require_home_permission("can_view"))])
+def get_ai_latest_result(home_id: str) -> dict[str, Any]:
+    latest = get_ai_latest(home_id)
+    return {"success": True, "home_id": home_id, "ai_result": latest}
+
+
+@app.get("/api/homes/{home_id}/ai/history", dependencies=[Depends(require_home_permission("can_view"))])
+def get_ai_history_results(home_id: str, limit: int = Query(24, ge=1, le=100)) -> dict[str, Any]:
+    history = query_ai_history(home_id, limit=limit)
+    return {"success": True, "home_id": home_id, "count": len(history), "history": history}
+
+
+@app.get("/api/homes/{home_id}/ai/notifications", dependencies=[Depends(require_home_permission("can_view"))])
+def get_ai_notification_results(home_id: str, limit: int = Query(50, ge=1, le=100)) -> dict[str, Any]:
+    notifications = query_ai_notifications(home_id, limit=limit)
+    return {"success": True, "home_id": home_id, "count": len(notifications), "notifications": notifications}
 
 
 @app.post(

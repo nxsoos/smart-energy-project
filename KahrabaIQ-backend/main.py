@@ -14,7 +14,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from timestamp_utils import TIMEZONE, BAHRAIN_TZ, ms_to_iso, now_ms
-from aws_cloud_store import app_get_path, app_set_path, app_update_path
+from aws_cloud_store import (
+    app_get_path,
+    app_set_path,
+    app_update_path,
+    latest_summary as cloud_latest_summary,
+)
 
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
@@ -33,7 +38,7 @@ FRESH_DATA_MAX_AGE_MS = 3 * 60 * 1000
 
 app = FastAPI(
     title="KahrabaIQ Intelligence",
-    description="Cloud Run FastAPI service for KahrabaIQ energy predictions.",
+    description="Reusable EC2 AI engine for KahrabaIQ energy predictions.",
     version="1.0.0",
 )
 
@@ -200,6 +205,154 @@ def is_fresh_timestamp(value: Any, current_ms: int, max_age_ms: int = FRESH_DATA
     return age is not None and age <= max_age_ms
 
 
+def as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def normalize_live_energy(latest_state: dict[str, Any]) -> dict[str, Any]:
+    energy = as_dict(latest_state.get("energy"))
+    devices = as_dict(latest_state.get("devices"))
+    timestamp_ms = first_present(
+        energy.get("updated_at_ms"),
+        energy.get("timestampMs"),
+        energy.get("timestamp_ms"),
+        latest_state.get("updated_at_ms"),
+        latest_state.get("timestampMs"),
+        latest_state.get("timestamp_ms"),
+    )
+    current_power_w = first_present(
+        energy.get("current_power_w"),
+        energy.get("currentPowerW"),
+        energy.get("powerW"),
+        energy.get("total_power_W"),
+    )
+    total_energy_kwh = first_present(
+        energy.get("total_energy_kWh"),
+        energy.get("totalEnergyKwh"),
+        energy.get("energyTodayKwh"),
+    )
+    total_cost_bhd = first_present(
+        energy.get("total_cost_BHD"),
+        energy.get("costToday"),
+        energy.get("totalCostBhd"),
+    )
+    normalized = {
+        "updated_at_ms": timestamp_ms,
+        "timestamp_ms": timestamp_ms,
+        "current_power_w": current_power_w,
+        "total_power_W": current_power_w,
+        "total_avg_power_W": current_power_w,
+        "total_energy_kWh": total_energy_kwh,
+        "total_estimated_energy_kWh": total_energy_kwh,
+        "total_cost_BHD": total_cost_bhd,
+        "total_estimated_cost_BHD": total_cost_bhd,
+        "tariff_BHD_per_kWh": first_present(
+            energy.get("tariff_BHD_per_kWh"),
+            energy.get("tariff"),
+        ),
+        "voltage_V": first_present(energy.get("voltage_V"), energy.get("voltageV")),
+        "current_A": first_present(energy.get("current_A"), energy.get("currentA")),
+        "branches": {},
+    }
+
+    branches: dict[str, Any] = {}
+    for breaker_id in ("breaker_01", "breaker_02"):
+        device = as_dict(devices.get(breaker_id))
+        metering = as_dict(device.get("metering"))
+        power_w = first_present(
+            metering.get("power_W"),
+            metering.get("power_w"),
+            device.get("power_W"),
+            device.get("power_w"),
+        )
+        energy_kwh = first_present(
+            metering.get("energy_kWh"),
+            metering.get("energy_kwh"),
+            device.get("energy_kWh"),
+            device.get("energy_kwh"),
+        )
+        branches[breaker_id] = {
+            "power_W": power_w,
+            "avg_power_W": power_w,
+            "peak_power_W": power_w,
+            "estimated_energy_kWh": energy_kwh,
+            "total_estimated_energy_kWh": energy_kwh,
+        }
+    normalized["branches"] = branches
+    return {key: value for key, value in normalized.items() if value is not None}
+
+
+def normalize_live_environment(latest_state: dict[str, Any]) -> dict[str, Any]:
+    room = as_dict(latest_state.get("room"))
+    timestamp_ms = first_present(
+        room.get("timestampMs"),
+        room.get("timestamp_ms"),
+        room.get("updated_at_ms"),
+        latest_state.get("updated_at_ms"),
+        latest_state.get("timestampMs"),
+        latest_state.get("timestamp_ms"),
+    )
+    motion = first_present(room.get("motion"), room.get("motionDetected"), room.get("motion_detected"))
+    smoke = first_present(
+        room.get("smoke"),
+        room.get("smokeDetected"),
+        room.get("smoke_detected"),
+        room.get("gasDetected"),
+        room.get("gas_detected"),
+    )
+    sound_raw = first_present(
+        room.get("sound_raw"),
+        room.get("soundLevel"),
+        room.get("sound_level"),
+    )
+    light_level = first_present(room.get("lightLevel"), room.get("light_level"))
+    light_status = first_present(room.get("light_status"), room.get("lightStatus"))
+    if light_status is None and isinstance(light_level, (int, float)):
+        light_status = "Bright" if light_level >= 1000 else "Dark"
+    return {
+        "temperature": first_present(room.get("temperature"), room.get("temp")),
+        "humidity": room.get("humidity"),
+        "sound_raw": sound_raw,
+        "sound_level": sound_raw,
+        "light_raw": light_level,
+        "light_status": light_status,
+        "motion": 1 if motion is True else 0 if motion is False else motion,
+        "smoke": 1 if smoke is True else 0 if smoke is False else smoke,
+        "noise": room.get("noise"),
+        "timestamp_ms": timestamp_ms,
+        "updated_at_ms": timestamp_ms,
+        "sensor_timestamp_ms": timestamp_ms,
+    }
+
+
+def normalize_live_occupancy(latest_state: dict[str, Any]) -> dict[str, Any]:
+    occupancy = as_dict(latest_state.get("occupancy"))
+    occupied = first_present(occupancy.get("occupied"), occupancy.get("is_occupied"))
+    normalized = dict(occupancy)
+    if "state" not in normalized and isinstance(occupied, bool):
+        normalized["state"] = "occupied" if occupied else "empty"
+    if "occupied" not in normalized and isinstance(occupied, bool):
+        normalized["occupied"] = occupied
+    return normalized
+
+
+def normalize_live_device_status(latest_state: dict[str, Any], device_id: str) -> dict[str, Any]:
+    device = as_dict(as_dict(latest_state.get("devices")).get(device_id))
+    status = as_dict(device.get("status"))
+    metering = as_dict(device.get("metering"))
+    return {
+        **status,
+        "power_W": first_present(metering.get("power_W"), device.get("power_W"), device.get("power_w")),
+        "power_w": first_present(metering.get("power_w"), metering.get("power_W"), device.get("power_w"), device.get("power_W")),
+        "last_seen_ms": first_present(
+            status.get("last_seen_ms"),
+            status.get("lastSeenMs"),
+            latest_state.get("updated_at_ms"),
+            latest_state.get("timestamp_ms"),
+        ),
+    }
+
+
 def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str, Any]:
     try:
         home_ref = store.ref(f"/homes/{home_id}")
@@ -214,14 +367,25 @@ def read_backend_data(home_id: str, scenario_id: str | None = None) -> dict[str,
         else:
             backend_ref = home_ref.child("backend")
 
+        latest_state = as_dict(home_ref.child("latest_state").get()) or as_dict(
+            home_ref.child("dashboard/latest").get()
+        )
+        legacy_summary = as_dict(backend_ref.child("latest_hourly_summary").get())
+        legacy_energy = as_dict(backend_ref.child("dashboard/energy").get())
+        legacy_environment = as_dict(backend_ref.child("dashboard/environment").get())
+        cloud_summary = cloud_latest_summary(home_id, "hourly") if not legacy_summary else {}
+
         return {
-            "latest_hourly_summary": backend_ref.child("latest_hourly_summary").get(),
-            "dashboard_energy": backend_ref.child("dashboard/energy").get(),
-            "dashboard_environment": backend_ref.child("dashboard/environment").get(),
-            "current_state": backend_ref.child("current_state").get(),
-            "occupancy": home_ref.child("occupancy/room1").get(),
-            "breaker_01_status": home_ref.child("devices/breaker_01/status").get(),
-            "breaker_02_status": home_ref.child("devices/breaker_02/status").get(),
+            "latest_hourly_summary": legacy_summary or cloud_summary,
+            "dashboard_energy": legacy_energy or normalize_live_energy(latest_state),
+            "dashboard_environment": legacy_environment or normalize_live_environment(latest_state),
+            "current_state": as_dict(backend_ref.child("current_state").get()) or latest_state,
+            "occupancy": as_dict(home_ref.child("occupancy/room1").get())
+            or normalize_live_occupancy(latest_state),
+            "breaker_01_status": as_dict(home_ref.child("devices/breaker_01/status").get())
+            or normalize_live_device_status(latest_state, "breaker_01"),
+            "breaker_02_status": as_dict(home_ref.child("devices/breaker_02/status").get())
+            or normalize_live_device_status(latest_state, "breaker_02"),
         }
     except HTTPException:
         raise

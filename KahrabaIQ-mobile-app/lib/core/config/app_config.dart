@@ -15,7 +15,7 @@ class AppConfig {
 
   static const String backendApiUrl = String.fromEnvironment(
     'BACKEND_API_URL',
-    defaultValue: 'https://smart-energy-api-qs7uzdqawq-as.a.run.app',
+    defaultValue: '',
   );
 
   static String get apiUrl =>
@@ -101,7 +101,4 @@ class AppConfig {
     'PI_API_TIMEOUT_SECONDS',
     defaultValue: 6,
   );
-
-  static const String aiServiceUrl =
-      'https://smart-energy-ai-237804589333.asia-southeast1.run.app';
 }

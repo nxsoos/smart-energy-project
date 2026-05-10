@@ -247,17 +247,37 @@ def command_is_expired(item: dict[str, Any], *, now_ms_value: int | None = None)
     return now_ms_value >= expires_at_ms
 
 
-def _query_command_items(home_id: str, limit: int = 50) -> list[dict[str, Any]]:
+def _query_command_status_items(home_id: str, status: str, limit: int = 50) -> list[dict[str, Any]]:
     response = _table().query(
         KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
         ExpressionAttributeValues={
             ":pk": home_pk(home_id),
-            ":sk": "COMMAND#",
+            ":sk": f"COMMAND#{status}#",
         },
         ScanIndexForward=False,
         Limit=max(1, min(int(limit), 100)),
     )
     return [_from_dynamodb(item) for item in response.get("Items", [])]
+
+
+def _query_command_items(home_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    statuses = [
+        COMMAND_STATUS_PENDING,
+        COMMAND_STATUS_CLAIMED,
+        COMMAND_STATUS_EXECUTING,
+        COMMAND_STATUS_SUCCEEDED,
+        COMMAND_STATUS_FAILED,
+        COMMAND_STATUS_EXPIRED,
+        COMMAND_STATUS_CANCELLED,
+    ]
+    by_id: dict[str, dict[str, Any]] = {}
+    for status in statuses:
+        for item in _query_command_status_items(home_id, status, limit=limit):
+            command_id = str(item.get("commandId") or item.get("command_id") or item.get("SK"))
+            by_id[command_id] = item
+    items = list(by_id.values())
+    items.sort(key=command_sort_key, reverse=True)
+    return items[: max(1, min(int(limit), 100))]
 
 
 def create_remote_command(
@@ -379,6 +399,120 @@ def update_remote_command(home_id: str, command_id: str, updates: dict[str, Any]
 
 def live_topic(home_id: str) -> str:
     return os.environ.get("AWS_IOT_LIVE_TOPIC", f"homes/{home_id}/live/state")
+
+
+def ai_prediction_sk(timestamp_ms: int) -> str:
+    return f"AI#PREDICTION#{timestamp_ms:013d}"
+
+
+def ai_alert_sk(timestamp_ms: int, alert_id: str) -> str:
+    return f"AI#ALERT#{timestamp_ms:013d}#{alert_id}"
+
+
+def ai_suggestion_sk(timestamp_ms: int, suggestion_id: str) -> str:
+    return f"AI#SUGGESTION#{timestamp_ms:013d}#{suggestion_id}"
+
+
+def store_ai_result(
+    home_id: str,
+    result: dict[str, Any],
+    *,
+    notifications: list[dict[str, Any]] | None = None,
+    alerts: list[dict[str, Any]] | None = None,
+    suggestions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    timestamp_ms = int(result.get("created_at_ms") or result.get("created_at") or now_ms())
+    pk = home_pk(home_id)
+    base_item = {
+        **result,
+        "PK": pk,
+        "home_id": home_id,
+        "type": "ai_result",
+        "source": result.get("source") or "ec2_ai_inference",
+        "notifications": notifications or result.get("notifications") or [],
+        "alerts": alerts or result.get("alerts") or [],
+        "suggestions": suggestions or result.get("suggestions") or [],
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": ms_to_iso(timestamp_ms),
+    }
+
+    table = _app_table()
+    latest_item = {**base_item, "SK": "AI#LATEST"}
+    history_item = {**base_item, "SK": ai_prediction_sk(timestamp_ms)}
+    table.put_item(Item=_to_dynamodb(latest_item))
+    table.put_item(Item=_to_dynamodb(history_item))
+
+    for notification in notifications or []:
+        notification_id = str(notification.get("id") or uuid.uuid4().hex)
+        table.put_item(
+            Item=_to_dynamodb(
+                {
+                    **notification,
+                    "PK": pk,
+                    "SK": ai_alert_sk(timestamp_ms, notification_id),
+                    "type": "ai_notification",
+                    "home_id": home_id,
+                    "source": "ai",
+                }
+            )
+        )
+
+    for alert in alerts or []:
+        alert_id = str(alert.get("id") or alert.get("alert_id") or uuid.uuid4().hex)
+        table.put_item(
+            Item=_to_dynamodb(
+                {
+                    **alert,
+                    "PK": pk,
+                    "SK": ai_alert_sk(timestamp_ms, alert_id),
+                    "type": "ai_alert",
+                    "home_id": home_id,
+                    "source": "ai",
+                }
+            )
+        )
+
+    for suggestion in suggestions or []:
+        suggestion_id = str(suggestion.get("id") or suggestion.get("suggestion_id") or uuid.uuid4().hex)
+        table.put_item(
+            Item=_to_dynamodb(
+                {
+                    **suggestion,
+                    "PK": pk,
+                    "SK": ai_suggestion_sk(timestamp_ms, suggestion_id),
+                    "type": "ai_suggestion",
+                    "home_id": home_id,
+                    "source": "ai",
+                }
+            )
+        )
+
+    return _from_dynamodb(latest_item)
+
+
+def get_ai_latest(home_id: str) -> dict[str, Any]:
+    response = _app_table().get_item(Key={"PK": home_pk(home_id), "SK": "AI#LATEST"})
+    return _from_dynamodb(response.get("Item", {}))
+
+
+def query_ai_history(home_id: str, limit: int = 24) -> list[dict[str, Any]]:
+    response = _app_table().query(
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues={":pk": home_pk(home_id), ":sk": "AI#PREDICTION#"},
+        ScanIndexForward=False,
+        Limit=max(1, min(int(limit), 100)),
+    )
+    return [_from_dynamodb(item) for item in response.get("Items", [])]
+
+
+def query_ai_notifications(home_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    response = _app_table().query(
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues={":pk": home_pk(home_id), ":sk": "AI#ALERT#"},
+        ScanIndexForward=False,
+        Limit=max(1, min(int(limit), 100)),
+    )
+    return [_from_dynamodb(item) for item in response.get("Items", [])]
 
 
 def create_iot_websocket_config(home_id: str, client_id: str | None = None) -> dict[str, Any]:

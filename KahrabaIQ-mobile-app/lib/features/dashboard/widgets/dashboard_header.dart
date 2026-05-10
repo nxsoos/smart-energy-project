@@ -78,12 +78,14 @@ class DashboardHeader extends StatelessWidget {
               ),
           ],
         ),
-        const SizedBox(width: 2),
-        IconButton(
-          tooltip: 'Log out',
-          onPressed: onLogout,
-          icon: const Icon(Icons.logout, color: ColorTokens.textPrimary),
-        ),
+        if (onLogout != null) ...[
+          const SizedBox(width: 2),
+          IconButton(
+            tooltip: 'Log out',
+            onPressed: onLogout,
+            icon: const Icon(Icons.logout, color: ColorTokens.textPrimary),
+          ),
+        ],
       ],
     );
   }
