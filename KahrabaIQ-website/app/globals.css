@@ -2725,7 +2725,7 @@ a.repo-link:hover::before {
   }
 
   .brand-wordmark {
-    width: clamp(5rem, 24vw, 6rem);
+    width: clamp(5.85rem, 27vw, 6.8rem);
   }
 
   .menu-toggle {
@@ -3241,7 +3241,7 @@ a.repo-link:hover::before {
   }
 
   .brand-wordmark {
-    width: clamp(4.75rem, 30vw, 5.55rem);
+    width: clamp(5.35rem, 34vw, 6.2rem);
   }
 
   .footer-brand .brand-wordmark {
