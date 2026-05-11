@@ -630,6 +630,8 @@ class PiHeartbeatRequest(BaseModel):
     status: str = "online"
     agent_version: str | None = None
     local_ip: str | None = None
+    local_base_url: str | None = None
+    sensor_base_url: str | None = None
     wifi_ssid: str | None = None
     esp32: dict[str, Any] | None = None
     metrics: dict[str, Any] | None = None
@@ -1696,6 +1698,8 @@ def pi_heartbeat(
         "online_status": request.status,
         "agent_version": request.agent_version,
         "local_ip": request.local_ip,
+        "local_base_url": request.local_base_url,
+        "sensor_base_url": request.sensor_base_url,
         "wifi_ssid": request.wifi_ssid,
         "esp32": request.esp32 or {},
         "metrics": request.metrics or {},
@@ -1705,6 +1709,21 @@ def pi_heartbeat(
         "updated_at_iso": iso_from_ms(timestamp_ms),
     }
     safe_update(f"/pis/{pi_id}", updates)
+    home_id = str(pi.get("home_id") or "")
+    if home_id:
+        safe_set(
+            f"/homes/{home_id}/pi_connection",
+            {
+                "pi_id": pi_id,
+                "local_ip": request.local_ip,
+                "local_base_url": request.local_base_url,
+                "sensor_base_url": request.sensor_base_url,
+                "wifi_ssid": request.wifi_ssid,
+                "online_status": request.status,
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
     return {"success": True, "pi_id": pi_id, "home_id": pi.get("home_id"), "heartbeat": updates}
 
 

@@ -55,8 +55,9 @@ ESP32_DISCOVERY_CANDIDATES = [
     for item in os.environ.get("ESP32_DISCOVERY_CANDIDATES", "http://kahrabaiq-esp32.local").split(",")
     if item.strip()
 ]
-PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "http://kahrabaiq-pi.local:5000").rstrip("/")
-PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "http://kahrabaiq-pi.local:5001").rstrip("/")
+PI_SENSOR_PORT = int(os.environ.get("PI_SENSOR_PORT", "5000"))
+PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "").rstrip("/")
+PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "").rstrip("/")
 PROVISIONING_MARKER_PATH = Path(os.environ.get("PROVISIONING_MARKER_PATH", "/var/lib/kahrabaiq/provisioned.json"))
 
 app = Flask(__name__)
@@ -374,6 +375,32 @@ def normalize_base_url(value: str) -> str:
     return text
 
 
+def pi_home_ip() -> str:
+    return interface_ip(HOME_WIFI_INTERFACE)
+
+
+def pi_local_base_url(ip: str | None = None) -> str:
+    if PI_LOCAL_BASE_URL:
+        return normalize_base_url(PI_LOCAL_BASE_URL)
+    current_ip = ip or pi_home_ip()
+    if not current_ip:
+        raise RuntimeError(f"Could not detect Pi IP on {HOME_WIFI_INTERFACE}.")
+    return f"http://{current_ip}:{PI_AGENT_PORT}"
+
+
+def pi_sensor_base_url(ip: str | None = None) -> str:
+    if PI_SENSOR_BASE_URL:
+        return normalize_base_url(PI_SENSOR_BASE_URL)
+    current_ip = ip or pi_home_ip()
+    if not current_ip:
+        raise RuntimeError(f"Could not detect Pi IP on {HOME_WIFI_INTERFACE}.")
+    return f"http://{current_ip}:{PI_SENSOR_PORT}"
+
+
+def pi_sensor_endpoint(ip: str | None = None) -> str:
+    return f"{pi_sensor_base_url(ip)}/api/sensors/room1"
+
+
 def gateway_from_nmcli(interface: str) -> str:
     result = run_nmcli(["-g", "IP4.GATEWAY", "device", "show", interface], timeout=10, check=False)
     for line in result.stdout.splitlines():
@@ -511,8 +538,8 @@ def provision_esp32(home_id: str) -> dict[str, Any]:
     body = {
         "ssid": ssid,
         "password": password,
-        "pi_base_url": PI_LOCAL_BASE_URL,
-        "pi_sensor_url": f"{PI_SENSOR_BASE_URL}/api/sensors/room1",
+        "pi_base_url": pi_local_base_url(),
+        "pi_sensor_url": pi_sensor_endpoint(),
         "home_id": home_id,
         "pi_id": PI_ID,
         "device_id": _setup_context.get("device_id") or ESP32_DEVICE_ID,

@@ -422,6 +422,9 @@ PI_DEVICE_TOKEN=change_me
 KAHRABAIQ_API_URL=https://api.your-domain.com
 KIOSK_DASHBOARD_URL=https://api.your-domain.com/api/kiosk/dashboard
 PI_AGENT_PORT=5010
+PI_SENSOR_PORT=5000
+PI_LOCAL_BASE_URL=
+PI_SENSOR_BASE_URL=
 ESP32_DEVICE_KEY=change_me
 HOME_ASSISTANT_URL=http://127.0.0.1:8123
 HOME_ASSISTANT_TOKEN=change_me_after_creating_a_long_lived_access_token
@@ -429,6 +432,8 @@ HOME_ASSISTANT_COMMAND_MODE=queue
 MATTER_SOCKET_SWITCH_ENTITY_ID=switch.socket_switch
 MATTER_AC_SWITCH_ENTITY_ID=switch.ac_switch
 ```
+
+Leave `PI_LOCAL_BASE_URL` and `PI_SENSOR_BASE_URL` empty for normal installs. The Pi sends its current Wi-Fi IP-derived URLs to ESP32 during provisioning and to the backend on heartbeat. Use `HOME_ASSISTANT_URL=http://127.0.0.1:8123` when Home Assistant runs on the same Pi, including Docker host-network mode.
 
 Install flow on the Pi:
 

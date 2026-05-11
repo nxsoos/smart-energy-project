@@ -50,8 +50,9 @@ ESP32_DISCOVERY_CANDIDATES = [
     ).split(",")
     if item.strip()
 ]
-PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "http://kahrabaiq-pi.local:5000").rstrip("/")
-PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "http://kahrabaiq-pi.local:5001").rstrip("/")
+PI_SENSOR_PORT = int(os.environ.get("PI_SENSOR_PORT", "5000"))
+PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "").rstrip("/")
+PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "").rstrip("/")
 PROVISIONING_MARKER_PATH = Path(os.environ.get("PROVISIONING_MARKER_PATH", "/var/lib/kahrabaiq/provisioned.json"))
 KIOSK_ADMIN_USERNAME = os.environ.get("KIOSK_ADMIN_USERNAME", "admin")
 KIOSK_ADMIN_PASSWORD = os.environ.get("KIOSK_ADMIN_PASSWORD", "")
@@ -101,6 +102,35 @@ def local_ip() -> str:
             return sock.getsockname()[0]
     except Exception:
         return ""
+
+
+def url_with_scheme(value: str) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if text and not text.startswith(("http://", "https://")):
+        text = f"http://{text}"
+    return text
+
+
+def pi_local_base_url(ip: str | None = None) -> str:
+    if PI_LOCAL_BASE_URL:
+        return url_with_scheme(PI_LOCAL_BASE_URL)
+    current_ip = ip or local_ip()
+    if not current_ip:
+        raise RuntimeError("Pi local IP is unavailable.")
+    return f"http://{current_ip}:{PI_AGENT_PORT}"
+
+
+def pi_sensor_base_url(ip: str | None = None) -> str:
+    if PI_SENSOR_BASE_URL:
+        return url_with_scheme(PI_SENSOR_BASE_URL)
+    current_ip = ip or local_ip()
+    if not current_ip:
+        raise RuntimeError("Pi local IP is unavailable.")
+    return f"http://{current_ip}:{PI_SENSOR_PORT}"
+
+
+def pi_sensor_endpoint(ip: str | None = None) -> str:
+    return f"{pi_sensor_base_url(ip)}/api/sensors/room1"
 
 
 def hash_secret(secret: str) -> str:
@@ -240,10 +270,13 @@ def esp32_link() -> dict[str, Any]:
 
 
 def send_heartbeat() -> None:
+    ip = local_ip()
     payload = {
         "status": "online",
         "agent_version": AGENT_VERSION,
-        "local_ip": local_ip(),
+        "local_ip": ip,
+        "local_base_url": pi_local_base_url(ip),
+        "sensor_base_url": pi_sensor_base_url(ip),
         "wifi_ssid": current_wifi_ssid(),
         "esp32": esp32_link(),
     }
@@ -377,8 +410,8 @@ def provision_esp32(payload: dict[str, Any]) -> dict[str, Any]:
     body = {
         "ssid": ssid,
         "password": password,
-        "pi_base_url": PI_LOCAL_BASE_URL,
-        "pi_sensor_url": f"{PI_SENSOR_BASE_URL}/api/sensors/room1",
+        "pi_base_url": pi_local_base_url(),
+        "pi_sensor_url": pi_sensor_endpoint(),
         "home_id": HOME_ID or str(_agent_state.get("home_id") or ""),
         "pi_id": PI_ID,
         "device_id": str(payload.get("device_id") or ESP32_DEVICE_ID),
@@ -489,6 +522,24 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       justify-content: space-between;
       gap: 24px;
       margin-bottom: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      width: 62px;
+      height: 62px;
+      flex: 0 0 auto;
+      filter: drop-shadow(0 0 22px rgba(17, 217, 255, 0.24));
+    }
+
+    .brand-copy {
+      min-width: 0;
     }
 
     h1 {
@@ -736,6 +787,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     @media (max-width: 820px) {
       header { align-items: flex-start; flex-direction: column; }
+      .brand-mark { width: 52px; height: 52px; }
       .hero, .room { grid-column: span 12; }
       .metric-row { grid-template-columns: 1fr; }
     }
@@ -775,9 +827,22 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   </div>
   <main class="shell">
     <header>
-      <div>
-        <h1>KahrabaIQ</h1>
-        <div class="sub" id="subtitle">Loading dashboard...</div>
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 64 64" role="img" aria-label="KahrabaIQ logo">
+          <defs>
+            <linearGradient id="brandBolt" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#11d9ff" />
+              <stop offset="1" stop-color="#12c48b" />
+            </linearGradient>
+          </defs>
+          <rect x="5" y="5" width="54" height="54" rx="17" fill="#071024" stroke="rgba(17,217,255,.42)" stroke-width="2" />
+          <path d="M35.4 8.8 16.8 35.1h13.4l-3.5 20.1 20.5-28H33.9l1.5-18.4Z" fill="url(#brandBolt)" />
+          <path d="M22.5 39.7c4.9 5.3 13.5 5.7 18.9.8" fill="none" stroke="#f7f8ff" stroke-opacity=".82" stroke-width="3" stroke-linecap="round" />
+        </svg>
+        <div class="brand-copy">
+          <h1>KahrabaIQ</h1>
+          <div class="sub" id="subtitle">Loading dashboard...</div>
+        </div>
       </div>
       <div class="pill"><span class="dot"></span><span id="statusText">Connecting</span></div>
     </header>

@@ -68,7 +68,7 @@ Detailed first-boot sequence:
 10. The Pi polls pairing status until the backend returns `paired` and a real `home_id`.
 11. The setup screen shows `Home paired successfully. Waiting for sensors to connect to the Pi...`.
 12. The Pi stops the setup AP and connects `wlan1` to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
-13. The Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` with the same home Wi-Fi credentials, real `home_id`, `PI_SENSOR_BASE_URL`, `PI_ID`, device ID, and device key.
+13. The Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` with the same home Wi-Fi credentials, real `home_id`, current Pi sensor URL, `PI_ID`, device ID, and device key.
 14. The ESP32 saves the config, reboots, and joins the home Wi-Fi.
 15. The Pi disconnects and turns off `wlan1`.
 16. The Pi writes `/var/lib/kahrabaiq/provisioned.json`.
@@ -89,11 +89,14 @@ ESP32_SETUP_URL=
 ESP32_DISCOVERY_CANDIDATES=http://kahrabaiq-esp32.local
 PI_PAIRING_POLL_SECONDS=2
 PI_PAIRING_WAIT_TIMEOUT_SECONDS=900
-PI_SENSOR_BASE_URL=http://kahrabaiq-pi.local:5000
-PI_LOCAL_BASE_URL=http://kahrabaiq-pi.local:5001
+PI_SENSOR_PORT=5000
+PI_SENSOR_BASE_URL=
+PI_LOCAL_BASE_URL=
 ```
 
 Leave `ESP32_SETUP_URL` empty for normal installs. The Pi auto-detects the ESP32 setup server from the `wlan1` gateway after joining `ESP32_SETUP_SSID`. If gateway detection fails, provisioning fails with a clear error instead of falling back to a hardcoded IP.
+
+Leave `PI_SENSOR_BASE_URL` and `PI_LOCAL_BASE_URL` empty for normal installs. The Pi computes them from its current Wi-Fi IP when provisioning ESP32 and on every heartbeat, so moving the Pi to a different Wi-Fi does not leave stale LAN IPs in config.
 
 The Wi-Fi password is kept in memory during the active setup session so it can be sent to the ESP32 only after QR pairing returns the real `home_id`. It is not written to `/var/lib/kahrabaiq/provisioned.json`. If the setup service restarts before ESP32 provisioning finishes, the user must re-enter Wi-Fi credentials.
 
