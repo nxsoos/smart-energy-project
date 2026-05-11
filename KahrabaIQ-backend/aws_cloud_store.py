@@ -331,6 +331,37 @@ def _query_command_items(home_id: str, limit: int = 50) -> list[dict[str, Any]]:
     return items[: max(1, min(int(limit), 100))]
 
 
+def query_pending_remote_commands(home_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    items = _query_command_status_items(home_id, COMMAND_STATUS_PENDING, limit=limit)
+    now_ms_value = now_ms()
+    commands: list[dict[str, Any]] = []
+    for item in items:
+        normalized = {**item, "status": normalize_command_status(item.get("status"))}
+        if command_is_expired(normalized, now_ms_value=now_ms_value):
+            normalized = update_remote_command(
+                home_id,
+                str(normalized.get("commandId") or normalized.get("command_id") or ""),
+                {
+                    "status": COMMAND_STATUS_EXPIRED,
+                    "result": {
+                        **_from_dynamodb(normalized.get("result") or {}),
+                        "success": False,
+                        "error_code": "COMMAND_EXPIRED",
+                        "user_message": "Command expired before the Raspberry Pi claimed it.",
+                    },
+                    "message": "Command expired before the Raspberry Pi claimed it.",
+                    "expiredAtMs": now_ms_value,
+                    "expired_at_ms": now_ms_value,
+                    "expiredAt": ms_to_iso(now_ms_value),
+                    "expired_at_iso": ms_to_iso(now_ms_value),
+                },
+            )
+            continue
+        commands.append(normalized)
+    commands.sort(key=command_sort_key, reverse=True)
+    return commands[: max(1, min(int(limit), 100))]
+
+
 def create_remote_command(
     home_id: str,
     device_id: str,
@@ -419,9 +450,19 @@ def query_recent_remote_commands(home_id: str, limit: int = 50) -> list[dict[str
 
 
 def find_remote_command(home_id: str, command_id: str) -> dict[str, Any]:
-    for item in _query_command_items(home_id, limit=100):
-        if str(item.get("commandId") or item.get("command_id")) == command_id:
-            return {**item, "status": normalize_command_status(item.get("status"))}
+    statuses = [
+        COMMAND_STATUS_PENDING,
+        COMMAND_STATUS_CLAIMED,
+        COMMAND_STATUS_EXECUTING,
+        COMMAND_STATUS_SUCCEEDED,
+        COMMAND_STATUS_FAILED,
+        COMMAND_STATUS_EXPIRED,
+        COMMAND_STATUS_CANCELLED,
+    ]
+    for status in statuses:
+        for item in _query_command_status_items(home_id, status, limit=100):
+            if str(item.get("commandId") or item.get("command_id")) == command_id:
+                return {**item, "status": normalize_command_status(item.get("status"))}
     return {}
 
 

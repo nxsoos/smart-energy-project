@@ -54,6 +54,7 @@ from aws_cloud_store import (
     normalize_command_status,
     query_ai_history,
     query_ai_notifications,
+    query_pending_remote_commands,
     query_summaries_between,
     query_recent_remote_commands,
     store_ai_result,
@@ -1900,10 +1901,9 @@ def pi_remote_commands(
         raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
     try:
         commands = []
-        for command in query_recent_remote_commands(home_id, limit=limit):
+        for command in query_pending_remote_commands(home_id, limit=limit):
             sync_remote_command_projection(home_id, command)
-            if normalize_command_status(command.get("status")) == COMMAND_STATUS_PENDING:
-                commands.append(command_status_payload(command))
+            commands.append(command_status_payload(command))
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"Remote command queue read failed: {error}") from error
     return {"success": True, "pi_id": pi_id, "home_id": home_id, "commands": commands}
