@@ -346,6 +346,37 @@ def reset_esp32(payload: dict[str, Any]) -> dict[str, Any]:
     return {"base_url": base, "response": data}
 
 
+def reset_pairing(payload: dict[str, Any]) -> dict[str, Any]:
+    marker_deleted = False
+    if PROVISIONING_MARKER_PATH.exists():
+        PROVISIONING_MARKER_PATH.unlink()
+        marker_deleted = True
+    with _state_lock:
+        _agent_state["home_id"] = None
+        _agent_state["kiosk_token"] = None
+        _agent_state["kiosk_expires_at_ms"] = 0
+    set_path("pi/pairing", {"status": "unpaired", "reason": payload.get("reason") or "reset_pairing", "updated_at_ms": now_ms()})
+
+    esp32_reset: dict[str, Any] | None = None
+    try:
+        esp32_reset = reset_esp32({})
+    except Exception as error:
+        esp32_reset = {"success": False, "message": str(error)}
+
+    service_commands = [
+        run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "stop", "kahrabaiq-kiosk-browser.service"], timeout=20),
+        run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "start", "kahrabaiq-provisioning.service"], timeout=20),
+        run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "start", "kahrabaiq-setup-screen.service"], timeout=20),
+    ]
+    return {
+        "marker_deleted": marker_deleted,
+        "marker_path": str(PROVISIONING_MARKER_PATH),
+        "esp32_reset": esp32_reset,
+        "services": service_commands,
+        "message": "Pi returned to pairing mode.",
+    }
+
+
 def execute_command(command: dict[str, Any]) -> dict[str, Any]:
     name = str(command.get("command") or "")
     payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
@@ -355,6 +386,8 @@ def execute_command(command: dict[str, Any]) -> dict[str, Any]:
         return {"esp32": discover_esp32()}
     if name == "reset_esp32":
         return reset_esp32(payload)
+    if name == "reset_pairing":
+        return reset_pairing(payload)
     raise RuntimeError(f"Unsupported command: {name}")
 
 

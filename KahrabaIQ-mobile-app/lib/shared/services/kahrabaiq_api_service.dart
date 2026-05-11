@@ -319,6 +319,40 @@ class HomeInvite {
   final int remainingSlots;
 }
 
+class PlatformAdminHome {
+  const PlatformAdminHome({
+    required this.homeId,
+    required this.name,
+    required this.status,
+    required this.memberCount,
+    this.piId,
+    this.ownerUid,
+    this.createdAt,
+  });
+
+  final String homeId;
+  final String name;
+  final String status;
+  final int memberCount;
+  final String? piId;
+  final String? ownerUid;
+  final DateTime? createdAt;
+}
+
+class PlatformAdminHomeDetail {
+  const PlatformAdminHomeDetail({
+    required this.home,
+    required this.members,
+    required this.pi,
+    required this.invites,
+  });
+
+  final PlatformAdminHome home;
+  final List<HomeMember> members;
+  final Map<String, dynamic> pi;
+  final List<Map<String, dynamic>> invites;
+}
+
 class DeviceCommandState {
   const DeviceCommandState({
     required this.status,
@@ -2037,6 +2071,42 @@ class KahrabaIqApiService {
     };
   }
 
+  Future<List<PlatformAdminHome>> fetchPlatformAdminHomes() async {
+    final response = await _dio.get('/api/admin/homes');
+    return _asList(
+      _asMap(response.data)['homes'],
+    ).map(_parsePlatformAdminHome).toList();
+  }
+
+  Future<PlatformAdminHomeDetail> fetchPlatformAdminHomeDetail({
+    required String homeId,
+  }) async {
+    final response = await _dio.get('/api/admin/homes/$homeId');
+    final data = _asMap(response.data);
+    final homeData = _asMap(data['home']);
+    return PlatformAdminHomeDetail(
+      home: _parsePlatformAdminHome(homeData),
+      members: _asList(data['members']).map(_parseMember).toList(),
+      pi: _asMap(data['pi']),
+      invites: _asList(data['invites']),
+    );
+  }
+
+  Future<String> deletePlatformAdminHome({required String homeId}) async {
+    final response = await _dio.delete('/api/admin/homes/$homeId');
+    return _asString(
+      _asMap(response.data)['message'],
+      fallback: 'Home deleted. Its Pi will return to pairing mode when online.',
+    );
+  }
+
+  Future<void> removePlatformAdminHomeMember({
+    required String homeId,
+    required String uid,
+  }) async {
+    await _dio.delete('/api/admin/homes/$homeId/members/$uid');
+  }
+
   Future<Map<String, dynamic>> turnOffSafeDevices({
     required String homeId,
   }) async {
@@ -2701,6 +2771,24 @@ class KahrabaIqApiService {
       role: _asString(_pick(data, ['role']), fallback: 'viewer'),
       addedAt: _parseOptionalDateTime(
         _pick(data, ['added_at_ms', 'added_at_iso', 'addedAt']),
+      ),
+    );
+  }
+
+  PlatformAdminHome _parsePlatformAdminHome(Map<String, dynamic> data) {
+    final homeId = _asString(_pick(data, ['home_id', 'homeId', 'id']));
+    return PlatformAdminHome(
+      homeId: homeId,
+      name: _asString(
+        _pick(data, ['name']),
+        fallback: homeId.isEmpty ? 'KahrabaIQ Home' : homeId,
+      ),
+      status: _asString(_pick(data, ['status']), fallback: 'active'),
+      memberCount: _asInt(_pick(data, ['member_count', 'memberCount'])),
+      piId: _asNullableString(_pick(data, ['pi_id', 'piId'])),
+      ownerUid: _asNullableString(_pick(data, ['owner_uid', 'ownerUid'])),
+      createdAt: _parseOptionalDateTime(
+        _pick(data, ['created_at_ms', 'created_at_iso', 'createdAt']),
       ),
     );
   }
