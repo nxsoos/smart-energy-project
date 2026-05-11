@@ -75,7 +75,7 @@ KIOSK_SESSION_TTL_SECONDS = int(os.environ.get("KIOSK_SESSION_TTL_SECONDS", "600
 KIOSK_COMMAND_TTL_SECONDS = int(os.environ.get("KIOSK_COMMAND_TTL_SECONDS", "300"))
 KIOSK_SESSION_SECRET = os.environ.get("KIOSK_SESSION_SECRET") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "dev-kiosk-session-secret"
 KIOSK_ALLOWED_COMMANDS = {"provision_esp32", "discover_esp32", "reset_esp32"}
-MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch"}
+MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch", "light_switch"}
 DEVICE_ALIASES = {
     "ac_breaker": "breaker_01",
     "socket_breaker": "breaker_02",
@@ -161,6 +161,7 @@ DEFAULT_DEVICE_NAMES = {
     "breaker_02": "Socket Breaker",
     "matter_socket_switch": "Socket Switch",
     "matter_ac_switch": "AC Switch",
+    "light_switch": "Light Switch",
 }
 
 DEFAULT_DEVICE_TYPES = {
@@ -169,6 +170,7 @@ DEFAULT_DEVICE_TYPES = {
     "breaker_02": "smart_breaker",
     "matter_socket_switch": "matter_switch",
     "matter_ac_switch": "matter_switch",
+    "light_switch": "light_switch",
 }
 
 MATTER_DEVICE_DEFINITIONS = {
@@ -238,6 +240,39 @@ MATTER_DEVICE_DEFINITIONS = {
             "auto_shutdown_on_smoke": False,
         },
     },
+    "light_switch": {
+        "device_id": "light_switch",
+        "name": "Light Switch",
+        "type": "light_switch",
+        "branch": "Light",
+        "control_method": "home_assistant",
+        "ha_entity_id": "switch.light_switch_switch_1",
+        "online": True,
+        "local_online": True,
+        "cloud_online": False,
+        "controllable": True,
+        "state": "off",
+        "display_state": "off",
+        "power_w": None,
+        "energy_supported": False,
+        "command_in_progress": False,
+        "pending_command_id": None,
+        "pending_target_state": None,
+        "last_command_status": None,
+        "last_command_message": None,
+        "automation": {
+            "manual_allowed": True,
+            "assist_allowed": True,
+            "auto_allowed": True,
+            "auto_actions": ["turn_off"],
+            "requires_confirmation": False,
+        },
+        "safety": {
+            "critical_device": False,
+            "emergency_shutdown_allowed": True,
+            "auto_shutdown_on_smoke": False,
+        },
+    },
 }
 
 CONTROL_MODE_OPTIONS = [
@@ -295,6 +330,14 @@ DEFAULT_AUTOMATION_BY_DEVICE = {
         "comfort_max_temp": 25,
         "cooldown_ms": 10 * 60 * 1000,
     },
+    "light_switch": {
+        "manual_allowed": True,
+        "assist_allowed": True,
+        "auto_allowed": True,
+        "auto_actions": ["turn_off"],
+        "requires_confirmation": False,
+        "cooldown_ms": 5 * 60 * 1000,
+    },
 }
 
 SAFE_AUTO_ACTIONS = {
@@ -302,6 +345,7 @@ SAFE_AUTO_ACTIONS = {
     "breaker_02": {"turn_on", "turn_off"},
     "matter_socket_switch": {"turn_off"},
     "matter_ac_switch": {"turn_on", "turn_off"},
+    "light_switch": {"turn_off"},
 }
 
 DEFAULT_DEVICE_SAFETY_BY_DEVICE = {
@@ -321,6 +365,11 @@ DEFAULT_DEVICE_SAFETY_BY_DEVICE = {
         "auto_shutdown_on_smoke": False,
     },
     "matter_ac_switch": {
+        "critical_device": False,
+        "emergency_shutdown_allowed": True,
+        "auto_shutdown_on_smoke": False,
+    },
+    "light_switch": {
         "critical_device": False,
         "emergency_shutdown_allowed": True,
         "auto_shutdown_on_smoke": False,

@@ -21,7 +21,7 @@ HOME_ID = os.environ.get("HOME_ID", "home_001")
 AWS_IOT_ENDPOINT = os.environ.get("AWS_IOT_ENDPOINT", "").strip()
 AWS_IOT_CLIENT_ID = os.environ.get("AWS_IOT_CLIENT_ID", f"smart-energy-pi-{HOME_ID}")
 AWS_IOT_LIVE_TOPIC = os.environ.get("AWS_IOT_LIVE_TOPIC", f"homes/{HOME_ID}/live/state")
-AWS_IOT_LIVE_INTERVAL_SECONDS = float(os.environ.get("AWS_IOT_LIVE_INTERVAL_SECONDS", "15"))
+AWS_IOT_LIVE_INTERVAL_SECONDS = float(os.environ.get("AWS_IOT_LIVE_INTERVAL_SECONDS", "3"))
 AWS_IOT_CERT_PATH = os.environ.get("AWS_IOT_CERT_PATH", "certs/device.pem.crt")
 AWS_IOT_KEY_PATH = os.environ.get("AWS_IOT_KEY_PATH", "certs/private.pem.key")
 AWS_IOT_CA_PATH = os.environ.get("AWS_IOT_CA_PATH", "certs/AmazonRootCA1.pem")
@@ -44,6 +44,7 @@ USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKER
 DEVICE_ORDER = (
     "matter_socket_switch",
     "matter_ac_switch",
+    "light_switch",
     "breaker_01",
     "breaker_02",
 )
@@ -63,6 +64,16 @@ DEVICE_DEFAULTS = {
         "name": "AC Switch",
         "type": "matter_switch",
         "branch": "Main",
+        "control_method": "home_assistant",
+        "energy_supported": False,
+        "cloud_online": False,
+        "controllable": True,
+    },
+    "light_switch": {
+        "id": "light_switch",
+        "name": "Light Switch",
+        "type": "light_switch",
+        "branch": "Light",
         "control_method": "home_assistant",
         "energy_supported": False,
         "cloud_online": False,

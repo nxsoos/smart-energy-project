@@ -1065,7 +1065,8 @@ class KahrabaIqApiService {
                   _isDisplayDevice(device) &&
                   (device.controllable ||
                       device.id.startsWith('breaker_') ||
-                      device.id.startsWith('matter_')),
+                      device.id.startsWith('matter_') ||
+                      device.id == 'light_switch'),
             )
             .toList()
           ..sort(_compareDevices);
@@ -1421,7 +1422,8 @@ class KahrabaIqApiService {
                   _isDisplayDevice(device) &&
                   (device.controllable ||
                       device.id.startsWith('breaker_') ||
-                      device.id.startsWith('matter_')),
+                      device.id.startsWith('matter_') ||
+                      device.id == 'light_switch'),
             )
             .toList()
           ..sort(_compareDevices);
@@ -1674,6 +1676,9 @@ class KahrabaIqApiService {
     }
     if (deviceId == 'breaker_02' || deviceId == 'matter_socket_switch') {
       return DeviceType.socket;
+    }
+    if (deviceId == 'light_switch') {
+      return DeviceType.light;
     }
     final text = '$deviceId $name $rawType'.toLowerCase();
     if (text.contains('ac') || text.contains('air')) {
@@ -2399,7 +2404,7 @@ class KahrabaIqApiService {
         throw Exception('Local Pi API command failed.');
       }
 
-      if (deviceId.startsWith('matter_')) {
+      if (deviceId.startsWith('matter_') || deviceId == 'light_switch') {
         throw Exception('Local controller command requires the backend API.');
       }
 
@@ -3535,6 +3540,8 @@ class KahrabaIqApiService {
         return 10;
       case 'matter_ac_switch':
         return 20;
+      case 'light_switch':
+        return 25;
       case 'breaker_01':
         return 30;
       case 'breaker_02':
@@ -3548,7 +3555,8 @@ class KahrabaIqApiService {
     return deviceId == 'breaker_01' ||
         deviceId == 'breaker_02' ||
         deviceId == 'matter_socket_switch' ||
-        deviceId == 'matter_ac_switch';
+        deviceId == 'matter_ac_switch' ||
+        deviceId == 'light_switch';
   }
 
   dynamic _pick(Map<String, dynamic> source, List<String> keys) {

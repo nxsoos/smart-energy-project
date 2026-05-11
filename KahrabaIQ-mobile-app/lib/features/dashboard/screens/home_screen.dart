@@ -373,7 +373,8 @@ class _HomeScreenState extends State<HomeScreen> {
         .where(
           (device) =>
               (device.id.startsWith('breaker_') ||
-                  device.id.startsWith('matter_')) &&
+                  device.id.startsWith('matter_') ||
+                  device.id == 'light_switch') &&
               device.online &&
               !device.stale,
         )
@@ -765,6 +766,11 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _localPendingCommands.add(device.id);
       _localCommandErrors.remove(device.id);
+      _dashboard = _dashboardWithOptimisticDeviceState(
+        device.id,
+        value,
+        commandInProgress: true,
+      );
     });
     try {
       final result = await _api.sendDeviceCommand(
@@ -783,6 +789,19 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!result.success) {
         setState(() {
           _localCommandErrors[device.id] = result.message;
+          _dashboard = _dashboardWithOptimisticDeviceState(
+            device.id,
+            device.isOn,
+            commandInProgress: false,
+          );
+        });
+      } else {
+        setState(() {
+          _dashboard = _dashboardWithOptimisticDeviceState(
+            device.id,
+            value,
+            commandInProgress: true,
+          );
         });
       }
     } catch (error) {
@@ -797,12 +816,45 @@ class _HomeScreenState extends State<HomeScreen> {
           'Exception: ',
           '',
         );
+        _dashboard = _dashboardWithOptimisticDeviceState(
+          device.id,
+          device.isOn,
+          commandInProgress: false,
+        );
       });
     } finally {
       if (mounted) {
         setState(() => _localPendingCommands.remove(device.id));
       }
     }
+  }
+
+  DashboardData? _dashboardWithOptimisticDeviceState(
+    String deviceId,
+    bool isOn, {
+    required bool commandInProgress,
+  }) {
+    final dashboard = _dashboard;
+    if (dashboard == null) {
+      return null;
+    }
+    final devices = dashboard.devices
+        .map(
+          (item) => item.id == deviceId
+              ? item.copyWith(
+                  isOn: isOn,
+                  commandInProgress: commandInProgress,
+                  pendingTargetState: commandInProgress
+                      ? (isOn ? 'on' : 'off')
+                      : null,
+                  statusLabel: item.online && !item.stale
+                      ? 'online'
+                      : item.statusLabel,
+                )
+              : item,
+        )
+        .toList();
+    return dashboard.copyWith(devices: devices);
   }
 
   void _openChat() => Navigator.of(context).push(
