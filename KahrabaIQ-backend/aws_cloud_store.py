@@ -131,6 +131,29 @@ def app_set_path(path: str, value: Any) -> None:
     )
 
 
+def app_delete_tree(path: str) -> int:
+    normalized = _normalize_path(path)
+    table = _app_table()
+    keys = [{"PK": "APP", "SK": _path_sk(normalized)}]
+    prefix = _path_sk(normalized if normalized == "/" else f"{normalized}/")
+    query_kwargs: dict[str, Any] = {
+        "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk)",
+        "ExpressionAttributeValues": {":pk": "APP", ":sk": prefix},
+    }
+    while True:
+        response = table.query(**query_kwargs)
+        keys.extend({"PK": item["PK"], "SK": item["SK"]} for item in response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        query_kwargs["ExclusiveStartKey"] = last_key
+
+    with table.batch_writer() as batch:
+        for key in keys:
+            batch.delete_item(Key=key)
+    return len(keys)
+
+
 def app_update_path(path: str, value: dict[str, Any]) -> None:
     existing = app_get_path(path, {})
     if not isinstance(existing, dict):

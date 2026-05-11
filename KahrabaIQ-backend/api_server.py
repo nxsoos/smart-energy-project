@@ -42,6 +42,7 @@ from aws_cloud_store import (
     COMMAND_STATUS_FAILED,
     COMMAND_STATUS_PENDING,
     COMMAND_STATUS_SUCCEEDED,
+    app_delete_tree,
     app_get_path,
     app_set_path,
     app_update_path,
@@ -717,6 +718,16 @@ def safe_update(path: str, value: dict[str, Any]) -> None:
         ) from error
 
 
+def safe_delete_tree(path: str) -> int:
+    try:
+        return app_delete_tree(path)
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to delete DynamoDB path tree {path}: {error}",
+        ) from error
+
+
 def ensure_matter_devices(home_id: str) -> None:
     timestamp_ms = now_ms()
     timestamp_iso = iso_from_ms(timestamp_ms)
@@ -1186,6 +1197,33 @@ def require_home_role(required_role: str):
 def admin_count(home_id: str) -> int:
     members = as_dict(safe_get(f"/homes/{home_id}/members", {}))
     return sum(1 for member in members.values() if validate_role(str(as_dict(member).get("role", "viewer"))) == "home_admin")
+
+
+def remove_home_from_user_profile(uid: str, home_id: str) -> None:
+    profile = as_dict(safe_get(f"/users/{uid}", {}))
+    user_homes = as_dict(profile.get("homes"))
+    user_homes.pop(home_id, None)
+    updates: dict[str, Any] = {
+        "homes": user_homes,
+        "updated_at_ms": now_ms(),
+        "updated_at_iso": iso_from_ms(now_ms()),
+    }
+    if profile.get("default_home_id") == home_id:
+        updates["default_home_id"] = next(iter(user_homes), None)
+    safe_set(f"/users/{uid}/homes/{home_id}", None)
+    safe_update(f"/users/{uid}", updates)
+
+
+def remove_member_from_home(home_id: str, uid: str, actor: AuthContext, *, allow_last_admin: bool = False) -> dict[str, Any]:
+    existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
+    if not existing:
+        raise HTTPException(status_code=404, detail="Member does not exist.")
+    if not allow_last_admin and validate_role(str(existing.get("role", "viewer"))) == "home_admin" and admin_count(home_id) <= 1:
+        raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
+    safe_set(f"/homes/{home_id}/members/{uid}", None)
+    remove_home_from_user_profile(uid, home_id)
+    audit_log(home_id, actor, "member_removed", "member", uid)
+    return {"success": True, "home_id": home_id, "uid": uid}
 
 
 def member_record(uid: str, email: str, display_name: str, role: str) -> dict[str, Any]:
@@ -2083,7 +2121,123 @@ def admin_users(actor: AuthContext = Depends(require_platform_admin)) -> dict[st
 @app.get("/api/admin/homes")
 def admin_homes(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
     homes = object_to_list(safe_get("/homes", {}))
+    for home in homes:
+        home_id = str(home.get("home_id") or home.get("id") or "")
+        if home_id:
+            home["member_count"] = home_member_count(home_id)
     return {"success": True, "count": len(homes), "homes": homes}
+
+
+@app.get("/api/admin/homes/{home_id}")
+def admin_home_detail(home_id: str, actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    home = as_dict(safe_get(f"/homes/{home_id}", {}))
+    if not home:
+        raise HTTPException(status_code=404, detail="Home does not exist.")
+    pi_id = str(home.get("pi_id") or "")
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {})) if pi_id else {}
+    if pi:
+        pi.pop("token_hash", None)
+    members = object_to_list(safe_get(f"/homes/{home_id}/members", {}))
+    invites = [invite for invite in object_to_list(safe_get("/home_invites", {})) if str(invite.get("home_id") or "") == home_id]
+    for invite in invites:
+        invite.pop("token_hash", None)
+    return {"success": True, "home_id": home_id, "home": {"home_id": home_id, **home}, "pi": pi, "members": members, "invites": invites}
+
+
+def queue_pi_reset_pairing(pi_id: str, home_id: str, actor: AuthContext) -> str:
+    timestamp_ms = now_ms()
+    command_id = f"admin_reset_{timestamp_ms}_{secrets.token_hex(3)}"
+    safe_set(
+        f"/pi_commands/{pi_id}/{command_id}",
+        {
+            "id": command_id,
+            "command_id": command_id,
+            "pi_id": pi_id,
+            "home_id": home_id,
+            "command": "reset_pairing",
+            "payload": {"reason": "home_deleted_by_platform_admin", "home_id": home_id},
+            "status": "pending",
+            "created_by": actor.actor_id,
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+            "expires_at_ms": timestamp_ms + (7 * 24 * 60 * 60 * 1000),
+        },
+    )
+    return command_id
+
+
+@app.delete("/api/admin/homes/{home_id}/members/{uid}")
+def admin_remove_home_member(home_id: str, uid: str, actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    if not home_exists(home_id):
+        raise HTTPException(status_code=404, detail="Home does not exist.")
+    return remove_member_from_home(home_id, uid, actor, allow_last_admin=True)
+
+
+@app.delete("/api/admin/homes/{home_id}")
+def admin_delete_home(home_id: str, actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    home = as_dict(safe_get(f"/homes/{home_id}", {}))
+    if not home:
+        raise HTTPException(status_code=404, detail="Home does not exist.")
+    pi_id = str(home.get("pi_id") or "")
+    removed_user_count = 0
+    member_uids = {str(uid) for uid in as_dict(safe_get(f"/homes/{home_id}/members", {})).keys()}
+    for raw_user in object_to_list(safe_get("/users", {})):
+        uid = str(raw_user.get("uid") or raw_user.get("id") or "")
+        if not uid:
+            continue
+        if uid in member_uids or home_id in as_dict(raw_user.get("homes")) or raw_user.get("default_home_id") == home_id:
+            remove_home_from_user_profile(uid, home_id)
+            removed_user_count += 1
+
+    removed_invite_count = 0
+    for invite in object_to_list(safe_get("/home_invites", {})):
+        invite_id = str(invite.get("invite_id") or invite.get("id") or "")
+        if invite_id and str(invite.get("home_id") or "") == home_id:
+            safe_set(f"/home_invites/{invite_id}", None)
+            removed_invite_count += 1
+
+    removed_pairing_token_count = 0
+    if pi_id:
+        for token in object_to_list(safe_get("/pi_pairing_tokens", {})):
+            token_id = str(token.get("token_id") or token.get("id") or "")
+            if token_id and str(token.get("pi_id") or "") == pi_id:
+                safe_set(f"/pi_pairing_tokens/{token_id}", None)
+                removed_pairing_token_count += 1
+
+    audit_log(home_id, actor, "home_deleted", "home", home_id, {"pi_id": pi_id})
+    deleted_path_count = safe_delete_tree(f"/homes/{home_id}")
+    reset_command_id = None
+    if pi_id:
+        pi = as_dict(safe_get(f"/pis/{pi_id}", {}))
+        timestamp_ms = now_ms()
+        pi_record = {key: value for key, value in pi.items() if key not in {"home_id", "paired_by_uid", "paired_at_ms", "paired_at_iso"}}
+        safe_set(
+            f"/pis/{pi_id}",
+            {
+                **pi_record,
+                "pi_id": pi_id,
+                "status": "unpaired",
+                "online_status": pi.get("online_status"),
+                "unpaired_reason": "home_deleted_by_platform_admin",
+                "unpaired_at_ms": timestamp_ms,
+                "unpaired_at_iso": iso_from_ms(timestamp_ms),
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": iso_from_ms(timestamp_ms),
+            },
+        )
+        reset_command_id = queue_pi_reset_pairing(pi_id, home_id, actor)
+
+    return {
+        "success": True,
+        "home_id": home_id,
+        "pi_id": pi_id or None,
+        "reset_command_id": reset_command_id,
+        "deleted_path_count": deleted_path_count,
+        "removed_user_count": removed_user_count,
+        "removed_invite_count": removed_invite_count,
+        "removed_pairing_token_count": removed_pairing_token_count,
+        "message": "Home deleted. Its Pi will return to pairing mode when online." if pi_id else "Home deleted.",
+    }
 
 
 @app.get("/api/admin/pis")
@@ -5118,19 +5272,7 @@ def remove_member(
     uid: str,
     actor: AuthContext = Depends(require_home_permission("can_manage_users")),
 ) -> dict[str, Any]:
-    existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
-    if not existing:
-        raise HTTPException(status_code=404, detail="Member does not exist.")
-    if validate_role(str(existing.get("role", "viewer"))) == "home_admin" and admin_count(home_id) <= 1:
-        raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
-    safe_set(f"/homes/{home_id}/members/{uid}", None)
-    safe_set(f"/users/{uid}/homes/{home_id}", None)
-    user_profile = as_dict(safe_get(f"/users/{uid}", {}))
-    user_homes = as_dict(user_profile.get("homes"))
-    user_homes.pop(home_id, None)
-    safe_update(f"/users/{uid}", {"homes": user_homes, "updated_at_ms": now_ms(), "updated_at_iso": iso_from_ms(now_ms())})
-    audit_log(home_id, actor, "member_removed", "member", uid)
-    return {"success": True, "home_id": home_id, "uid": uid}
+    return remove_member_from_home(home_id, uid, actor)
 
 
 @app.get("/api/home/{home_id}/devices", dependencies=[Depends(require_home_permission("can_view"))])

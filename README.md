@@ -276,7 +276,7 @@ AWS_REGION=eu-west-1
 AWS_DEFAULT_REGION=eu-west-1
 AWS_DYNAMODB_APP_TABLE=KahrabaIQApp
 AWS_DYNAMODB_SUMMARIES_TABLE=SmartEnergySummaries
-PLATFORM_ADMIN_EMAILS=admin@example.com
+PLATFORM_ADMIN_EMAILS=admin@kahrabaiq.com
 AI_SERVICE_URL=https://YOUR_AI_SERVICE_URL
 INTERNAL_SERVICE_TOKEN=change_me_to_a_long_random_secret
 HOME_MEMBER_LIMIT=3
@@ -487,6 +487,8 @@ ESP32 documentation:
 - The kiosk dashboard can display a pairing QR payload.
 - The first phone user who scans the Pi QR becomes `home_admin`.
 - The `home_admin` mobile panel can generate invite QR codes for `viewer` or `member` access and remove existing viewers/members.
+- The fixed global admin account is configured with `PLATFORM_ADMIN_EMAILS=admin@kahrabaiq.com` and can delete homes or remove members across all homes.
+- Deleting a home marks the linked Pi as `unpaired` and queues a `reset_pairing` command so it returns to pairing mode when online.
 - `HOME_MEMBER_LIMIT` caps the total non-admin users per home: `member + viewer <= 3` by default.
 
 ## Verification

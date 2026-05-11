@@ -21,6 +21,7 @@ import '../../demo/widgets/demo_scenario_selector.dart';
 import '../../pairing/screens/qr_scanner_screen.dart';
 import '../../sensors/screens/sensors_status_screen.dart';
 import 'breakers_screen.dart';
+import 'global_admin_screen.dart';
 import 'home_admin_panel_screen.dart';
 import 'notifications_screen.dart';
 import '../widgets/ai_insights_banner.dart';
@@ -44,6 +45,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _homeId;
   String? _currentUserUid;
   UserHomeAccess? _currentHomeAccess;
+  bool _isPlatformAdmin = false;
   DashboardData? _dashboard;
   StreamSubscription<DashboardData>? _liveSubscription;
   bool _isLoading = true;
@@ -97,6 +99,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _homeId = pairedHomeId;
         _currentUserUid = null;
         _currentHomeAccess = null;
+        _isPlatformAdmin = false;
       });
     } else {
       try {
@@ -110,6 +113,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _homeId = pairedHomeId;
           _currentUserUid = profile.uid;
           _currentHomeAccess = selectedHome;
+          _isPlatformAdmin = profile.isPlatformAdmin;
         });
         if (pairedHomeId == null || pairedHomeId.isEmpty) {
           setState(() {
@@ -472,6 +476,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 name: _displayName(),
                 onPair: _openQrScanner,
                 onLogout: _logout,
+                onGlobalAdmin: _isPlatformAdmin ? _openGlobalAdmin : null,
                 isPairing: _isPairing,
               )
             : dashboard == null
@@ -578,6 +583,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       onSensors: _openSensors,
                       onPair: _openQrScanner,
                       onAdmin: canOpenAdminPanel ? _openAdminPanel : null,
+                      onGlobalAdmin: _isPlatformAdmin ? _openGlobalAdmin : null,
                       isPairing: _isPairing,
                       showPair: false,
                     ),
@@ -821,7 +827,8 @@ class _HomeScreenState extends State<HomeScreen> {
           token: parsed.token,
           homeName: 'KahrabaIQ Home',
         );
-        successMessage = 'Paired ${result['pi_id'] ?? parsed.piId} successfully.';
+        successMessage =
+            'Paired ${result['pi_id'] ?? parsed.piId} successfully.';
       } else if (parsed is _HomeInvitePayload) {
         result = await _api.claimHomeInvite(
           inviteId: parsed.inviteId,
@@ -834,9 +841,9 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(successMessage)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(successMessage)));
       await _loadDashboard();
     } catch (error) {
       if (!mounted) {
@@ -903,18 +910,31 @@ class _HomeScreenState extends State<HomeScreen> {
         token: parts.last.trim(),
       );
     }
-    return _PiPairingPayload(piId: NetworkConfig.defaultHomePiId, token: payload);
+    return _PiPairingPayload(
+      piId: NetworkConfig.defaultHomePiId,
+      token: payload,
+    );
   }
 
   Future<void> _openAdminPanel() async {
     final homeId = _homeId;
     final userUid = _currentUserUid;
-    if (homeId == null || homeId.isEmpty || userUid == null || userUid.isEmpty) {
+    if (homeId == null ||
+        homeId.isEmpty ||
+        userUid == null ||
+        userUid.isEmpty) {
       return;
     }
     await Navigator.of(context).push(
-      fadeSlideRoute(HomeAdminPanelScreen(homeId: homeId, currentUserUid: userUid)),
+      fadeSlideRoute(
+        HomeAdminPanelScreen(homeId: homeId, currentUserUid: userUid),
+      ),
     );
+    await _loadDashboard();
+  }
+
+  Future<void> _openGlobalAdmin() async {
+    await Navigator.of(context).push(fadeSlideRoute(const GlobalAdminScreen()));
     await _loadDashboard();
   }
 
@@ -986,11 +1006,13 @@ class _UnpairedHomeState extends StatelessWidget {
     required this.onPair,
     required this.onLogout,
     required this.isPairing,
+    this.onGlobalAdmin,
   });
 
   final String name;
   final VoidCallback onPair;
   final VoidCallback onLogout;
+  final VoidCallback? onGlobalAdmin;
   final bool isPairing;
 
   @override
@@ -1003,8 +1025,7 @@ class _UnpairedHomeState extends StatelessWidget {
         AppEmptyState(
           icon: Icons.home_work_outlined,
           title: 'Join or pair a home',
-          message:
-              'Scan a Pi pairing QR or a home invite QR to continue.',
+          message: 'Scan a Pi pairing QR or a home invite QR to continue.',
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
@@ -1018,6 +1039,14 @@ class _UnpairedHomeState extends StatelessWidget {
               : const Icon(Icons.qr_code_scanner),
           label: Text(isPairing ? 'Pairing' : 'Scan QR'),
         ),
+        if (onGlobalAdmin != null) ...[
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: onGlobalAdmin,
+            icon: const Icon(Icons.shield_outlined),
+            label: const Text('Global Admin'),
+          ),
+        ],
       ],
     );
   }
@@ -1315,12 +1344,14 @@ class _DashboardActions extends StatelessWidget {
     required this.onPair,
     required this.isPairing,
     this.onAdmin,
+    this.onGlobalAdmin,
     this.showPair = true,
   });
 
   final VoidCallback onSensors;
   final VoidCallback onPair;
   final VoidCallback? onAdmin;
+  final VoidCallback? onGlobalAdmin;
   final bool isPairing;
   final bool showPair;
 
@@ -1342,6 +1373,16 @@ class _DashboardActions extends StatelessWidget {
               onPressed: onAdmin,
               icon: const Icon(Icons.admin_panel_settings),
               label: const Text('Admin Panel'),
+            ),
+          ),
+        ],
+        if (onGlobalAdmin != null) ...[
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: onGlobalAdmin,
+              icon: const Icon(Icons.shield_outlined),
+              label: const Text('Global Admin'),
             ),
           ),
         ],
