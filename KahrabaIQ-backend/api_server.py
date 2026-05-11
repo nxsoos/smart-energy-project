@@ -82,6 +82,7 @@ DEVICE_ALIASES = {
 CONTROLLABLE_DEVICES = {"breaker_01", "breaker_02", *DEVICE_ALIASES, *MATTER_DEVICE_IDS}
 VALID_COMMANDS = {"turn_on", "turn_off"}
 DEVICE_STALE_AFTER_MS = 45 * 1000
+PI_OFFLINE_AFTER_MS = int(os.environ.get("PI_OFFLINE_AFTER_SECONDS", "120")) * 1000
 HA_SYNC_INTERVAL_SECONDS = int(os.environ.get("HA_SYNC_INTERVAL_SECONDS", "30"))
 AI_AUTO_PREDICT_ENABLED = os.environ.get("AI_AUTO_PREDICT_ENABLED", "true").strip().lower() in {
     "1",
@@ -529,6 +530,9 @@ class ChatProxyRequest(BaseModel):
 
 class ChatSessionCreateRequest(BaseModel):
     title: str | None = None
+    mode: str | None = None
+    scenario_id: str | None = None
+    scenario_name: str | None = None
 
 
 class ChatSessionRenameRequest(BaseModel):
@@ -538,6 +542,7 @@ class ChatSessionRenameRequest(BaseModel):
 class ChatSessionMessageRequest(BaseModel):
     message: str
     home_name: str | None = None
+    mode: str | None = None
     scenario_id: str | None = None
     scenario_name: str | None = None
 
@@ -2776,8 +2781,14 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         online = not is_stale
     elif is_stale and not is_breaker and not is_home_assistant_device:
         online = False
-    if is_home_assistant_device:
+    if is_home_assistant_device and online is not False:
         is_stale = False
+    last_seen_age_seconds = (
+        round(max(0, now_ms() - int(last_seen_ms)) / 1000, 3)
+        if isinstance(last_seen_ms, (int, float)) and int(last_seen_ms) > 0
+        else None
+    )
+    status_label = "offline" if online is False else "stale" if is_stale else "online"
 
     command_in_progress = bool(normalize_bool(raw.get("command_in_progress")))
     pending_target_state = raw.get("pending_target_state")
@@ -2813,6 +2824,7 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         "local_online": bool(normalize_bool(raw.get("local_online")) if raw.get("local_online") is not None else online),
         "cloud_online": bool(normalize_bool(raw.get("cloud_online")) if raw.get("cloud_online") is not None else not is_home_assistant_device),
         "stale": is_stale,
+        "status_label": status_label,
         "controllable": is_controllable_device(device_id, raw),
         "state": state,
         "display_state": display_state,
@@ -2835,6 +2847,7 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         ),
         "last_seen_ms": last_seen_ms,
         "last_seen_iso": iso_from_ms(last_seen_ms),
+        "last_seen_age_seconds": last_seen_age_seconds,
         "command_in_progress": command_in_progress,
         "pending_command_id": raw.get("pending_command_id"),
         "pending_target_state": pending_target_state,
@@ -2958,6 +2971,35 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
         "backend_device_health": as_dict(backend.get("device_health")),
         "occupancy_room1": as_dict(as_dict(home.get("occupancy")).get("room1")),
         "safety": as_dict(home.get("safety")),
+    }
+
+
+def build_hub_status(bundle: dict[str, Any]) -> dict[str, Any]:
+    home = as_dict(bundle.get("home"))
+    latest_state = as_dict(bundle.get("latest_state"))
+    pi_id = str(first_present(home.get("pi_id"), latest_state.get("pi_id"), default="") or "")
+    pi = as_dict(safe_get(f"/pis/{pi_id}", {})) if pi_id else {}
+    last_seen_ms = first_present(
+        pi.get("last_heartbeat_at_ms"),
+        pi.get("last_state_sync_at_ms"),
+        pi.get("last_seen_at_ms"),
+        latest_state.get("updated_at_ms"),
+        latest_state.get("timestamp_ms"),
+    )
+    age_seconds = (
+        round(max(0, now_ms() - int(last_seen_ms)) / 1000, 3)
+        if isinstance(last_seen_ms, (int, float)) and int(last_seen_ms) > 0
+        else None
+    )
+    online = age_seconds is not None and age_seconds * 1000 <= PI_OFFLINE_AFTER_MS
+    return {
+        "pi_id": pi_id or None,
+        "online": online,
+        "stale": not online,
+        "status_label": "online" if online else "offline",
+        "last_seen_ms": last_seen_ms,
+        "last_seen_iso": iso_from_ms(last_seen_ms),
+        "last_seen_age_seconds": age_seconds,
     }
 
 
@@ -3930,6 +3972,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
     bundle = read_home_bundle(home_id)
     devices = build_devices(bundle, home_id)
     room = build_room(bundle)
+    hub_status = build_hub_status(bundle)
     timestamp_ms = now_ms()
     control = ensure_control(home_id)
     settings = ensure_settings(home_id)
@@ -4025,6 +4068,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         "ai_freshness": ai_ctx,
         "ai_daily_summary": as_dict(as_dict(bundle["backend_ai"]).get("daily_summary")),
         "system_health": bundle["system_health"] or bundle["backend_device_health"],
+        "hub_status": hub_status,
         "settings_summary": settings_summary(settings),
         "next_schedule": next_schedule_summary(home_id),
         "timezone": TIMEZONE,
@@ -5805,6 +5849,33 @@ def chat_actor_name(actor: AuthContext) -> str:
     return actor.actor_id
 
 
+def normalize_chat_mode(mode: str | None, scenario_id: str | None = None) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized in {"demo", "scenario", "demo_scenario"}:
+        return "demo_scenario"
+    if normalized == "live":
+        return "live"
+    return "demo_scenario" if str(scenario_id or "").strip() else "live"
+
+
+def normalize_chat_scenario_id(scenario_id: str | None) -> str | None:
+    clean = str(scenario_id or "").strip()
+    return clean or None
+
+
+def chat_session_mode(session: dict[str, Any]) -> str:
+    return normalize_chat_mode(str(session.get("mode") or "live"), session.get("scenario_id"))
+
+
+def chat_context_matches(session: dict[str, Any], mode: str, scenario_id: str | None) -> bool:
+    session_mode = chat_session_mode(session)
+    if session_mode != mode:
+        return False
+    if mode != "demo_scenario":
+        return True
+    return normalize_chat_scenario_id(session.get("scenario_id")) == normalize_chat_scenario_id(scenario_id)
+
+
 def chat_session_ref(home_id: str, session_id: str) -> str:
     return f"/homes/{home_id}/chat/sessions/{session_id}"
 
@@ -5886,7 +5957,7 @@ def require_chat_session_access(
     if session.get("archived") is True and not allow_archived:
         raise HTTPException(status_code=404, detail="Chat session is archived.")
     created_by = str(session.get("created_by") or "")
-    if actor.actor_type != "service" and actor.actor_role not in {"home_admin", "platform_admin"} and created_by != chat_actor_id(actor):
+    if actor.actor_type != "service" and created_by != chat_actor_id(actor):
         raise HTTPException(status_code=403, detail="You do not have access to this chat session.")
     return session
 
@@ -5897,12 +5968,20 @@ def create_chat_session_record(
     title: str | None = None,
     *,
     session_id: str | None = None,
+    mode: str | None = None,
+    scenario_id: str | None = None,
+    scenario_name: str | None = None,
 ) -> dict[str, Any]:
     timestamp_ms = now_ms()
     actual_session_id = session_id or f"chat_{timestamp_ms}"
+    normalized_scenario_id = normalize_chat_scenario_id(scenario_id)
+    normalized_mode = normalize_chat_mode(mode, normalized_scenario_id)
     session = {
         "session_id": actual_session_id,
         "home_id": home_id,
+        "mode": normalized_mode,
+        "scenario_id": normalized_scenario_id if normalized_mode == "demo_scenario" else None,
+        "scenario_name": (str(scenario_name or "").strip() or None) if normalized_mode == "demo_scenario" else None,
         "title": sanitize_chat_title(title),
         "created_by": chat_actor_id(actor),
         "created_by_name": chat_actor_name(actor),
@@ -5924,9 +6003,37 @@ def create_chat_session_record(
 def default_chat_session(home_id: str, actor: AuthContext) -> dict[str, Any]:
     session_id = f"chat_default_{re.sub(r'[^A-Za-z0-9_-]', '_', chat_actor_id(actor))}"
     session = as_dict(safe_get(chat_session_ref(home_id, session_id), {}))
-    if session and session.get("archived") is not True:
+    if session and session.get("archived") is not True and chat_session_mode(session) == "live":
         return session
-    return create_chat_session_record(home_id, actor, "New Chat", session_id=session_id)
+    return create_chat_session_record(home_id, actor, "New Chat", session_id=session_id, mode="live")
+
+
+def default_context_chat_session(
+    home_id: str,
+    actor: AuthContext,
+    *,
+    scenario_id: str | None = None,
+    scenario_name: str | None = None,
+) -> dict[str, Any]:
+    normalized_scenario_id = normalize_chat_scenario_id(scenario_id)
+    mode = normalize_chat_mode(None, normalized_scenario_id)
+    if mode == "live":
+        return default_chat_session(home_id, actor)
+    actor_key = re.sub(r"[^A-Za-z0-9_-]", "_", chat_actor_id(actor))
+    scenario_key = re.sub(r"[^A-Za-z0-9_-]", "_", normalized_scenario_id or "scenario")
+    session_id = f"chat_default_{actor_key}_{scenario_key}"
+    session = as_dict(safe_get(chat_session_ref(home_id, session_id), {}))
+    if session and session.get("archived") is not True and chat_context_matches(session, mode, normalized_scenario_id):
+        return session
+    return create_chat_session_record(
+        home_id,
+        actor,
+        "New Chat",
+        session_id=session_id,
+        mode=mode,
+        scenario_id=normalized_scenario_id,
+        scenario_name=scenario_name,
+    )
 
 
 def call_ai_chat_service(home_id: str, request: ChatProxyRequest, history: list[dict[str, str]]) -> dict[str, Any]:
@@ -5969,11 +6076,18 @@ def send_chat_session_message(
         raise HTTPException(status_code=400, detail="Message must not be empty.")
 
     session = require_chat_session_access(home_id, session_id, actor)
+    requested_scenario_id = normalize_chat_scenario_id(request.scenario_id)
+    requested_mode = normalize_chat_mode(request.mode, requested_scenario_id)
+    if not chat_context_matches(session, requested_mode, requested_scenario_id):
+        raise HTTPException(status_code=409, detail="Chat session belongs to a different mode or scenario.")
     timestamp_ms = now_ms()
     user_message_id = f"msg_{timestamp_ms}_user"
     user_message = {
         "message_id": user_message_id,
         "session_id": session_id,
+        "mode": requested_mode,
+        "scenario_id": requested_scenario_id if requested_mode == "demo_scenario" else None,
+        "scenario_name": request.scenario_name if requested_mode == "demo_scenario" else None,
         "role": "user",
         "content": message,
         "created_by": chat_actor_id(actor),
@@ -5990,8 +6104,8 @@ def send_chat_session_message(
     proxy_request = ChatProxyRequest(
         message=message,
         home_name=request.home_name,
-        scenario_id=request.scenario_id,
-        scenario_name=request.scenario_name,
+        scenario_id=requested_scenario_id if requested_mode == "demo_scenario" else None,
+        scenario_name=request.scenario_name if requested_mode == "demo_scenario" else None,
         conversation_history=history,
     )
     ai_data = call_ai_chat_service(home_id, proxy_request, history)
@@ -6001,6 +6115,9 @@ def send_chat_session_message(
     assistant_message = {
         "message_id": assistant_message_id,
         "session_id": session_id,
+        "mode": requested_mode,
+        "scenario_id": requested_scenario_id if requested_mode == "demo_scenario" else None,
+        "scenario_name": request.scenario_name if requested_mode == "demo_scenario" else None,
         "role": "assistant",
         "content": answer,
         "created_by": "assistant",
@@ -6018,6 +6135,9 @@ def send_chat_session_message(
     if next_title.strip().lower() == "new chat":
         next_title = title_from_message(message)
     session_update = {
+        "mode": requested_mode,
+        "scenario_id": requested_scenario_id if requested_mode == "demo_scenario" else None,
+        "scenario_name": request.scenario_name if requested_mode == "demo_scenario" else None,
         "title": next_title,
         "updated_at_ms": assistant_timestamp_ms,
         "updated_at_iso": iso_from_ms(assistant_timestamp_ms),
@@ -6046,18 +6166,23 @@ def send_chat_session_message(
 @app.get("/api/home/{home_id}/chat/sessions")
 def list_chat_sessions(
     home_id: str,
+    mode: str | None = Query(default="live"),
+    scenario_id: str | None = None,
     actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
 ) -> dict[str, Any]:
     sessions = object_to_list(safe_get(f"/homes/{home_id}/chat/sessions", {}))
     actor_id = chat_actor_id(actor)
+    requested_scenario_id = normalize_chat_scenario_id(scenario_id)
+    requested_mode = normalize_chat_mode(mode, requested_scenario_id)
     visible = [
         item
         for item in sessions
         if item.get("archived") is not True
-        and (actor.actor_role in {"home_admin", "platform_admin"} or str(item.get("created_by")) == actor_id)
+        and (actor.actor_type == "service" or str(item.get("created_by")) == actor_id)
+        and chat_context_matches(item, requested_mode, requested_scenario_id)
     ]
     visible.sort(key=lambda item: as_number(item.get("updated_at_ms")), reverse=True)
-    return {"home_id": home_id, "count": len(visible), "sessions": visible}
+    return {"home_id": home_id, "mode": requested_mode, "scenario_id": requested_scenario_id, "count": len(visible), "sessions": visible}
 
 
 @app.post("/api/home/{home_id}/chat/sessions")
@@ -6066,7 +6191,14 @@ def create_chat_session(
     request: ChatSessionCreateRequest,
     actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
 ) -> dict[str, Any]:
-    session = create_chat_session_record(home_id, actor, request.title or "New Chat")
+    session = create_chat_session_record(
+        home_id,
+        actor,
+        request.title or "New Chat",
+        mode=request.mode,
+        scenario_id=request.scenario_id,
+        scenario_name=request.scenario_name,
+    )
     return {"home_id": home_id, "session": session}
 
 
@@ -6160,10 +6292,16 @@ def chat_with_ai(
     request: ChatProxyRequest,
     actor: AuthContext = Depends(require_home_permission("can_use_ai_chat")),
 ) -> dict[str, Any]:
-    session = default_chat_session(home_id, actor)
+    session = default_context_chat_session(
+        home_id,
+        actor,
+        scenario_id=request.scenario_id,
+        scenario_name=request.scenario_name,
+    )
     session_request = ChatSessionMessageRequest(
         message=request.message,
         home_name=request.home_name,
+        mode=normalize_chat_mode(None, request.scenario_id),
         scenario_id=request.scenario_id,
         scenario_name=request.scenario_name,
     )

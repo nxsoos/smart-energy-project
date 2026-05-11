@@ -502,6 +502,8 @@ DemoScenarioData _scenario({
         power: socketPower,
         branch: 'Socket',
         online: breakerOnline,
+        stale: !breakerOnline,
+        lastSeen: breakerOnline ? now : now.subtract(const Duration(minutes: 16)),
       ),
       _device(
         id: 'breaker_02',
@@ -511,6 +513,8 @@ DemoScenarioData _scenario({
         power: acPower,
         branch: 'AC',
         online: breakerOnline,
+        stale: !breakerOnline,
+        lastSeen: breakerOnline ? now : now.subtract(const Duration(minutes: 16)),
       ),
     ],
     alerts: alerts,
@@ -619,6 +623,8 @@ Device _device({
   required double power,
   required String branch,
   required bool online,
+  bool stale = false,
+  DateTime? lastSeen,
 }) {
   return Device(
     id: id,
@@ -630,12 +636,15 @@ Device _device({
     online: online,
     localOnline: online,
     cloudOnline: online,
+    stale: stale,
     controllable: false,
     energySupported: true,
     voltage: online ? 230 : 0,
     current: online ? power / 230 : 0,
     energyToday: online ? power / 1000 : 0,
     controlMethod: 'demo_simulation',
+    lastSeen: lastSeen,
+    statusLabel: !online ? 'offline' : stale ? 'stale' : 'online',
   );
 }
 

@@ -126,7 +126,8 @@ class _BreakerCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final online = device.localOnline || device.cloudOnline || device.online;
+    final online = device.online && (device.localOnline || device.cloudOnline);
+    final stale = device.stale;
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -152,15 +153,24 @@ class _BreakerCard extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(child: Text(device.name, style: AppTextStyles.h3)),
               _StatusPill(
-                label: online ? (device.isOn ? 'On' : 'Off') : 'Offline',
-                color: online
-                    ? (device.isOn
-                          ? ColorTokens.success
-                          : ColorTokens.textMuted)
-                    : ColorTokens.danger,
+                label: !online ? 'Offline' : stale ? 'Stale' : device.isOn ? 'On' : 'Off',
+                color: !online
+                    ? ColorTokens.danger
+                    : stale
+                    ? ColorTokens.warning
+                    : device.isOn
+                    ? ColorTokens.success
+                    : ColorTokens.textMuted,
               ),
             ],
           ),
+          if (!online || stale) ...[
+            const SizedBox(height: 8),
+            Text(
+              _lastSeenText(device),
+              style: AppTextStyles.caption.copyWith(color: ColorTokens.textMuted),
+            ),
+          ],
           const SizedBox(height: 16),
           Wrap(
             spacing: 10,
@@ -192,6 +202,21 @@ class _BreakerCard extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  String _lastSeenText(Device device) {
+    final lastSeen = device.lastSeen;
+    if (lastSeen == null) {
+      return 'Last seen unknown';
+    }
+    final age = DateTime.now().difference(lastSeen);
+    if (age.inMinutes < 1) {
+      return 'Last seen just now';
+    }
+    if (age.inHours < 1) {
+      return 'Last seen ${age.inMinutes} min ago';
+    }
+    return 'Last seen ${age.inHours} hr ago';
   }
 }
 

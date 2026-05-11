@@ -34,6 +34,7 @@ class DashboardData {
   final Map<String, dynamic> settingsSummary;
   final Map<String, dynamic> occupancy;
   final Map<String, dynamic> safety;
+  final Map<String, dynamic> hubStatus;
   final List<Map<String, dynamic>> criticalAlerts;
   final ScheduleInfo? nextSchedule;
   final String? scenarioId;
@@ -65,6 +66,7 @@ class DashboardData {
     this.settingsSummary = const {},
     this.occupancy = const {},
     this.safety = const {},
+    this.hubStatus = const {},
     this.criticalAlerts = const [],
     this.nextSchedule,
     this.scenarioId,
@@ -92,6 +94,7 @@ class DashboardData {
     Map<String, dynamic>? settingsSummary,
     Map<String, dynamic>? occupancy,
     Map<String, dynamic>? safety,
+    Map<String, dynamic>? hubStatus,
     List<Map<String, dynamic>>? criticalAlerts,
     ScheduleInfo? nextSchedule,
     String? scenarioId,
@@ -119,6 +122,7 @@ class DashboardData {
       settingsSummary: settingsSummary ?? this.settingsSummary,
       occupancy: occupancy ?? this.occupancy,
       safety: safety ?? this.safety,
+      hubStatus: hubStatus ?? this.hubStatus,
       criticalAlerts: criticalAlerts ?? this.criticalAlerts,
       nextSchedule: nextSchedule ?? this.nextSchedule,
       scenarioId: scenarioId ?? this.scenarioId,
@@ -357,15 +361,23 @@ class ChatSessionSummary {
     required this.id,
     required this.title,
     required this.updatedAt,
+    this.mode = 'live',
+    this.scenarioId,
+    this.scenarioName,
     this.lastMessagePreview = '',
     this.messageCount = 0,
+    this.archived = false,
   });
 
   final String id;
   final String title;
   final DateTime updatedAt;
+  final String mode;
+  final String? scenarioId;
+  final String? scenarioName;
   final String lastMessagePreview;
   final int messageCount;
+  final bool archived;
 }
 
 class ChatMessageEntry {
@@ -576,8 +588,17 @@ class KahrabaIqApiService {
 
   Future<List<ChatSessionSummary>> fetchChatSessions({
     required String homeId,
+    String mode = 'live',
+    String? scenarioId,
   }) async {
-    final response = await _dio.get('/api/home/$homeId/chat/sessions');
+    final response = await _dio.get(
+      '/api/home/$homeId/chat/sessions',
+      queryParameters: {
+        'mode': mode,
+        if (scenarioId != null && scenarioId.isNotEmpty)
+          'scenario_id': scenarioId,
+      },
+    );
     return _asList(_asMap(response.data)['sessions'])
         .map((item) => _parseChatSession(_asMap(item)))
         .where((item) => item.id.isNotEmpty)
@@ -587,12 +608,29 @@ class KahrabaIqApiService {
   Future<ChatSessionSummary> createChatSession({
     required String homeId,
     String title = 'New Chat',
+    String mode = 'live',
+    String? scenarioId,
+    String? scenarioName,
   }) async {
     final response = await _dio.post(
       '/api/home/$homeId/chat/sessions',
-      data: {'title': title},
+      data: {
+        'title': title,
+        'mode': mode,
+        if (scenarioId != null && scenarioId.isNotEmpty)
+          'scenario_id': scenarioId,
+        if (scenarioName != null && scenarioName.isNotEmpty)
+          'scenario_name': scenarioName,
+      },
     );
     return _parseChatSession(_asMap(_asMap(response.data)['session']));
+  }
+
+  Future<void> deleteChatSession({
+    required String homeId,
+    required String sessionId,
+  }) async {
+    await _dio.delete('/api/home/$homeId/chat/sessions/$sessionId');
   }
 
   Future<List<ChatMessageEntry>> fetchChatMessages({
@@ -613,6 +651,7 @@ class KahrabaIqApiService {
     required String sessionId,
     required String message,
     String? homeName,
+    String mode = 'live',
     String? scenarioId,
     String? scenarioName,
   }) async {
@@ -621,6 +660,7 @@ class KahrabaIqApiService {
       data: {
         'message': message,
         'home_name': ?homeName,
+        'mode': mode,
         'scenario_id': ?scenarioId,
         'scenario_name': ?scenarioName,
       },
@@ -638,8 +678,14 @@ class KahrabaIqApiService {
       id: _asString(_pick(data, ['session_id', 'id'])),
       title: _asString(_pick(data, ['title']), fallback: 'New Chat'),
       updatedAt: _asDateTime(_pick(data, ['updated_at_ms', 'updated_at_iso'])),
+      mode: _asString(_pick(data, ['mode']), fallback: 'live'),
+      scenarioId: _asNullableString(_pick(data, ['scenario_id', 'scenarioId'])),
+      scenarioName: _asNullableString(
+        _pick(data, ['scenario_name', 'scenarioName']),
+      ),
       lastMessagePreview: _asString(_pick(data, ['last_message_preview'])),
       messageCount: _asInt(_pick(data, ['message_count'])),
+      archived: _asBool(_pick(data, ['archived'])),
     );
   }
 
@@ -1059,6 +1105,7 @@ class KahrabaIqApiService {
       tariffBhdPerKwh: ElectricityPricing.costPerKWh,
       control: _parseControl(_asMap(data['control'])),
       safety: safety,
+      hubStatus: _asMap(data['hub_status']),
       deviceControlEnabled: homeId != 'home_test',
     );
   }
@@ -1071,6 +1118,7 @@ class KahrabaIqApiService {
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final rawType = _asString(_pick(data, ['type']));
     final online = _asBool(_pick(data, ['online']), fallback: true);
+    final stale = _asBool(_pick(data, ['stale']));
     final localOnline = _asBool(
       _pick(data, ['localOnline', 'local_online']),
       fallback: online,
@@ -1104,6 +1152,7 @@ class KahrabaIqApiService {
         _pick(data, ['cloudOnline', 'cloud_online']),
         fallback: true,
       ),
+      stale: stale,
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: _asBool(
         _pick(data, ['commandInProgress', 'command_in_progress']),
@@ -1138,6 +1187,16 @@ class KahrabaIqApiService {
       ),
       lastCommandMessage: _asNullableString(
         _pick(data, ['lastCommandMessage', 'last_command_message']),
+      ),
+      lastSeen: _parseOptionalDateTime(
+        _pick(data, ['lastSeen', 'last_seen_iso', 'last_seen_ms']),
+      ),
+      lastSeenAgeSeconds: _asNullableDouble(
+        _pick(data, ['lastSeenAgeSeconds', 'last_seen_age_seconds']),
+      ),
+      statusLabel: _asString(
+        _pick(data, ['statusLabel', 'status_label']),
+        fallback: !online ? 'offline' : stale ? 'stale' : 'online',
       ),
     );
   }
@@ -1458,6 +1517,7 @@ class KahrabaIqApiService {
       settingsSummary: _asMap(data['settings_summary']),
       occupancy: _asMap(data['occupancy']),
       safety: _asMap(data['safety']),
+      hubStatus: _asMap(data['hub_status']),
       criticalAlerts: _asList(
         data['critical_alerts'],
       ).map((item) => _asMap(item)).toList(),
@@ -1477,6 +1537,7 @@ class KahrabaIqApiService {
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final lastCommand = _asMap(data['last_command']);
     final online = _asBool(_pick(data, ['online']), fallback: true);
+    final stale = _asBool(_pick(data, ['stale']));
     final localOnline = _asBool(
       _pick(data, ['local_online', 'localOnline']),
       fallback: online,
@@ -1509,6 +1570,7 @@ class KahrabaIqApiService {
         _pick(data, ['cloud_online', 'cloudOnline']),
         fallback: true,
       ),
+      stale: stale,
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: _asBool(_pick(data, ['command_in_progress'])),
       energySupported: energySupported,
@@ -1526,6 +1588,16 @@ class KahrabaIqApiService {
       lastCommandMessage: _asNullableString(
         _pick(lastCommand, ['user_message']) ??
             _pick(data, ['last_command_message']),
+      ),
+      lastSeen: _parseOptionalDateTime(
+        _pick(data, ['last_seen_iso', 'last_seen_ms', 'lastSeen']),
+      ),
+      lastSeenAgeSeconds: _asNullableDouble(
+        _pick(data, ['last_seen_age_seconds', 'lastSeenAgeSeconds']),
+      ),
+      statusLabel: _asString(
+        _pick(data, ['status_label', 'statusLabel']),
+        fallback: !online ? 'offline' : stale ? 'stale' : 'online',
       ),
     );
   }
@@ -3397,6 +3469,19 @@ class KahrabaIqApiService {
       return double.tryParse(value) ?? fallback;
     }
     return fallback;
+  }
+
+  double? _asNullableDouble(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value);
+    }
+    return null;
   }
 
   int _asInt(dynamic value, {int fallback = 0}) {

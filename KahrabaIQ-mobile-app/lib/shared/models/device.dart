@@ -11,6 +11,7 @@ class Device {
   final bool online;
   final bool localOnline;
   final bool cloudOnline;
+  final bool stale;
   final bool controllable;
   final bool commandInProgress;
   final bool energySupported;
@@ -20,6 +21,9 @@ class Device {
   final String? controlMethod;
   final String? pendingTargetState;
   final String? lastCommandMessage;
+  final DateTime? lastSeen;
+  final double? lastSeenAgeSeconds;
+  final String statusLabel;
 
   Device({
     required this.id,
@@ -31,6 +35,7 @@ class Device {
     this.online = true,
     this.localOnline = true,
     this.cloudOnline = true,
+    this.stale = false,
     this.controllable = true,
     this.commandInProgress = false,
     this.energySupported = true,
@@ -40,6 +45,9 @@ class Device {
     this.controlMethod,
     this.pendingTargetState,
     this.lastCommandMessage,
+    this.lastSeen,
+    this.lastSeenAgeSeconds,
+    this.statusLabel = 'online',
   });
 
   factory Device.fromJson(Map<String, dynamic> json) {
@@ -53,6 +61,7 @@ class Device {
       online: json['online'] as bool? ?? true,
       localOnline: json['localOnline'] as bool? ?? true,
       cloudOnline: json['cloudOnline'] as bool? ?? true,
+      stale: json['stale'] as bool? ?? false,
       controllable: json['controllable'] as bool? ?? true,
       commandInProgress: json['commandInProgress'] as bool? ?? false,
       energySupported: json['energySupported'] as bool? ?? true,
@@ -62,6 +71,11 @@ class Device {
       controlMethod: json['controlMethod'] as String?,
       pendingTargetState: json['pendingTargetState'] as String?,
       lastCommandMessage: json['lastCommandMessage'] as String?,
+      lastSeen: json['lastSeen'] is String
+          ? DateTime.tryParse(json['lastSeen'] as String)
+          : null,
+      lastSeenAgeSeconds: (json['lastSeenAgeSeconds'] as num?)?.toDouble(),
+      statusLabel: json['statusLabel'] as String? ?? 'online',
     );
   }
 
@@ -76,6 +90,7 @@ class Device {
       'online': online,
       'localOnline': localOnline,
       'cloudOnline': cloudOnline,
+      'stale': stale,
       'controllable': controllable,
       'commandInProgress': commandInProgress,
       'energySupported': energySupported,
@@ -85,6 +100,9 @@ class Device {
       'controlMethod': controlMethod,
       'pendingTargetState': pendingTargetState,
       'lastCommandMessage': lastCommandMessage,
+      'lastSeen': lastSeen?.toIso8601String(),
+      'lastSeenAgeSeconds': lastSeenAgeSeconds,
+      'statusLabel': statusLabel,
     };
   }
 
@@ -98,6 +116,7 @@ class Device {
     bool? online,
     bool? localOnline,
     bool? cloudOnline,
+    bool? stale,
     bool? controllable,
     bool? commandInProgress,
     bool? energySupported,
@@ -107,6 +126,9 @@ class Device {
     String? controlMethod,
     String? pendingTargetState,
     String? lastCommandMessage,
+    DateTime? lastSeen,
+    double? lastSeenAgeSeconds,
+    String? statusLabel,
   }) {
     return Device(
       id: id ?? this.id,
@@ -118,6 +140,7 @@ class Device {
       online: online ?? this.online,
       localOnline: localOnline ?? this.localOnline,
       cloudOnline: cloudOnline ?? this.cloudOnline,
+      stale: stale ?? this.stale,
       controllable: controllable ?? this.controllable,
       commandInProgress: commandInProgress ?? this.commandInProgress,
       energySupported: energySupported ?? this.energySupported,
@@ -127,6 +150,9 @@ class Device {
       controlMethod: controlMethod ?? this.controlMethod,
       pendingTargetState: pendingTargetState ?? this.pendingTargetState,
       lastCommandMessage: lastCommandMessage ?? this.lastCommandMessage,
+      lastSeen: lastSeen ?? this.lastSeen,
+      lastSeenAgeSeconds: lastSeenAgeSeconds ?? this.lastSeenAgeSeconds,
+      statusLabel: statusLabel ?? this.statusLabel,
     );
   }
 

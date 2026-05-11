@@ -46,7 +46,7 @@ class DevicesSection extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         SizedBox(
-          height: 200,
+          height: 220,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: devices.length,

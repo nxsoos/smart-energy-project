@@ -226,6 +226,9 @@ class _HomeScreenState extends State<HomeScreen> {
           ? incoming.occupancy
           : previous.occupancy,
       safety: incoming.safety.isNotEmpty ? incoming.safety : previous.safety,
+      hubStatus: incoming.hubStatus.isNotEmpty
+          ? incoming.hubStatus
+          : previous.hubStatus,
       criticalAlerts: incoming.criticalAlerts.isNotEmpty
           ? incoming.criticalAlerts
           : previous.criticalAlerts,
@@ -346,6 +349,7 @@ class _HomeScreenState extends State<HomeScreen> {
           online: false,
           localOnline: false,
           cloudOnline: false,
+          statusLabel: 'offline',
           controlMethod: 'home_assistant',
         ),
         Device(
@@ -358,6 +362,7 @@ class _HomeScreenState extends State<HomeScreen> {
           online: false,
           localOnline: false,
           cloudOnline: false,
+          statusLabel: 'offline',
           controlMethod: 'home_assistant',
         ),
         Device(
@@ -370,6 +375,7 @@ class _HomeScreenState extends State<HomeScreen> {
           online: false,
           localOnline: false,
           cloudOnline: false,
+          statusLabel: 'offline',
           controlMethod: 'home_assistant',
         ),
         Device(
@@ -382,11 +388,13 @@ class _HomeScreenState extends State<HomeScreen> {
           online: false,
           localOnline: false,
           cloudOnline: false,
+          statusLabel: 'offline',
           controlMethod: 'home_assistant',
         ),
       ],
       alerts: const [],
       tariffBhdPerKwh: ElectricityPricing.costPerKWh,
+      hubStatus: const {'online': false, 'status_label': 'offline'},
       deviceControlEnabled: false,
     );
   }
@@ -431,6 +439,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     if (_dashboardNotice != null) ...[
                       const SizedBox(height: 16),
                       _DashboardNotice(message: _dashboardNotice!),
+                    ],
+                    if (_hubOfflineNotice(dashboard) != null) ...[
+                      const SizedBox(height: 16),
+                      _DashboardNotice(message: _hubOfflineNotice(dashboard)!),
                     ],
                     if (NetworkConfig.enableDemoScenarios) ...[
                       const SizedBox(height: 16),
@@ -527,6 +539,18 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       return;
     }
+    if (!device.online || device.stale) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            device.stale
+                ? '${device.name} data is stale. Wait for fresh data before controlling it.'
+                : '${device.name} is offline. Control is disabled.',
+          ),
+        ),
+      );
+      return;
+    }
     final action = value ? 'turn_on' : 'turn_off';
     debugPrint(
       '[KahrabaIQ COMMAND TAP] device=${device.id} '
@@ -587,6 +611,17 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     ),
   );
+
+  String? _hubOfflineNotice(DashboardData dashboard) {
+    if (dashboard.scenarioId != null) {
+      return null;
+    }
+    final online = dashboard.hubStatus['online'];
+    if (online == false) {
+      return 'Hub offline. Showing latest cloud data.';
+    }
+    return null;
+  }
 
   Future<void> _activateDemoScenario(DemoScenarioData scenario) async {
     await _liveSubscription?.cancel();

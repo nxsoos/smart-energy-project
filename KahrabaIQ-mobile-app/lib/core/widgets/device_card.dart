@@ -28,7 +28,10 @@ class DeviceCard extends StatelessWidget {
   bool get _isActive =>
       device.isOn &&
       device.online &&
+      !device.stale &&
       (device.localOnline || (NetworkConfig.useAwsIotLive && device.cloudOnline));
+
+  bool get _isUnavailable => !device.online || device.stale;
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +42,7 @@ class DeviceCard extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         width: 160,
-        height: 200,
+        height: 220,
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
@@ -86,6 +89,19 @@ class DeviceCard extends StatelessWidget {
                 Text(device.name, style: AppTextStyles.bodyMedium, maxLines: 2),
                 const SizedBox(height: 6),
                 Text(device.branch, style: AppTextStyles.caption, maxLines: 1),
+                const SizedBox(height: 8),
+                _DeviceStatusBadge(device: device),
+                if (_isUnavailable) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    _lastSeenText(),
+                    style: AppTextStyles.caption.copyWith(
+                      color: ColorTokens.textMuted,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
                 const SizedBox(height: 14),
                 Text(
                   formatPower(device.currentPower),
@@ -121,7 +137,26 @@ class DeviceCard extends StatelessWidget {
     final hasCommandPath = NetworkConfig.useAwsIotLive
         ? true
         : device.localOnline || device.cloudOnline;
-    return !isCommandPending && device.controllable && hasCommandPath;
+    return !isCommandPending &&
+        device.controllable &&
+        device.online &&
+        !device.stale &&
+        hasCommandPath;
+  }
+
+  String _lastSeenText() {
+    final lastSeen = device.lastSeen;
+    if (lastSeen == null) {
+      return 'Last seen unknown';
+    }
+    final age = DateTime.now().difference(lastSeen);
+    if (age.inMinutes < 1) {
+      return 'Last seen just now';
+    }
+    if (age.inHours < 1) {
+      return 'Last seen ${age.inMinutes} min ago';
+    }
+    return 'Last seen ${age.inHours} hr ago';
   }
 
   Color _deviceColor() {
@@ -144,6 +179,35 @@ class DeviceCard extends StatelessWidget {
       case DeviceType.airConditioner:
         return Icons.ac_unit;
     }
+  }
+}
+
+class _DeviceStatusBadge extends StatelessWidget {
+  const _DeviceStatusBadge({required this.device});
+
+  final Device device;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = !device.online
+        ? 'Offline'
+        : device.stale
+        ? 'Stale'
+        : 'Online';
+    final color = !device.online
+        ? ColorTokens.danger
+        : device.stale
+        ? ColorTokens.warning
+        : ColorTokens.success;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
+      ),
+      child: Text(label, style: AppTextStyles.caption.copyWith(color: color)),
+    );
   }
 }
 

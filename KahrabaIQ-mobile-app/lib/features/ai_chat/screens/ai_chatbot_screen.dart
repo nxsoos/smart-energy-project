@@ -41,11 +41,23 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
   String? _error;
 
   bool get _isDemo => widget.scenarioId != null;
+  String get _chatMode => _isDemo ? 'demo_scenario' : 'live';
 
   @override
   void initState() {
     super.initState();
     _loadChat();
+  }
+
+  @override
+  void didUpdateWidget(covariant AiChatbotScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.homeId != widget.homeId ||
+        oldWidget.scenarioId != widget.scenarioId) {
+      _selectedSession = null;
+      _messages = const [];
+      _loadChat();
+    }
   }
 
   @override
@@ -61,10 +73,19 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
       _error = null;
     });
     try {
-      var sessions = await _api.fetchChatSessions(homeId: widget.homeId);
+      var sessions = await _api.fetchChatSessions(
+        homeId: widget.homeId,
+        mode: _chatMode,
+        scenarioId: widget.scenarioId,
+      );
       ChatSessionSummary session;
       if (sessions.isEmpty) {
-        session = await _api.createChatSession(homeId: widget.homeId);
+        session = await _api.createChatSession(
+          homeId: widget.homeId,
+          mode: _chatMode,
+          scenarioId: widget.scenarioId,
+          scenarioName: widget.scenarioName,
+        );
         sessions = [session];
       } else {
         session = _selectedSession == null
@@ -115,8 +136,17 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
       _error = null;
     });
     try {
-      final session = await _api.createChatSession(homeId: widget.homeId);
-      final sessions = await _api.fetchChatSessions(homeId: widget.homeId);
+      final session = await _api.createChatSession(
+        homeId: widget.homeId,
+        mode: _chatMode,
+        scenarioId: widget.scenarioId,
+        scenarioName: widget.scenarioName,
+      );
+      final sessions = await _api.fetchChatSessions(
+        homeId: widget.homeId,
+        mode: _chatMode,
+        scenarioId: widget.scenarioId,
+      );
       if (!mounted) {
         return;
       }
@@ -124,6 +154,77 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
         _sessions = sessions;
         _selectedSession = session;
         _messages = const [];
+        _isLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = error.toString().replaceFirst('Exception: ', '');
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _deleteSession(ChatSessionSummary session) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete this chat?'),
+        content: const Text('This will remove the chat from your history.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      await _api.deleteChatSession(
+        homeId: widget.homeId,
+        sessionId: session.id,
+      );
+      var sessions = await _api.fetchChatSessions(
+        homeId: widget.homeId,
+        mode: _chatMode,
+        scenarioId: widget.scenarioId,
+      );
+      ChatSessionSummary nextSession;
+      if (sessions.isEmpty) {
+        nextSession = await _api.createChatSession(
+          homeId: widget.homeId,
+          mode: _chatMode,
+          scenarioId: widget.scenarioId,
+          scenarioName: widget.scenarioName,
+        );
+        sessions = [nextSession];
+      } else {
+        nextSession = sessions.first;
+      }
+      final messages = await _api.fetchChatMessages(
+        homeId: widget.homeId,
+        sessionId: nextSession.id,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _sessions = sessions;
+        _selectedSession = nextSession;
+        _messages = messages;
         _isLoading = false;
       });
     } catch (error) {
@@ -167,6 +268,7 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
                 isDemo: _isDemo,
                 scenarioName: widget.scenarioName,
                 onSelect: _selectSession,
+                onDelete: _deleteSession,
               ),
               const SizedBox(height: 12),
               QuickActionChips(onSelected: _sendPreset),
@@ -256,6 +358,7 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
         sessionId: session.id,
         message: text,
         homeName: widget.homeName,
+        mode: _chatMode,
         scenarioId: widget.scenarioId,
         scenarioName: widget.scenarioName,
       );
@@ -308,6 +411,7 @@ class _SessionBar extends StatelessWidget {
     required this.isDemo,
     required this.scenarioName,
     required this.onSelect,
+    required this.onDelete,
   });
 
   final List<ChatSessionSummary> sessions;
@@ -315,6 +419,7 @@ class _SessionBar extends StatelessWidget {
   final bool isDemo;
   final String? scenarioName;
   final ValueChanged<ChatSessionSummary> onSelect;
+  final ValueChanged<ChatSessionSummary> onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -360,7 +465,24 @@ class _SessionBar extends StatelessWidget {
                 for (final session in sessions)
                   PopupMenuItem(
                     value: session,
-                    child: Text(session.title, overflow: TextOverflow.ellipsis),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            session.title,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Delete chat',
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            onDelete(session);
+                          },
+                        ),
+                      ],
+                    ),
                   ),
               ],
             ),
