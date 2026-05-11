@@ -58,13 +58,20 @@ PY
 esac
 
 export DISPLAY="${DISPLAY:-:0}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$SCRIPT_DIR/harden-kiosk-x11.sh" || true
 xset s off || true
 xset -dpms || true
 xset s noblank || true
 
-exec chromium-browser \
+exec chromium \
   --kiosk \
   --noerrdialogs \
   --disable-infobars \
+  --no-first-run \
+  --disable-session-crashed-bubble \
+  --disable-restore-session-state \
+  --disable-pinch \
+  --overscroll-history-navigation=0 \
   --check-for-update-interval=31536000 \
   --app="$FINAL_DASHBOARD_URL"

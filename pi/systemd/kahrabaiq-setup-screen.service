@@ -8,7 +8,7 @@ Conflicts=kahrabaiq-kiosk-browser.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/kahrabaiq/pi.env
-ExecStart=/usr/bin/chromium-browser --kiosk --noerrdialogs --disable-infobars --check-for-update-interval=31536000 --app=http://127.0.0.1:8080/setup-screen
+ExecStart=/usr/bin/chromium --kiosk --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble --disable-restore-session-state --disable-pinch --overscroll-history-navigation=0 --check-for-update-interval=31536000 --app=http://127.0.0.1:8080/setup-screen
 Restart=always
 RestartSec=5
 User=pi

@@ -10,7 +10,7 @@ Type=simple
 EnvironmentFile=/etc/kahrabaiq/pi.env
 ExecStart=/opt/kahrabaiq/pi/scripts/launch-kiosk.sh
 Restart=always
-RestartSec=5
+RestartSec=1
 User=pi
 
 [Install]

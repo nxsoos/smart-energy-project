@@ -111,6 +111,8 @@ nmcli device status
 
 The production kiosk dashboard is served from `https://dashboard.kahrabaiq.com` after provisioning. `pi/scripts/launch-kiosk.sh` requests a short-lived kiosk token from `KAHRABAIQ_API_URL`, opens `/dashboard/session/start?token=...`, and receives the HttpOnly dashboard cookie before redirecting to `/dashboard`. The local Pi dashboard route at `http://127.0.0.1:5010/dashboard` remains a fallback/debug route.
 
+The kiosk launcher also applies X11/Openbox shortcut hardening before Chromium starts. It removes common browser/window escape shortcuts such as `Alt+F4`, `Ctrl+Q`, `Alt+Space`, and `Alt+Tab` from the Pi user's Openbox config. The service uses `Restart=always` with a one-second restart delay, so a browser crash or unexpected close relaunches the kiosk quickly.
+
 Admin unlock options:
 
 ```text

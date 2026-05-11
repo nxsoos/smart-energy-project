@@ -411,7 +411,7 @@ The Pi acts as the local hub. It runs:
 - `kahrabaiq-summary-sync`: builds and uploads hourly/daily summaries.
 - `kahrabaiq-command-runner`: executes AWS-queued Tuya and Home Assistant/Matter commands locally.
 - `kahrabaiq-home-stack`: starts Home Assistant and Matter containers.
-- `kahrabaiq-kiosk-browser`: launches Chromium against the deployed kiosk dashboard.
+- `kahrabaiq-kiosk-browser`: hardens common X11/Openbox escape shortcuts, launches Chromium against the deployed kiosk dashboard, and restarts quickly if the browser exits.
 
 Pi runtime env file:
 

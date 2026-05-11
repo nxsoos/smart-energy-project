@@ -27,6 +27,9 @@ if [ -f "$REPO_DIR/pi/sudoers/kahrabaiq-admin" ]; then
   sudo visudo -cf /etc/sudoers.d/kahrabaiq-admin
 fi
 sudo systemctl daemon-reload
+if [ -x "$REPO_DIR/pi/scripts/harden-kiosk-x11.sh" ]; then
+  "$REPO_DIR/pi/scripts/harden-kiosk-x11.sh" || true
+fi
 
 printf 'Installed KahrabaIQ Pi services. Enable after configuring /etc/kahrabaiq/pi.env:\n'
 printf '  sudo systemctl enable --now kahrabaiq-provisioning kahrabaiq-setup-screen kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-iot-live-publisher kahrabaiq-kiosk-browser\n'
