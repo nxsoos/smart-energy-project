@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import hmac
+import secrets
 import socket
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -10,7 +14,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 
 from local_state_store import get_path, home_snapshot, set_path
 try:
@@ -33,18 +37,25 @@ HEARTBEAT_INTERVAL_SECONDS = float(os.environ.get("PI_HEARTBEAT_INTERVAL_SECONDS
 LIVE_SYNC_INTERVAL_SECONDS = float(os.environ.get("PI_LIVE_SYNC_INTERVAL_SECONDS", "10"))
 COMMAND_POLL_SECONDS = float(os.environ.get("PI_COMMAND_POLL_SECONDS", "3"))
 KIOSK_TOKEN_REFRESH_MARGIN_SECONDS = float(os.environ.get("KIOSK_TOKEN_REFRESH_MARGIN_SECONDS", "240"))
-ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "http://192.168.4.1").rstrip("/")
+ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "").rstrip("/")
 ESP32_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
 ESP32_DISCOVERY_CANDIDATES = [
     item.strip().rstrip("/")
     for item in os.environ.get(
         "ESP32_DISCOVERY_CANDIDATES",
-        "http://kahrabaiq-esp32.local,http://192.168.4.1",
+        "http://kahrabaiq-esp32.local",
     ).split(",")
     if item.strip()
 ]
 PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "http://kahrabaiq-pi.local:5000").rstrip("/")
 PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "http://kahrabaiq-pi.local:5001").rstrip("/")
+PROVISIONING_MARKER_PATH = Path(os.environ.get("PROVISIONING_MARKER_PATH", "/var/lib/kahrabaiq/provisioned.json"))
+KIOSK_ADMIN_USERNAME = os.environ.get("KIOSK_ADMIN_USERNAME", "admin")
+KIOSK_ADMIN_PASSWORD = os.environ.get("KIOSK_ADMIN_PASSWORD", "change-me")
+KIOSK_ADMIN_PASSWORD_HASH = os.environ.get("KIOSK_ADMIN_PASSWORD_HASH", "")
+KIOSK_ADMIN_PIN = os.environ.get("KIOSK_ADMIN_PIN", "")
+KIOSK_ADMIN_PIN_HASH = os.environ.get("KIOSK_ADMIN_PIN_HASH", "")
+KIOSK_ADMIN_SESSION_SECONDS = int(os.environ.get("KIOSK_ADMIN_SESSION_SECONDS", "1800"))
 
 app = Flask(__name__)
 _state_lock = threading.RLock()
@@ -56,6 +67,7 @@ _agent_state: dict[str, Any] = {
     "last_live_sync_at_ms": None,
     "last_command_poll_at_ms": None,
 }
+_admin_sessions: dict[str, int] = {}
 
 
 def now_ms() -> int:
@@ -77,6 +89,54 @@ def local_ip() -> str:
             return sock.getsockname()[0]
     except Exception:
         return ""
+
+
+def hash_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def secret_matches(provided: str, plain: str, hashed: str) -> bool:
+    if hashed and hmac.compare_digest(hash_secret(provided), hashed):
+        return True
+    return bool(plain) and hmac.compare_digest(provided, plain)
+
+
+def create_admin_session() -> dict[str, Any]:
+    token = secrets.token_urlsafe(32)
+    expires_at_ms = now_ms() + (KIOSK_ADMIN_SESSION_SECONDS * 1000)
+    with _state_lock:
+        _admin_sessions[token] = expires_at_ms
+    return {"token": token, "expires_at_ms": expires_at_ms}
+
+
+def admin_token() -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth.removeprefix("Bearer ").strip()
+    return request.headers.get("X-Admin-Token", "").strip()
+
+
+def require_admin() -> tuple[bool, str]:
+    token = admin_token()
+    if not token:
+        return False, "Missing admin token."
+    with _state_lock:
+        expires_at_ms = int(_admin_sessions.get(token) or 0)
+        if expires_at_ms <= now_ms():
+            _admin_sessions.pop(token, None)
+            return False, "Admin session expired."
+    return True, token
+
+
+def run_admin_command(args: list[str], timeout: int = 20) -> dict[str, Any]:
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    return {
+        "command": args,
+        "returncode": result.returncode,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+        "success": result.returncode == 0,
+    }
 
 
 def current_wifi_ssid() -> str:
@@ -252,6 +312,8 @@ def discover_esp32() -> dict[str, Any]:
 
 def provision_esp32(payload: dict[str, Any]) -> dict[str, Any]:
     setup_url = normalize_url(str(payload.get("setup_url") or ESP32_SETUP_URL))
+    if not setup_url:
+        raise RuntimeError("ESP32 setup URL is unavailable. Use first-boot provisioning or provide setup_url explicitly.")
     ssid = str(payload.get("ssid") or "").strip()
     password = str(payload.get("password") or "")
     if not ssid or not password:
@@ -275,6 +337,8 @@ def provision_esp32(payload: dict[str, Any]) -> dict[str, Any]:
 
 def reset_esp32(payload: dict[str, Any]) -> dict[str, Any]:
     base = normalize_url(str(payload.get("base_url") or esp32_link().get("base_url") or ESP32_SETUP_URL))
+    if not base:
+        raise RuntimeError("ESP32 base URL is unavailable. Discover the ESP32 first or provide base_url explicitly.")
     response = requests.post(f"{base}/reset", timeout=8)
     data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"message": response.text}
     if not response.ok:
@@ -530,6 +594,57 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       font-weight: 700;
     }
 
+    .admin-hotspot {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 96px;
+      height: 96px;
+      z-index: 10;
+    }
+
+    .admin-panel {
+      width: min(620px, 100%);
+      background: #0f172a;
+      border: 1px solid rgba(17, 217, 255, 0.42);
+      border-radius: 20px;
+      padding: 24px;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+    }
+
+    .admin-panel h2 { margin: 0 0 10px; }
+    .admin-panel p { color: var(--muted); line-height: 1.5; }
+    .admin-panel input {
+      width: 100%;
+      margin: 8px 0 12px;
+      border: 1px solid rgba(157, 163, 184, 0.35);
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: #020617;
+      color: var(--text);
+      font-size: 16px;
+    }
+
+    .admin-actions {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .admin-panel button {
+      border: none;
+      border-radius: 999px;
+      padding: 12px 16px;
+      background: rgba(17, 217, 255, 0.16);
+      color: var(--text);
+      font-weight: 800;
+    }
+
+    .admin-panel button.primary { background: var(--cyan); color: #001018; }
+    .admin-panel button.danger { background: var(--red); color: white; }
+    .admin-log { margin-top: 14px; color: var(--muted); white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+
     @media (max-width: 820px) {
       header { align-items: flex-start; flex-direction: column; }
       .hero, .room { grid-column: span 12; }
@@ -538,11 +653,33 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   </style>
 </head>
 <body>
+  <div class="admin-hotspot" id="adminHotspot" aria-label="Admin unlock area"></div>
   <div class="overlay" id="alertOverlay">
     <div class="modal">
       <h2>Smoke/Gas Detected</h2>
       <p id="alertOverlayMessage">Smoke or gas was detected. Check the area immediately.</p>
       <button type="button" id="alertOverlayButton">I understand</button>
+    </div>
+  </div>
+  <div class="overlay" id="adminOverlay">
+    <div class="admin-panel">
+      <h2>Admin Access</h2>
+      <p id="adminCopy">Enter admin credentials to unlock maintenance controls. Press Lock Dashboard to return to kiosk mode.</p>
+      <div id="adminLogin">
+        <input id="adminUsername" placeholder="Username" autocomplete="username" value="admin">
+        <input id="adminPassword" placeholder="Password" type="password" autocomplete="current-password">
+        <input id="adminPin" placeholder="PIN optional" type="password" inputmode="numeric">
+        <button class="primary" type="button" id="adminLoginButton">Unlock</button>
+      </div>
+      <div id="adminControls" style="display:none">
+        <div class="admin-actions">
+          <button class="primary" type="button" id="lockDashboardButton">Lock Dashboard</button>
+          <button type="button" id="refreshAdminStatusButton">Refresh Status</button>
+          <button type="button" id="restartDashboardButton">Restart Dashboard</button>
+          <button class="danger" type="button" id="maintenanceButton">Enter Maintenance</button>
+        </div>
+        <div class="admin-log" id="adminLog">Admin mode unlocked.</div>
+      </div>
     </div>
   </div>
   <main class="shell">
@@ -611,6 +748,8 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   <script>
     const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
     let overlayDismissedForAlertId = null;
+    let adminToken = sessionStorage.getItem("kahrabaiqAdminToken") || "";
+    let adminPressTimer = null;
 
     function text(id, value) {
       document.getElementById(id).textContent = value;
@@ -740,6 +879,79 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function showAdminOverlay() {
+      document.getElementById("adminOverlay").classList.add("visible");
+      document.getElementById("adminLogin").style.display = adminToken ? "none" : "block";
+      document.getElementById("adminControls").style.display = adminToken ? "block" : "none";
+      if (adminToken) refreshAdminStatus();
+    }
+
+    function hideAdminOverlay() {
+      document.getElementById("adminOverlay").classList.remove("visible");
+    }
+
+    async function adminFetch(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (adminToken) headers.Authorization = `Bearer ${adminToken}`;
+      const response = await fetch(path, { ...options, headers });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.success === false) {
+        throw new Error(data.message || data.detail || "Admin request failed");
+      }
+      return data;
+    }
+
+    function adminLog(value) {
+      document.getElementById("adminLog").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    }
+
+    async function refreshAdminStatus() {
+      try {
+        adminLog(await adminFetch("/api/admin/status"));
+      } catch (error) {
+        adminLog(error.message);
+      }
+    }
+
+    document.getElementById("adminHotspot").addEventListener("pointerdown", () => {
+      clearTimeout(adminPressTimer);
+      adminPressTimer = setTimeout(showAdminOverlay, 5000);
+    });
+    document.getElementById("adminHotspot").addEventListener("pointerup", () => clearTimeout(adminPressTimer));
+    document.getElementById("adminHotspot").addEventListener("pointercancel", () => clearTimeout(adminPressTimer));
+    document.addEventListener("keydown", (event) => {
+      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "a") showAdminOverlay();
+      if (event.key === "Escape") hideAdminOverlay();
+    });
+
+    document.getElementById("adminLoginButton").onclick = async () => {
+      try {
+        const payload = {
+          username: document.getElementById("adminUsername").value,
+          password: document.getElementById("adminPassword").value,
+          pin: document.getElementById("adminPin").value,
+        };
+        const data = await adminFetch("/api/admin/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        adminToken = data.token;
+        sessionStorage.setItem("kahrabaiqAdminToken", adminToken);
+        showAdminOverlay();
+      } catch (error) {
+        document.getElementById("adminCopy").textContent = error.message;
+      }
+    };
+
+    document.getElementById("lockDashboardButton").onclick = async () => {
+      try {
+        await adminFetch("/api/admin/lock", { method: "POST" });
+      } catch (_) {}
+      adminToken = "";
+      sessionStorage.removeItem("kahrabaiqAdminToken");
+      hideAdminOverlay();
+    };
+    document.getElementById("refreshAdminStatusButton").onclick = refreshAdminStatus;
+    document.getElementById("restartDashboardButton").onclick = async () => adminLog(await adminFetch("/api/admin/services/restart-dashboard", { method: "POST" }));
+    document.getElementById("maintenanceButton").onclick = async () => adminLog(await adminFetch("/api/admin/maintenance/start", { method: "POST" }));
+
     refresh();
     setInterval(refresh, 5000);
   </script>
@@ -779,6 +991,91 @@ def loop_worker(name: str, interval: float, fn) -> None:
                 _agent_state["last_error"] = f"{name}: {error}"
         elapsed = time.time() - started
         time.sleep(max(1.0, interval - elapsed))
+
+
+@app.post("/api/admin/login")
+def admin_login() -> Any:
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get("username") or "")
+    password = str(payload.get("password") or "")
+    pin = str(payload.get("pin") or "")
+    password_ok = username == KIOSK_ADMIN_USERNAME and secret_matches(password, KIOSK_ADMIN_PASSWORD, KIOSK_ADMIN_PASSWORD_HASH)
+    pin_ok = bool(pin) and secret_matches(pin, KIOSK_ADMIN_PIN, KIOSK_ADMIN_PIN_HASH)
+    if not password_ok and not pin_ok:
+        return jsonify({"success": False, "message": "Invalid admin credentials."}), 401
+    session = create_admin_session()
+    return jsonify({"success": True, **session})
+
+
+@app.post("/api/admin/logout")
+def admin_logout() -> Any:
+    ok, token = require_admin()
+    if ok:
+        with _state_lock:
+            _admin_sessions.pop(token, None)
+    return jsonify({"success": True})
+
+
+@app.get("/api/admin/session")
+def admin_session() -> Any:
+    ok, token = require_admin()
+    if not ok:
+        return jsonify({"success": False, "authenticated": False}), 401
+    with _state_lock:
+        expires_at_ms = int(_admin_sessions.get(token) or 0)
+    return jsonify({"success": True, "authenticated": True, "expires_at_ms": expires_at_ms})
+
+
+@app.post("/api/admin/lock")
+def admin_lock() -> Any:
+    ok, token = require_admin()
+    if not ok:
+        return jsonify({"success": False, "message": token}), 401
+    with _state_lock:
+        _admin_sessions.pop(token, None)
+    return jsonify({"success": True, "locked": True})
+
+
+@app.get("/api/admin/status")
+def admin_status() -> Any:
+    ok, message = require_admin()
+    if not ok:
+        return jsonify({"success": False, "message": message}), 401
+    return jsonify(
+        {
+            "success": True,
+            "pi_id": PI_ID,
+            "home_id": HOME_ID,
+            "local_ip": local_ip(),
+            "wifi_ssid": current_wifi_ssid(),
+            "provisioned": PROVISIONING_MARKER_PATH.exists(),
+            "provisioning_marker_path": str(PROVISIONING_MARKER_PATH),
+            "agent_state": dict(_agent_state),
+            "esp32": esp32_link(),
+        }
+    )
+
+
+@app.post("/api/admin/maintenance/start")
+def admin_start_maintenance() -> Any:
+    ok, message = require_admin()
+    if not ok:
+        return jsonify({"success": False, "message": message}), 401
+    commands = [
+        run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "stop", "kahrabaiq-kiosk-browser.service"], timeout=20),
+        run_admin_command(["sudo", "-n", "/usr/bin/rm", "-f", str(PROVISIONING_MARKER_PATH)], timeout=10),
+        run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "start", "kahrabaiq-provisioning.service"], timeout=20),
+    ]
+    return jsonify({"success": all(item["success"] for item in commands), "commands": commands})
+
+
+@app.post("/api/admin/services/restart-dashboard")
+def admin_restart_dashboard() -> Any:
+    ok, message = require_admin()
+    if not ok:
+        return jsonify({"success": False, "message": message}), 401
+    command = run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "restart", "kahrabaiq-kiosk-browser.service"], timeout=20)
+    return jsonify({"success": command["success"], "command": command})
 
 
 @app.get("/api/kiosk/session")

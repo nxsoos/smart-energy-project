@@ -1,7 +1,8 @@
 [Unit]
 Description=KahrabaIQ hourly and daily summary sync
-After=network-online.target kahrabaiq-sensor-receiver.service
+After=network-online.target kahrabaiq-provisioning.service kahrabaiq-sensor-receiver.service
 Wants=network-online.target
+Requires=kahrabaiq-provisioning.service
 
 [Service]
 Type=simple

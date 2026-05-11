@@ -1,0 +1,16 @@
+[Unit]
+Description=KahrabaIQ first-boot Pi and ESP32 provisioning
+After=NetworkManager.service network.target
+Wants=NetworkManager.service network.target
+Before=kahrabaiq-agent.service kahrabaiq-sensor-receiver.service kahrabaiq-command-runner.service kahrabaiq-summary-sync.service kahrabaiq-iot-live-publisher.service kahrabaiq-kiosk-browser.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kahrabaiq/pi/agent
+EnvironmentFile=/etc/kahrabaiq/pi.env
+ExecStart=/opt/kahrabaiq/.venv/bin/python /opt/kahrabaiq/pi/agent/pi_provisioning.py
+Restart=no
+User=root
+
+[Install]
+WantedBy=multi-user.target
