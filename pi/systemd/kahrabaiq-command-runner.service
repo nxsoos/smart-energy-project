@@ -1,7 +1,8 @@
 [Unit]
 Description=KahrabaIQ local command runner for Tuya and Home Assistant Matter devices
-After=network-online.target kahrabaiq-home-stack.service
+After=network-online.target kahrabaiq-provisioning.service kahrabaiq-home-stack.service
 Wants=network-online.target kahrabaiq-home-stack.service
+Requires=kahrabaiq-provisioning.service
 
 [Service]
 Type=simple

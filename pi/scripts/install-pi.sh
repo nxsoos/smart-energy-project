@@ -21,9 +21,15 @@ python3 -m venv "$REPO_DIR/.venv"
 
 sudo install -m 0644 "$REPO_DIR/pi/systemd/"*.service "$SERVICE_DIR/"
 sudo sed -i "s/^User=pi$/User=$SERVICE_USER/" "$SERVICE_DIR"/kahrabaiq-*.service
+if [ -f "$REPO_DIR/pi/sudoers/kahrabaiq-admin" ]; then
+  sudo install -m 0440 "$REPO_DIR/pi/sudoers/kahrabaiq-admin" /etc/sudoers.d/kahrabaiq-admin
+  sudo sed -i "s/__KAHRABAIQ_SERVICE_USER__/$SERVICE_USER/g" /etc/sudoers.d/kahrabaiq-admin
+  sudo visudo -cf /etc/sudoers.d/kahrabaiq-admin
+fi
 sudo systemctl daemon-reload
 
 printf 'Installed KahrabaIQ Pi services. Enable after configuring /etc/kahrabaiq/pi.env:\n'
-printf '  sudo systemctl enable --now kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-tuya-breaker-poller kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-iot-live-publisher kahrabaiq-kiosk-browser\n'
+printf '  sudo systemctl enable --now kahrabaiq-provisioning kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-iot-live-publisher kahrabaiq-kiosk-browser\n'
+printf 'Provisioning uses NetworkManager/nmcli. Install network-manager first if nmcli is unavailable.\n'
 printf 'For Home Assistant and Matter containers, install Docker and run:\n'
 printf '  KAHRABAIQ_REPO_DIR=%s %s/pi/scripts/setup-home-stack.sh\n' "$REPO_DIR" "$REPO_DIR"

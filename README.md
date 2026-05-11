@@ -31,6 +31,55 @@ Device command
 
 The browser never receives the long-lived `PI_DEVICE_TOKEN`. That token stays on the Raspberry Pi. The local Pi agent exchanges it for short-lived kiosk tokens that are scoped to one Pi/home.
 
+## Pi and ESP32 First-Boot Provisioning
+
+The Raspberry Pi must provision itself and the ESP32 before the locked dashboard starts. The recommended hardware setup uses the built-in Pi Wi-Fi plus a TL-WN725N USB Wi-Fi adapter:
+
+```text
+wlan0 = built-in Pi Wi-Fi
+  -> permanent home Wi-Fi connection
+  -> dashboard, backend/cloud, local receiver, and normal ESP32 communication
+
+wlan1 = TL-WN725N USB Wi-Fi adapter
+  -> temporary setup/provisioning only
+  -> turned off after successful provisioning
+```
+
+First boot flow:
+
+1. `kahrabaiq-provisioning.service` starts before the dashboard and checks `/var/lib/kahrabaiq/provisioned.json`.
+2. If the marker does not exist, the Pi starts `KahrabaIQ-Pi-Setup` on `wlan1`.
+3. The installer connects a phone/laptop to the Pi setup hotspot and opens the setup page on port `8080`.
+4. The setup page collects the home Wi-Fi SSID/password, home ID, Pi ID, ESP32 device ID, and ESP32 device key.
+5. The Pi connects `wlan0` to the home Wi-Fi.
+6. The Pi uses `wlan1` to connect to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
+7. The Pi posts the same home Wi-Fi credentials and Pi sensor URL to `http://192.168.4.1/provision`.
+8. The ESP32 saves the config, reboots, joins the home Wi-Fi, and starts posting to the Pi sensor receiver.
+9. The Pi disconnects and turns off `wlan1`.
+10. The Pi writes `/var/lib/kahrabaiq/provisioned.json` and only then allows normal services and the locked kiosk dashboard to start.
+
+Normal boot flow:
+
+```text
+provisioned marker exists
+  -> wlan1 remains off
+  -> wlan0 connects to home Wi-Fi
+  -> Pi services start
+  -> locked dashboard starts
+```
+
+Admin unlock flow:
+
+```text
+Long press the dashboard top-right corner for 5 seconds
+or press Ctrl+Alt+A
+  -> enter admin credentials
+  -> view status, restart dashboard, or enter maintenance provisioning
+  -> press Lock Dashboard to return to locked kiosk mode without rebooting
+```
+
+See `pi/README.md`, `pi/docs/first-boot-provisioning.md`, and `esp32/README.md` for device-specific details.
+
 ## Repository Structure
 
 ```text
@@ -70,7 +119,8 @@ smart-energy-project/
     .env.sample                      Safe Pi runtime environment template
     README.md                        Pi-specific deployment guide
     agent/
-      pi_agent.py                    Local token bridge, heartbeat, live sync, command polling
+      pi_agent.py                    Local token bridge, heartbeat, live sync, command polling, admin unlock
+      pi_provisioning.py             First-boot Pi Wi-Fi and ESP32 provisioning portal
       esp32_receiver.py              Local ESP32 sensor receiver
       summary_sync.py                Hourly/daily local summary sync
       aws_remote_command_runner.py   Polls AWS queued commands and executes locally
@@ -80,6 +130,7 @@ smart-energy-project/
       occupancy_utils.py             Pi-local occupancy helper copy
       timestamp_utils.py             Pi-local timestamp helper copy
     docs/
+      first-boot-provisioning.md     Pi/ESP32 first-boot setup and admin maintenance flow
       kiosk-setup.md                 Pi kiosk browser setup and troubleshooting
       home-assistant-matter.md       Local Home Assistant and Matter stack setup
       tuya-setup.md                  Tuya credential and breaker setup
@@ -90,6 +141,7 @@ smart-energy-project/
       launch-kiosk.sh                Chromium kiosk launcher
       setup-home-stack.sh            Home Assistant/Matter container setup
     systemd/
+      kahrabaiq-provisioning.service
       kahrabaiq-agent.service
       kahrabaiq-sensor-receiver.service
       kahrabaiq-summary-sync.service
