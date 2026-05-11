@@ -58,9 +58,11 @@ class Device {
       isOn: json['isOn'] as bool,
       currentPower: (json['currentPower'] as num?)?.toDouble() ?? 0,
       branch: json['branch'] as String,
-      online: json['online'] as bool? ?? true,
-      localOnline: json['localOnline'] as bool? ?? true,
-      cloudOnline: json['cloudOnline'] as bool? ?? true,
+      online: json['online'] as bool? ?? false,
+      localOnline:
+          json['localOnline'] as bool? ?? (json['online'] as bool? ?? false),
+      cloudOnline:
+          json['cloudOnline'] as bool? ?? (json['online'] as bool? ?? false),
       stale: json['stale'] as bool? ?? false,
       controllable: json['controllable'] as bool? ?? true,
       commandInProgress: json['commandInProgress'] as bool? ?? false,
@@ -75,7 +77,7 @@ class Device {
           ? DateTime.tryParse(json['lastSeen'] as String)
           : null,
       lastSeenAgeSeconds: (json['lastSeenAgeSeconds'] as num?)?.toDouble(),
-      statusLabel: json['statusLabel'] as String? ?? 'online',
+      statusLabel: json['statusLabel'] as String? ?? 'unknown',
     );
   }
 

@@ -6,6 +6,7 @@ import 'package:aws_common/aws_common.dart';
 import 'package:aws_signature_v4/aws_signature_v4.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/user_permissions.dart';
 import '../../core/utils/constants.dart';
@@ -88,6 +89,7 @@ class AuthService {
   final Completer<void> _restoreCompleter = Completer<void>();
 
   CognitoUserPool? _userPool;
+  final CognitoStorage _cognitoStorage = _SharedPrefsCognitoStorage();
   CognitoUser? _cognitoUser;
   CognitoUserSession? _session;
   CognitoCredentials? _credentials;
@@ -114,6 +116,7 @@ class AuthService {
     return _userPool ??= CognitoUserPool(
       NetworkConfig.cognitoUserPoolId,
       NetworkConfig.cognitoAppClientId,
+      storage: _cognitoStorage,
     );
   }
 
@@ -143,16 +146,20 @@ class AuthService {
       }
       final user = await _pool.getCurrentUser();
       if (user == null) {
+        debugPrint('[KahrabaIQ AUTH RESTORE] no stored Cognito user');
         return;
       }
       final session = await user.getSession();
       if (session == null || !session.isValid()) {
+        debugPrint('[KahrabaIQ AUTH RESTORE] stored session missing/expired');
         return;
       }
       _cognitoUser = user;
       _session = session;
       _currentUser = _userFromSession(session);
-    } catch (_) {
+      debugPrint('[KahrabaIQ AUTH RESTORE] restored stored Cognito session');
+    } catch (error) {
+      debugPrint('[KahrabaIQ AUTH RESTORE] failed: $error');
       _currentUser = null;
     } finally {
       if (!_restoreCompleter.isCompleted) {
@@ -247,15 +254,7 @@ class AuthService {
     }
     final session = await _validSession();
     final token = session?.getIdToken().getJwtToken();
-if (token != null) {
-  debugPrint('[COGNITO_ID_TOKEN_LENGTH] ${token.length}');
-  for (var i = 0; i < token.length; i += 500) {
-    final end = (i + 500 < token.length) ? i + 500 : token.length;
-    debugPrint('[COGNITO_ID_TOKEN_PART] ${token.substring(i, end)}');
-  }
-}
-return token;
-
+    return token;
   }
 
   Future<UserPermissions> loadPermissions({
@@ -433,6 +432,7 @@ return token;
     _cognitoUser = user;
     _session = session;
     _currentUser = _userFromSession(session);
+    debugPrint('[KahrabaIQ AUTH RESTORE] refreshed stored Cognito session');
     return session;
   }
 
@@ -584,5 +584,43 @@ return token;
 
   String _safeClientSuffix(String value) {
     return value.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
+  }
+}
+
+class _SharedPrefsCognitoStorage extends CognitoStorage {
+  static const _prefix = 'kahrabaiq_cognito.';
+
+  Future<SharedPreferences> get _prefs => SharedPreferences.getInstance();
+
+  @override
+  Future<void> clear() async {
+    final prefs = await _prefs;
+    final keys = prefs.getKeys().where((key) => key.startsWith(_prefix));
+    for (final key in keys) {
+      await prefs.remove(key);
+    }
+  }
+
+  @override
+  Future<String?> getItem(String key) async {
+    final prefs = await _prefs;
+    return prefs.getString('$_prefix$key');
+  }
+
+  @override
+  Future<String?> removeItem(String key) async {
+    final prefs = await _prefs;
+    final storageKey = '$_prefix$key';
+    final value = prefs.getString(storageKey);
+    await prefs.remove(storageKey);
+    return value;
+  }
+
+  @override
+  Future<String> setItem(String key, value) async {
+    final prefs = await _prefs;
+    final text = value?.toString() ?? '';
+    await prefs.setString('$_prefix$key', text);
+    return text;
   }
 }

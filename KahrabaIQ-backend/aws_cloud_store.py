@@ -144,8 +144,8 @@ def home_pk(home_id: str) -> str:
 
 def summary_prefix(period: str) -> str:
     normalized = period.strip().upper()
-    if normalized not in {"HOURLY", "DAILY"}:
-        raise ValueError("period must be hourly or daily")
+    if normalized not in {"HOURLY", "DAILY", "MONTHLY"}:
+        raise ValueError("period must be hourly, daily, or monthly")
     return f"SUMMARY#{normalized}#"
 
 
@@ -156,7 +156,9 @@ def summary_range_key(period: str, timestamp_ms: int) -> str:
         return f"SUMMARY#HOURLY#{dt.strftime('%Y-%m-%dT%H')}"
     if normalized == "DAILY":
         return f"SUMMARY#DAILY#{dt.strftime('%Y-%m-%d')}"
-    raise ValueError("period must be hourly or daily")
+    if normalized == "MONTHLY":
+        return f"SUMMARY#MONTHLY#{dt.strftime('%Y-%m')}"
+    raise ValueError("period must be hourly, daily, or monthly")
 
 
 def _summary_bucket(period: str, item: dict[str, Any]) -> int:

@@ -1,5 +1,6 @@
 import 'package:amazon_cognito_identity_dart_2/cognito.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/theme/color_tokens.dart';
@@ -16,6 +17,8 @@ class AuthScreen extends StatefulWidget {
 
 class _AuthScreenState extends State<AuthScreen>
     with SingleTickerProviderStateMixin {
+  static const _pendingEmailKey = 'kahrabaiq.pending_confirmation_email';
+
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final AuthService _authService = AuthService();
   final TextEditingController _nameController = TextEditingController();
@@ -37,6 +40,7 @@ class _AuthScreenState extends State<AuthScreen>
       vsync: this,
       duration: const Duration(seconds: 8),
     )..repeat();
+    _restorePendingConfirmation();
   }
 
   @override
@@ -195,6 +199,7 @@ class _AuthScreenState extends State<AuthScreen>
           email: email,
           code: _verificationCodeController.text.trim(),
         );
+        await _clearPendingConfirmation();
         if (password.isNotEmpty) {
           await _authService.signIn(email: email, password: password);
         } else {
@@ -212,8 +217,10 @@ class _AuthScreenState extends State<AuthScreen>
           password: password,
         );
         if (result.userConfirmed) {
+          await _clearPendingConfirmation();
           await _authService.signIn(email: email, password: password);
         } else {
+          await _savePendingConfirmation(email);
           setState(() {
             _mode = AuthMode.verifySignup;
             _pendingVerificationEmail = email;
@@ -248,6 +255,7 @@ class _AuthScreenState extends State<AuthScreen>
     });
     try {
       await _authService.resendSignUpCode(email);
+      await _savePendingConfirmation(email);
       setState(() => _message = 'A new verification code was sent.');
     } catch (error) {
       setState(() => _message = _friendlyAuthError(error));
@@ -262,16 +270,70 @@ class _AuthScreenState extends State<AuthScreen>
     if (error is CognitoUserConfirmationNecessaryException) {
       final email = _emailController.text.trim();
       if (email.isNotEmpty) {
-        _pendingVerificationEmail = email;
-        _pendingVerificationPassword = _passwordController.text;
-        _verificationCodeController.clear();
-        _mode = AuthMode.verifySignup;
+        _openVerification(email, password: _passwordController.text);
+        _savePendingConfirmation(email);
       }
       return 'Enter the verification code sent to your email.';
     }
     if (error is CognitoClientException) {
+      final code = (error.code ?? '').toLowerCase();
+      final message = (error.message ?? '').toLowerCase();
+      final email = _emailController.text.trim();
+      if (email.isNotEmpty &&
+          (code.contains('usernameexist') ||
+              message.contains('already exists') ||
+              code.contains('usernotconfirmed') ||
+              message.contains('not confirmed'))) {
+        _openVerification(email, password: _passwordController.text);
+        _savePendingConfirmation(email);
+        if (code.contains('usernameexist') ||
+            message.contains('already exists')) {
+          _authService.resendSignUpCode(email).catchError((_) {});
+          return 'This account already exists but still needs verification. Enter the code or tap Resend code.';
+        }
+        return 'This account is not verified yet. Enter the code or tap Resend code.';
+      }
+      if (code.contains('codemismatch')) {
+        return 'That verification code is not correct. Check the code and try again.';
+      }
+      if (code.contains('expiredcode')) {
+        return 'That verification code expired. Tap Resend code to get a new one.';
+      }
+      if (code.contains('limitexceeded')) {
+        return 'Too many attempts. Wait a bit, then try again.';
+      }
       return error.message ?? 'Authentication failed: ${error.code}';
     }
     return 'Authentication failed. Check your credentials and try again.';
+  }
+
+  Future<void> _restorePendingConfirmation() async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString(_pendingEmailKey);
+    if (!mounted || email == null || email.isEmpty) {
+      return;
+    }
+    setState(() {
+      _emailController.text = email;
+      _openVerification(email);
+      _message = 'Finish verifying your email, or tap Resend code.';
+    });
+  }
+
+  void _openVerification(String email, {String? password}) {
+    _pendingVerificationEmail = email.trim().toLowerCase();
+    _pendingVerificationPassword = password;
+    _verificationCodeController.clear();
+    _mode = AuthMode.verifySignup;
+  }
+
+  Future<void> _savePendingConfirmation(String email) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_pendingEmailKey, email.trim().toLowerCase());
+  }
+
+  Future<void> _clearPendingConfirmation() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingEmailKey);
   }
 }

@@ -1088,7 +1088,6 @@ class KahrabaIqApiService {
         energyToday: energyToday,
         energyMonth: _asDouble(
           _pick(energy, ['energyMonth', 'monthKwh', 'month_kwh']),
-          fallback: energyToday,
         ),
         energyTotal: _asDouble(
           _pick(energy, ['energyTotal', 'totalEnergyKwh', 'energyTotalKwh']),
@@ -1098,7 +1097,8 @@ class KahrabaIqApiService {
         costMonth: _asDouble(_pick(energy, ['costMonth', 'monthCostBhd'])),
         monthDataAvailable: _asBool(
           _pick(energy, ['monthDataAvailable', 'month_data_available']),
-          fallback: true,
+          fallback:
+              _pick(energy, ['energyMonth', 'monthKwh', 'month_kwh']) != null,
         ),
         monthSource: _asString(_pick(energy, ['monthSource', 'month_source'])),
       ),
@@ -1120,7 +1120,7 @@ class KahrabaIqApiService {
     ).toLowerCase();
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final rawType = _asString(_pick(data, ['type']));
-    final online = _asBool(_pick(data, ['online']), fallback: true);
+    final online = _asBool(_pick(data, ['online']), fallback: false);
     final stale = _asBool(_pick(data, ['stale']));
     final localOnline = _asBool(
       _pick(data, ['localOnline', 'local_online']),
@@ -1153,7 +1153,7 @@ class KahrabaIqApiService {
       localOnline: localOnline,
       cloudOnline: _asBool(
         _pick(data, ['cloudOnline', 'cloud_online']),
-        fallback: true,
+        fallback: online,
       ),
       stale: stale,
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
@@ -1199,7 +1199,11 @@ class KahrabaIqApiService {
       ),
       statusLabel: _asString(
         _pick(data, ['statusLabel', 'status_label']),
-        fallback: !online ? 'offline' : stale ? 'stale' : 'online',
+        fallback: !online
+            ? 'offline'
+            : stale
+            ? 'stale'
+            : 'online',
       ),
     );
   }
@@ -1425,7 +1429,6 @@ class KahrabaIqApiService {
             'current_month_kwh',
             'month_energy_kWh',
           ]),
-          fallback: _asDouble(_pick(energy, ['today_kwh', 'total_energy_kWh'])),
         ),
         energyTotal: _asDouble(
           _pick(energy, ['today_kwh', 'total_energy_kWh']),
@@ -1440,13 +1443,17 @@ class KahrabaIqApiService {
             'current_month_cost_bhd',
             'month_cost_BHD',
           ]),
-          fallback: _asDouble(
-            _pick(energy, ['today_cost_bhd', 'total_cost_BHD']),
-          ),
         ),
         monthDataAvailable: _asBool(
           _pick(energy, ['month_data_available', 'monthDataAvailable']),
-          fallback: true,
+          fallback:
+              _pick(energy, [
+                'month_kwh',
+                'monthly_kwh',
+                'current_month_kwh',
+                'month_energy_kWh',
+              ]) !=
+              null,
         ),
         monthSource: _asString(_pick(energy, ['month_source', 'monthSource'])),
       ),
@@ -1539,7 +1546,7 @@ class KahrabaIqApiService {
     final rawType = _asString(_pick(data, ['type']));
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final lastCommand = _asMap(data['last_command']);
-    final online = _asBool(_pick(data, ['online']), fallback: true);
+    final online = _asBool(_pick(data, ['online']), fallback: false);
     final stale = _asBool(_pick(data, ['stale']));
     final localOnline = _asBool(
       _pick(data, ['local_online', 'localOnline']),
@@ -1571,7 +1578,7 @@ class KahrabaIqApiService {
       localOnline: localOnline,
       cloudOnline: _asBool(
         _pick(data, ['cloud_online', 'cloudOnline']),
-        fallback: true,
+        fallback: online,
       ),
       stale: stale,
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
@@ -1600,7 +1607,11 @@ class KahrabaIqApiService {
       ),
       statusLabel: _asString(
         _pick(data, ['status_label', 'statusLabel']),
-        fallback: !online ? 'offline' : stale ? 'stale' : 'online',
+        fallback: !online
+            ? 'offline'
+            : stale
+            ? 'stale'
+            : 'online',
       ),
     );
   }
@@ -2406,7 +2417,7 @@ class KahrabaIqApiService {
         _pick(data, ['name', 'label', 'deviceName'])?.toString() ?? deviceId;
     final online = _asBool(
       _pick(status, ['online']) ?? _pick(data, ['online']),
-      fallback: true,
+      fallback: false,
     );
     final localOnline = _asBool(
       _pick(data, ['local_online', 'localOnline']),
@@ -2436,7 +2447,7 @@ class KahrabaIqApiService {
       localOnline: localOnline,
       cloudOnline: _asBool(
         _pick(data, ['cloud_online', 'cloudOnline']),
-        fallback: true,
+        fallback: online,
       ),
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
       commandInProgress: commandInProgress,
@@ -3076,7 +3087,15 @@ class KahrabaIqApiService {
       ),
       monthDataAvailable: _asBool(
         _pick(source, ['month_data_available', 'monthDataAvailable']),
-        fallback: true,
+        fallback:
+            _pick(source, [
+              'month_kwh',
+              'monthly_kwh',
+              'current_month_kwh',
+              'energyMonth',
+              'monthKwh',
+            ]) !=
+            null,
       ),
       monthSource: _asString(_pick(source, ['month_source', 'monthSource'])),
     );
@@ -3217,7 +3236,7 @@ class KahrabaIqApiService {
       );
       final online = _asBool(
         _pick(status, ['online']) ?? _pick(data, ['online']),
-        fallback: true,
+        fallback: false,
       );
       final localOnline = _asBool(
         _pick(data, ['local_online', 'localOnline']),
@@ -3251,7 +3270,7 @@ class KahrabaIqApiService {
           localOnline: localOnline,
           cloudOnline: _asBool(
             _pick(data, ['cloud_online', 'cloudOnline']),
-            fallback: true,
+            fallback: online,
           ),
           controllable: _asBool(_pick(data, ['controllable']), fallback: true),
           commandInProgress: commandInProgress,

@@ -82,7 +82,9 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isLoading = _dashboard == null;
       _error = null;
-      _dashboardNotice = null;
+      _dashboardNotice = _dashboard == null
+          ? 'Loading latest dashboard...'
+          : 'Refreshing latest dashboard while keeping current data visible...';
     });
 
     String? pairedHomeId;
@@ -123,14 +125,16 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
-    if (widget.enableRealtimeSync && NetworkConfig.useAwsIotLive) {
-      _liveSubscription = _api
-          .watchLiveDashboardData(homeId: pairedHomeId)
-          .listen(_applyDashboardData, onError: _handleLiveError);
-    }
-
     try {
+      debugPrint(
+        '[KahrabaIQ DASHBOARD API] fetching snapshot home=$pairedHomeId',
+      );
       final dashboard = await _api.fetchDashboardData(homeId: pairedHomeId);
+      debugPrint(
+        '[KahrabaIQ DASHBOARD API] snapshot received '
+        'power=${dashboard.reading.power} month=${dashboard.reading.energyMonth} '
+        'devices=${dashboard.devices.length}',
+      );
       _applyDashboardData(dashboard);
     } catch (error) {
       debugPrint('[KahrabaIQ DASHBOARD API FALLBACK ERROR] $error');
@@ -147,6 +151,13 @@ class _HomeScreenState extends State<HomeScreen> {
             'The Pi is offline or frozen. Showing the dashboard shell until live data returns.';
       });
     }
+
+    if (widget.enableRealtimeSync && NetworkConfig.useAwsIotLive) {
+      debugPrint('[KahrabaIQ IOT LIVE] subscribing after EC2 snapshot');
+      _liveSubscription = _api
+          .watchLiveDashboardData(homeId: pairedHomeId)
+          .listen(_applyDashboardData, onError: _handleLiveError);
+    }
   }
 
   void _applyDashboardData(DashboardData dashboard) {
@@ -157,6 +168,13 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     final mergedDashboard = _mergeLiveDashboardData(dashboard);
+    debugPrint(
+      '[KahrabaIQ DASHBOARD DISPLAY] '
+      'power=${mergedDashboard.reading.power} '
+      'month=${mergedDashboard.reading.energyMonth} '
+      'monthAvailable=${mergedDashboard.reading.monthDataAvailable} '
+      'devices=${mergedDashboard.devices.length}',
+    );
     final liveDeviceIds = mergedDashboard.devices
         .map((device) => device.id)
         .toSet();
@@ -178,7 +196,9 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       _isLoading = false;
       _error = null;
-      _dashboardNotice = null;
+      _dashboardNotice = NetworkConfig.useAwsIotLive
+          ? 'Showing latest cloud data. Live updates will merge in as they arrive.'
+          : null;
     });
   }
 
@@ -205,7 +225,8 @@ class _HomeScreenState extends State<HomeScreen> {
       return incoming;
     }
 
-    final reading = !incoming.reading.monthDataAvailable &&
+    final reading =
+        !incoming.reading.monthDataAvailable &&
             previous.reading.monthDataAvailable
         ? EnergyReading(
             timestamp: incoming.reading.timestamp,
@@ -221,11 +242,20 @@ class _HomeScreenState extends State<HomeScreen> {
             monthSource: previous.reading.monthSource,
           )
         : incoming.reading;
+    if (!incoming.reading.monthDataAvailable &&
+        previous.reading.monthDataAvailable) {
+      debugPrint(
+        '[KahrabaIQ DASHBOARD MERGE] preserved monthly summary from '
+        '${previous.reading.monthSource}; live update had no month data',
+      );
+    }
 
     return DashboardData(
       reading: reading,
       sensors: incoming.sensors,
-      devices: incoming.devices,
+      devices: incoming.devices.isNotEmpty
+          ? incoming.devices
+          : previous.devices,
       alerts: incoming.alerts,
       tariffBhdPerKwh: incoming.tariffBhdPerKwh,
       pendingDeviceCommands: incoming.pendingDeviceCommands,

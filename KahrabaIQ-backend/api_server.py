@@ -3508,20 +3508,24 @@ def create_cloud_remote_command(home_id: str, request: CloudRemoteCommandRequest
 
 
 def summary_energy_value(summary: dict[str, Any]) -> float:
-    energy = as_dict(summary.get("energy"))
-    value = as_number(
-        first_present(
-            energy.get("total_estimated_energy_kWh"),
-            energy.get("total_energy_kWh"),
-            energy.get("total_energy_kwh"),
-            summary.get("total_estimated_energy_kWh"),
-            summary.get("total_energy_kWh"),
-            summary.get("total_energy_kwh"),
-            summary.get("totalEnergyKwh"),
-        ),
-        0,
-    )
+    value = summary_energy_raw_value(summary)
     return float(value or 0)
+
+
+def summary_energy_raw_value(summary: dict[str, Any]) -> float | None:
+    energy = as_dict(summary.get("energy"))
+    raw = first_present(
+        energy.get("total_estimated_energy_kWh"),
+        energy.get("total_energy_kWh"),
+        energy.get("total_energy_kwh"),
+        summary.get("total_estimated_energy_kWh"),
+        summary.get("total_energy_kWh"),
+        summary.get("total_energy_kwh"),
+        summary.get("totalEnergyKwh"),
+    )
+    if raw is None:
+        return None
+    return as_number(raw)
 
 
 def summary_start_value(summary: dict[str, Any]) -> int:
@@ -3558,7 +3562,54 @@ def summary_command_success_rate(summaries: list[dict[str, Any]]) -> float | Non
     return round((succeeded / total) * 100, 1)
 
 
-def build_monthly_energy_summary(home_id: str, settings: dict[str, Any]) -> dict[str, Any]:
+def stored_monthly_energy_summary(
+    *sources: dict[str, Any],
+    tariff: float = 0.029,
+) -> dict[str, Any]:
+    for source in sources:
+        source = as_dict(source)
+        month_kwh = first_present(
+            source.get("month_kwh"),
+            source.get("monthly_kwh"),
+            source.get("current_month_kwh"),
+            source.get("energyMonth"),
+            source.get("monthKwh"),
+        )
+        if month_kwh is None:
+            continue
+        month_available = normalize_bool(
+            first_present(source.get("month_data_available"), source.get("monthDataAvailable"))
+        )
+        if month_available is False:
+            continue
+        month_cost = first_present(
+            source.get("month_cost_bhd"),
+            source.get("monthly_cost_bhd"),
+            source.get("current_month_cost_bhd"),
+            source.get("costMonth"),
+            source.get("monthCostBhd"),
+        )
+        return {
+            "month_kwh": as_number(month_kwh),
+            "month_cost_bhd": as_number(month_cost)
+            if month_cost is not None
+            else round(as_number(month_kwh) * tariff, 6),
+            "month_source": str(
+                first_present(source.get("month_source"), source.get("monthSource"), default="stored_monthly")
+            ),
+            "month_data_available": True,
+            "month_summary_count": int(as_number(first_present(source.get("month_summary_count"), source.get("monthly_summary_count")), 0)),
+            "monthly_summary_count": int(as_number(first_present(source.get("monthly_summary_count"), source.get("month_summary_count")), 0)),
+            "reason_if_unavailable": None,
+        }
+    return {}
+
+
+def build_monthly_energy_summary(
+    home_id: str,
+    settings: dict[str, Any],
+    *stored_sources: dict[str, Any],
+) -> dict[str, Any]:
     now_dt = datetime.now(BAHRAIN_TZ)
     month_start = datetime(now_dt.year, now_dt.month, 1, tzinfo=BAHRAIN_TZ)
     start_ms = int(month_start.timestamp() * 1000)
@@ -3570,29 +3621,72 @@ def build_monthly_energy_summary(home_id: str, settings: dict[str, Any]) -> dict
         end_at_ms=end_ms,
         limit=45,
     )
-    source = "daily_summary" if daily else "unavailable"
-    summaries = daily
-    if not summaries:
-        summaries = query_summaries_between(
-            home_id,
-            "hourly",
-            start_at_ms=start_ms,
-            end_at_ms=end_ms,
-            limit=744,
-        )
-        source = "hourly_summary" if summaries else "unavailable"
-    month_kwh = round(sum(summary_energy_value(summary) for summary in summaries), 6)
+    hourly = query_summaries_between(
+        home_id,
+        "hourly",
+        start_at_ms=start_ms,
+        end_at_ms=end_ms,
+        limit=744,
+    )
+    monthly = query_summaries_between(
+        home_id,
+        "monthly",
+        start_at_ms=start_ms,
+        end_at_ms=end_ms,
+        limit=3,
+    )
+
+    source = "unavailable"
+    summaries: list[dict[str, Any]] = []
+    energy_values: list[float] = []
+    for candidate_source, candidate_summaries in (
+        ("daily_summary", daily),
+        ("hourly_summary", hourly),
+        ("stored_monthly_summary", monthly),
+    ):
+        candidate_values = [
+            value
+            for value in (summary_energy_raw_value(summary) for summary in candidate_summaries)
+            if value is not None
+        ]
+        candidate_total = round(sum(candidate_values), 6)
+        if candidate_values and candidate_total > 0:
+            source = candidate_source
+            summaries = candidate_summaries
+            energy_values = candidate_values
+            break
     tariff = as_number(settings.get("cost_per_kwh"), 0.029)
+    stored = stored_monthly_energy_summary(*stored_sources, tariff=tariff) if not summaries else {}
+    if stored:
+        stored.update(
+            {
+                "month_start_ms": start_ms,
+                "month_start_iso": iso_from_ms(start_ms),
+                "month_end_ms": end_ms,
+                "month_end_iso": iso_from_ms(end_ms),
+            }
+        )
+        print(
+            "[KahrabaIQ MONTHLY] "
+            f"home_id={home_id} source={stored.get('month_source')} "
+            f"month_kwh={stored.get('month_kwh')} reason=None",
+            flush=True,
+        )
+        return stored
+    month_kwh = round(sum(energy_values), 6)
     reason = None
-    if not summaries:
-        reason = "no current-month daily or hourly cloud summaries were found"
+    if not (daily or hourly or monthly):
+        reason = "no current-month daily, hourly, or monthly cloud summaries were found"
+    elif not energy_values:
+        reason = "current-month summaries exist but do not contain usable energy totals; check breaker energy sensors or summary sync"
     elif month_kwh <= 0:
-        reason = "current-month summaries were found but their energy totals are zero"
+        reason = "current-month summaries contain only zero energy totals; check breaker energy sensors or Home Assistant energy entity IDs"
     print(
         "[KahrabaIQ MONTHLY] "
         f"home_id={home_id} start={iso_from_ms(start_ms)} end={iso_from_ms(end_ms)} "
-        f"daily_count={len(daily)} selected_source={source} selected_count={len(summaries)} "
-        f"month_kwh={month_kwh} reason={reason}",
+        f"daily_count={len(daily)} hourly_count={len(hourly)} monthly_count={len(monthly)} "
+        f"selected_source={source} selected_count={len(summaries)} "
+        f"energy_value_count={len(energy_values)} month_kwh={month_kwh} reason={reason}",
         flush=True,
     )
     return {
@@ -3603,9 +3697,10 @@ def build_monthly_energy_summary(home_id: str, settings: dict[str, Any]) -> dict
         "month_end_ms": end_ms,
         "month_end_iso": iso_from_ms(end_ms),
         "month_source": source,
-        "month_data_available": bool(summaries and month_kwh > 0),
+        "month_data_available": bool(energy_values),
         "month_summary_count": len(summaries),
         "monthly_summary_count": len(summaries),
+        "month_energy_value_count": len(energy_values),
         "reason_if_unavailable": reason,
     }
 
@@ -4007,14 +4102,13 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         and (smoke_ctx.get("active") is True or not item_mentions_smoke_or_gas(item))
     ]
     energy = build_energy(bundle, devices, settings)
-    monthly_energy = build_monthly_energy_summary(home_id, settings)
-    if monthly_energy.get("month_data_available") is not True and as_number(energy.get("today_kwh"), 0) > 0:
-        today_kwh = as_number(energy.get("today_kwh"), 0)
-        tariff = as_number(settings.get("cost_per_kwh"), 0.029)
-        monthly_energy["month_kwh"] = today_kwh
-        monthly_energy["month_cost_bhd"] = round(today_kwh * tariff, 6)
-        monthly_energy["month_source"] = "today_fallback"
-        monthly_energy["month_data_available"] = True
+    monthly_energy = build_monthly_energy_summary(
+        home_id,
+        settings,
+        as_dict(bundle["latest_state"].get("energy")),
+        bundle["backend_dashboard_energy"],
+        bundle["dashboard_latest"],
+    )
     energy.update(monthly_energy)
 
     alerts = dedupe_alerts(active_only(
