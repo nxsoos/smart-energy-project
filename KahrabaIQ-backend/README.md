@@ -25,7 +25,7 @@ uvicorn api_server:app --reload
 
 ## AI Architecture
 
-AI inference now runs inside the EC2 FastAPI backend. Firebase, Cloud Run, and SageMaker are not required.
+AI inference now runs inside the EC2 FastAPI backend. Legacy managed backend services are not required.
 
 Data sources:
 
