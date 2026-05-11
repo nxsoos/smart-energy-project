@@ -119,20 +119,27 @@ Admin mode allows:
 - Lock the dashboard again without rebooting.
 - View Pi, Wi-Fi, provisioning, and ESP32 status.
 - Restart the kiosk service.
+- Exit the kiosk/setup browser to the Raspberry Pi OS desktop/session.
+- Return to the dashboard kiosk or setup screen.
 - Start maintenance provisioning mode.
 
 Admin environment values:
 
 ```env
+PI_CLOUD_ADMIN_UNLOCK_ENABLED=true
+COGNITO_REGION=eu-west-1
+COGNITO_APP_CLIENT_ID=your_cognito_app_client_id
 KIOSK_ADMIN_USERNAME=admin
-KIOSK_ADMIN_PASSWORD=change_this_admin_password
+KIOSK_ADMIN_PASSWORD=
 KIOSK_ADMIN_PASSWORD_HASH=
 KIOSK_ADMIN_PIN=
-KIOSK_ADMIN_PIN_HASH=
+KIOSK_ADMIN_PIN_HASH=change_this_to_a_sha256_pin_hash
 KIOSK_ADMIN_SESSION_SECONDS=1800
 ```
 
-Use `KIOSK_ADMIN_PASSWORD_HASH` or `KIOSK_ADMIN_PIN_HASH` for production. The hash format is a SHA-256 hex digest. The installer also installs a limited sudoers rule from `pi/sudoers/kahrabaiq-admin` so the Pi agent can restart the kiosk and start maintenance provisioning without broad root access.
+Use platform admin credentials for normal unlock. Only backend `platform_admin` users pass cloud unlock; home admins, members, and viewers do not. Keep `KIOSK_ADMIN_PIN_HASH` as the offline recovery path and leave `KIOSK_ADMIN_PASSWORD` empty in production. The hash format is a SHA-256 hex digest.
+
+`Exit Kiosk To Desktop` stops the browser services only. It does not unlock the Raspberry Pi OS password screen, SSH, root, or arbitrary sudo access. The installer also installs limited sudoers rules from `pi/sudoers/kahrabaiq-admin` so the Pi agent can run only allowlisted maintenance commands.
 
 Maintenance flow:
 

@@ -39,6 +39,7 @@ SETUP_AP_SSID = os.environ.get("PI_SETUP_AP_SSID", "KahrabaIQ-Pi-Setup")
 SETUP_AP_PASSWORD = os.environ.get("PI_SETUP_AP_PASSWORD", "kahrabaiq-setup")
 SETUP_AP_CONNECTION = os.environ.get("PI_SETUP_AP_CONNECTION", "kahrabaiq-setup-ap")
 SETUP_PORT = int(os.environ.get("PI_PROVISIONING_PORT", "8080"))
+PI_AGENT_PORT = int(os.environ.get("PI_AGENT_PORT", "5010"))
 
 ESP32_SETUP_SSID = os.environ.get("ESP32_SETUP_SSID", "KahrabaIQ-ESP32-Setup")
 ESP32_SETUP_PASSWORD = os.environ.get("ESP32_SETUP_PASSWORD", "kahrabaiq123")
@@ -108,9 +109,41 @@ SETUP_HTML = """<!doctype html>
     .qr { width:min(280px,80vw); min-height:280px; display:grid; place-items:center; margin:12px auto; background:#fff; border-radius:18px; padding:12px; }
     .qr img { width:100%; height:auto; }
     code { display:block; overflow-wrap:anywhere; color:#bae6fd; background:#0f172a; padding:12px; border-radius:12px; }
+    .admin-hotspot { position:fixed; top:0; right:0; width:96px; height:96px; z-index:10; }
+    .overlay { position:fixed; inset:0; display:none; place-items:center; padding:24px; background:rgba(2,6,23,.78); z-index:20; }
+    .overlay.visible { display:grid; }
+    .admin-panel { width:min(620px,100%); background:#0f172a; border:1px solid rgba(34,211,238,.42); border-radius:20px; padding:24px; box-shadow:0 30px 80px rgba(0,0,0,.45); }
+    .admin-panel p { color:var(--muted); }
+    .admin-actions { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:14px; }
+    .admin-panel button { margin-top:10px; }
+    .admin-panel button.danger { background:#fb7185; color:white; }
+    .admin-log { margin-top:14px; color:var(--muted); white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }
   </style>
 </head>
 <body>
+  <div class="admin-hotspot" id="adminHotspot" aria-label="Admin unlock area"></div>
+  <div class="overlay" id="adminOverlay">
+    <div class="admin-panel">
+      <h2>Admin Access</h2>
+      <p id="adminCopy">Use platform admin credentials to unlock Pi maintenance. Use local recovery PIN only if cloud unlock is unavailable.</p>
+      <div id="adminLogin">
+        <label>Platform admin email<input id="adminEmail" autocomplete="username"></label>
+        <label>Password<input id="adminPassword" type="password" autocomplete="current-password"></label>
+        <label>Recovery PIN optional<input id="adminPin" type="password" inputmode="numeric"></label>
+        <button type="button" id="adminLoginButton">Unlock</button>
+      </div>
+      <div id="adminControls" style="display:none">
+        <div class="admin-actions">
+          <button type="button" id="lockDashboardButton">Lock Dashboard</button>
+          <button type="button" id="refreshAdminStatusButton">Refresh Status</button>
+          <button type="button" id="exitKioskButton">Exit Kiosk To Desktop</button>
+          <button type="button" id="returnKioskButton">Return To Kiosk</button>
+          <button class="danger" type="button" id="maintenanceButton">Enter Maintenance</button>
+        </div>
+        <div class="admin-log" id="adminLog">Admin mode unlocked.</div>
+      </div>
+    </div>
+  </div>
   <main>
     <h1>KahrabaIQ Setup</h1>
     <p id="lead">Connect this Pi to home Wi-Fi first. After internet is ready, scan the QR in the mobile app. Sensor setup starts only after the Pi receives the real home ID.</p>
@@ -154,6 +187,9 @@ SETUP_HTML = """<!doctype html>
     const wifiPanel = document.getElementById('wifiPanel');
     const qrPanel = document.getElementById('qrPanel');
     const sensorPanel = document.getElementById('sensorPanel');
+    const adminBaseUrl = 'http://127.0.0.1:__PI_AGENT_PORT__';
+    let adminToken = sessionStorage.getItem('kahrabaiqAdminToken') || '';
+    let adminPressTimer = null;
     function setText(id, value, klass) { const el = document.getElementById(id); el.textContent = value; el.className = klass || ''; }
     function showStatus(data) {
       statusText.textContent = `${data.stage}: ${data.message || ''}${data.last_error ? ' - ' + data.last_error : ''}`;
@@ -192,6 +228,57 @@ SETUP_HTML = """<!doctype html>
         statusText.className = 'error';
       }
     });
+    function showAdminOverlay() {
+      document.getElementById('adminOverlay').classList.add('visible');
+      document.getElementById('adminLogin').style.display = adminToken ? 'none' : 'block';
+      document.getElementById('adminControls').style.display = adminToken ? 'block' : 'none';
+      if (adminToken) refreshAdminStatus();
+    }
+    function hideAdminOverlay() { document.getElementById('adminOverlay').classList.remove('visible'); }
+    async function adminFetch(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (adminToken) headers.Authorization = `Bearer ${adminToken}`;
+      const response = await fetch(`${adminBaseUrl}${path}`, { ...options, headers });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.success === false) throw new Error(data.message || data.detail || 'Admin request failed');
+      return data;
+    }
+    function adminLog(value) { document.getElementById('adminLog').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
+    async function refreshAdminStatus() {
+      try { adminLog(await adminFetch('/api/admin/status')); } catch (error) { adminLog(error.message); }
+    }
+    document.getElementById('adminHotspot').addEventListener('pointerdown', () => {
+      clearTimeout(adminPressTimer);
+      adminPressTimer = setTimeout(showAdminOverlay, 5000);
+    });
+    document.getElementById('adminHotspot').addEventListener('pointerup', () => clearTimeout(adminPressTimer));
+    document.getElementById('adminHotspot').addEventListener('pointercancel', () => clearTimeout(adminPressTimer));
+    document.addEventListener('keydown', (event) => {
+      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'a') showAdminOverlay();
+      if (event.key === 'Escape') hideAdminOverlay();
+    });
+    document.getElementById('adminLoginButton').onclick = async () => {
+      try {
+        const payload = { email: document.getElementById('adminEmail').value, password: document.getElementById('adminPassword').value, pin: document.getElementById('adminPin').value };
+        const data = await adminFetch('/api/admin/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+        adminToken = data.token;
+        sessionStorage.setItem('kahrabaiqAdminToken', adminToken);
+        showAdminOverlay();
+      } catch (error) { document.getElementById('adminCopy').textContent = error.message; }
+    };
+    document.getElementById('lockDashboardButton').onclick = async () => {
+      try { await adminFetch('/api/admin/lock', { method:'POST' }); } catch (_) {}
+      adminToken = '';
+      sessionStorage.removeItem('kahrabaiqAdminToken');
+      hideAdminOverlay();
+    };
+    document.getElementById('refreshAdminStatusButton').onclick = refreshAdminStatus;
+    document.getElementById('exitKioskButton').onclick = async () => adminLog(await adminFetch('/api/admin/kiosk/exit', { method:'POST' }));
+    document.getElementById('returnKioskButton').onclick = async () => adminLog(await adminFetch('/api/admin/kiosk/start', { method:'POST' }));
+    document.getElementById('maintenanceButton').onclick = async () => {
+      if (!confirm('This will stop the dashboard and return the Pi to setup mode. Continue?')) return;
+      adminLog(await adminFetch('/api/admin/maintenance/start', { method:'POST' }));
+    };
     setInterval(refresh, 2000);
     refresh();
   </script>
@@ -540,6 +627,7 @@ def setup_page() -> Response:
         .replace("__SETUP_AP_PASSWORD__", SETUP_AP_PASSWORD)
         .replace("__ESP32_DEVICE_ID__", ESP32_DEVICE_ID)
         .replace("__ESP32_DEVICE_KEY__", ESP32_DEVICE_KEY)
+        .replace("__PI_AGENT_PORT__", str(PI_AGENT_PORT))
     )
     return Response(html, mimetype="text/html")
 
