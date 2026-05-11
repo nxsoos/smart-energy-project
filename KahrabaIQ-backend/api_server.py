@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import ipaddress
 import hashlib
 import hmac
 import secrets
@@ -15,8 +16,9 @@ from zoneinfo import ZoneInfo
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from jwt import PyJWKClient
 from pydantic import BaseModel, Field
 
@@ -76,6 +78,9 @@ KIOSK_SESSION_TTL_SECONDS = int(os.environ.get("KIOSK_SESSION_TTL_SECONDS", "600
 KIOSK_COMMAND_TTL_SECONDS = int(os.environ.get("KIOSK_COMMAND_TTL_SECONDS", "300"))
 KIOSK_SESSION_SECRET = os.environ.get("KIOSK_SESSION_SECRET") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "dev-kiosk-session-secret"
 KIOSK_ALLOWED_COMMANDS = {"provision_esp32", "discover_esp32", "reset_esp32"}
+DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
+DASHBOARD_ALLOWED_HEARTBEAT_AGE_SECONDS = int(os.environ.get("DASHBOARD_ALLOWED_HEARTBEAT_AGE_SECONDS", "900"))
+DASHBOARD_ACCESS_DEFAULT_ENABLED = os.environ.get("DASHBOARD_ACCESS_DEFAULT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch", "light_switch"}
 DEVICE_ALIASES = {
     "ac_breaker": "breaker_01",
@@ -1438,6 +1443,60 @@ def object_to_list(value: Any) -> list[dict[str, Any]]:
     return items
 
 
+def normalize_ip(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("[") and "]" in text:
+        text = text[1 : text.index("]")]
+    elif text.count(":") == 1 and "." in text:
+        text = text.split(":", 1)[0]
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text
+
+
+def client_public_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    for item in forwarded.split(","):
+        ip = normalize_ip(item)
+        if ip:
+            return ip
+    return normalize_ip(request.headers.get("x-real-ip") or (request.client.host if request.client else ""))
+
+
+def dashboard_access_enabled(pi: dict[str, Any]) -> bool:
+    value = pi.get("dashboard_access_enabled")
+    if value is None:
+        return DASHBOARD_ACCESS_DEFAULT_ENABLED
+    return value is True
+
+
+def require_dashboard_pi_access(request: Request) -> dict[str, Any]:
+    public_ip = client_public_ip(request)
+    if not public_ip:
+        raise HTTPException(status_code=403, detail="Dashboard access denied: missing client IP.")
+    newest: dict[str, Any] = {}
+    newest_seen = -1
+    for item in object_to_list(safe_get("/pis", {})):
+        pi_id = str(item.get("pi_id") or item.get("id") or "")
+        if not pi_id or normalize_ip(str(item.get("public_ip") or "")) != public_ip:
+            continue
+        seen_at = int(as_number(item.get("last_heartbeat_at_ms"), 0))
+        if seen_at > newest_seen:
+            newest = {**item, "pi_id": pi_id}
+            newest_seen = seen_at
+    if not newest:
+        raise HTTPException(status_code=403, detail="Dashboard access denied: IP is not registered to a Pi.")
+    if not dashboard_access_enabled(newest):
+        raise HTTPException(status_code=403, detail="Dashboard access is disabled for this Pi.")
+    max_age_ms = DASHBOARD_ALLOWED_HEARTBEAT_AGE_SECONDS * 1000
+    if max_age_ms > 0 and now_ms() - newest_seen > max_age_ms:
+        raise HTTPException(status_code=403, detail="Dashboard access denied: Pi heartbeat is stale.")
+    return {"public_ip": public_ip, "pi_id": newest["pi_id"], "home_id": str(newest.get("home_id") or ""), "pi": newest}
+
+
 def command_status_payload(item: dict[str, Any]) -> dict[str, Any]:
     status = normalize_command_status(item.get("status"))
     return {
@@ -1688,22 +1747,28 @@ def get_pi_pairing_status(pi_id: str) -> dict[str, Any]:
 @app.post("/api/pi/{pi_id}/heartbeat")
 def pi_heartbeat(
     pi_id: str,
-    request: PiHeartbeatRequest,
+    heartbeat: PiHeartbeatRequest,
+    http_request: Request,
     x_pi_id: str | None = Header(default=None),
     x_device_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
     timestamp_ms = now_ms()
+    public_ip = client_public_ip(http_request)
     updates = {
         "status": pi.get("status") or "unpaired",
-        "online_status": request.status,
-        "agent_version": request.agent_version,
-        "local_ip": request.local_ip,
-        "local_base_url": request.local_base_url,
-        "sensor_base_url": request.sensor_base_url,
-        "wifi_ssid": request.wifi_ssid,
-        "esp32": request.esp32 or {},
-        "metrics": request.metrics or {},
+        "online_status": heartbeat.status,
+        "agent_version": heartbeat.agent_version,
+        "public_ip": public_ip,
+        "public_ip_updated_at_ms": timestamp_ms,
+        "public_ip_updated_at_iso": iso_from_ms(timestamp_ms),
+        "dashboard_access_enabled": pi.get("dashboard_access_enabled") if pi.get("dashboard_access_enabled") is not None else DASHBOARD_ACCESS_DEFAULT_ENABLED,
+        "local_ip": heartbeat.local_ip,
+        "local_base_url": heartbeat.local_base_url,
+        "sensor_base_url": heartbeat.sensor_base_url,
+        "wifi_ssid": heartbeat.wifi_ssid,
+        "esp32": heartbeat.esp32 or {},
+        "metrics": heartbeat.metrics or {},
         "last_heartbeat_at_ms": timestamp_ms,
         "last_heartbeat_at_iso": iso_from_ms(timestamp_ms),
         "updated_at_ms": timestamp_ms,
@@ -1716,11 +1781,12 @@ def pi_heartbeat(
             f"/homes/{home_id}/pi_connection",
             {
                 "pi_id": pi_id,
-                "local_ip": request.local_ip,
-                "local_base_url": request.local_base_url,
-                "sensor_base_url": request.sensor_base_url,
-                "wifi_ssid": request.wifi_ssid,
-                "online_status": request.status,
+                "public_ip": public_ip,
+                "local_ip": heartbeat.local_ip,
+                "local_base_url": heartbeat.local_base_url,
+                "sensor_base_url": heartbeat.sensor_base_url,
+                "wifi_ssid": heartbeat.wifi_ssid,
+                "online_status": heartbeat.status,
                 "updated_at_ms": timestamp_ms,
                 "updated_at_iso": iso_from_ms(timestamp_ms),
             },
@@ -4304,6 +4370,96 @@ def get_current_state(home_id: str) -> dict[str, Any]:
         "updated_at_ms": latest.get("updated_at_ms"),
         "updated_at_iso": latest.get("updated_at_iso"),
     }
+
+
+def dashboard_latest_state(access: dict[str, Any]) -> dict[str, Any]:
+    home_id = str(access.get("home_id") or "")
+    if not home_id:
+        return {}
+    return as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+
+
+def dashboard_bootstrap_payload(request: Request) -> dict[str, Any]:
+    access = require_dashboard_pi_access(request)
+    pi = as_dict(access.get("pi"))
+    home_id = str(access.get("home_id") or "")
+    latest = dashboard_latest_state(access)
+    return {
+        "success": True,
+        "pi_id": access["pi_id"],
+        "home_id": home_id or None,
+        "paired": bool(home_id),
+        "status": "paired" if home_id else "waiting_for_pairing",
+        "message": "Pi is paired and streaming live sensor data." if home_id else "Pi is online. Pair this Pi to a home to show live sensor data.",
+        "public_ip": access["public_ip"],
+        "pi": {
+            "pi_id": access["pi_id"],
+            "online_status": pi.get("online_status"),
+            "wifi_ssid": pi.get("wifi_ssid"),
+            "local_ip": pi.get("local_ip"),
+            "local_base_url": pi.get("local_base_url"),
+            "sensor_base_url": pi.get("sensor_base_url"),
+            "last_heartbeat_at_ms": pi.get("last_heartbeat_at_ms"),
+            "last_heartbeat_at_iso": pi.get("last_heartbeat_at_iso"),
+        },
+        "latest_state": latest,
+        "updated_at_ms": latest.get("updated_at_ms"),
+        "updated_at_iso": latest.get("updated_at_iso"),
+    }
+
+
+@app.get("/")
+def cloud_dashboard_root(request: Request) -> FileResponse:
+    require_dashboard_pi_access(request)
+    index = DASHBOARD_DIR / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=503, detail="Dashboard is not deployed.")
+    return FileResponse(index, media_type="text/html")
+
+
+@app.get("/dashboard")
+def cloud_dashboard(request: Request) -> FileResponse:
+    return cloud_dashboard_root(request)
+
+
+@app.get("/dashboard/{asset_path:path}")
+def cloud_dashboard_asset(asset_path: str) -> FileResponse:
+    path = (DASHBOARD_DIR / asset_path).resolve()
+    if DASHBOARD_DIR.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Dashboard asset not found.")
+    return FileResponse(path)
+
+
+@app.get("/api/dashboard/bootstrap")
+def dashboard_bootstrap(request: Request) -> dict[str, Any]:
+    return dashboard_bootstrap_payload(request)
+
+
+@app.get("/api/dashboard/state")
+def dashboard_state(request: Request) -> dict[str, Any]:
+    payload = dashboard_bootstrap_payload(request)
+    return {
+        "success": True,
+        "pi_id": payload["pi_id"],
+        "home_id": payload["home_id"],
+        "paired": payload["paired"],
+        "state": payload["latest_state"],
+        "updated_at_ms": payload["updated_at_ms"],
+        "updated_at_iso": payload["updated_at_iso"],
+    }
+
+
+@app.get("/api/dashboard/iot/live-config")
+def dashboard_iot_live_config(request: Request) -> dict[str, Any]:
+    access = require_dashboard_pi_access(request)
+    home_id = str(access.get("home_id") or "")
+    if not home_id:
+        return {"success": True, "paired": False, "home_id": None, "config": None}
+    try:
+        config = create_iot_websocket_config(home_id, client_id=f"kahrabaiq-dashboard-{access['pi_id']}-{secrets.token_hex(4)}")
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"AWS IoT live config failed: {error}") from error
+    return {"success": True, "paired": True, "home_id": home_id, "config": config}
 
 
 @app.get("/api/homes/{home_id}/summaries/hourly", dependencies=[Depends(require_home_permission("can_view"))])
