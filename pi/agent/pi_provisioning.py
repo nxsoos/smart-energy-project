@@ -32,7 +32,12 @@ SETUP_PORT = int(os.environ.get("PI_PROVISIONING_PORT", "8080"))
 
 ESP32_SETUP_SSID = os.environ.get("ESP32_SETUP_SSID", "KahrabaIQ-ESP32-Setup")
 ESP32_SETUP_PASSWORD = os.environ.get("ESP32_SETUP_PASSWORD", "kahrabaiq123")
-ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "http://192.168.4.1").rstrip("/")
+ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "").rstrip("/")
+ESP32_DISCOVERY_CANDIDATES = [
+    item.strip().rstrip("/")
+    for item in os.environ.get("ESP32_DISCOVERY_CANDIDATES", "http://kahrabaiq-esp32.local").split(",")
+    if item.strip()
+]
 ESP32_CONNECT_TIMEOUT_SECONDS = int(os.environ.get("ESP32_CONNECT_TIMEOUT_SECONDS", "45"))
 HOME_WIFI_CONNECT_TIMEOUT_SECONDS = int(os.environ.get("HOME_WIFI_CONNECT_TIMEOUT_SECONDS", "60"))
 ESP32_VERIFY_TIMEOUT_SECONDS = int(os.environ.get("ESP32_VERIFY_TIMEOUT_SECONDS", "30"))
@@ -187,6 +192,49 @@ def wait_for_ip(interface: str, timeout_seconds: int) -> str:
     raise RuntimeError(f"{interface} did not receive an IPv4 address.")
 
 
+def normalize_base_url(value: str) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if text and not text.startswith(("http://", "https://")):
+        text = f"http://{text}"
+    return text
+
+
+def gateway_from_nmcli(interface: str) -> str:
+    result = run_nmcli(["-g", "IP4.GATEWAY", "device", "show", interface], timeout=10, check=False)
+    for line in result.stdout.splitlines():
+        gateway = line.strip()
+        if gateway:
+            return gateway
+    return ""
+
+
+def gateway_from_ip_route(interface: str) -> str:
+    result = run_command(["ip", "route", "show", "dev", interface], timeout=10, check=False)
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if "via" in parts:
+            index = parts.index("via")
+            if index + 1 < len(parts):
+                return parts[index + 1]
+    return ""
+
+
+def detect_setup_gateway(interface: str) -> str:
+    return gateway_from_nmcli(interface) or gateway_from_ip_route(interface)
+
+
+def esp32_setup_base_url() -> str:
+    if ESP32_SETUP_URL:
+        return normalize_base_url(ESP32_SETUP_URL)
+    gateway = detect_setup_gateway(SETUP_WIFI_INTERFACE)
+    if not gateway:
+        raise RuntimeError(
+            f"Could not detect ESP32 setup gateway on {SETUP_WIFI_INTERFACE}. "
+            "Make sure the Pi is connected to the ESP32 setup hotspot."
+        )
+    return f"http://{gateway}"
+
+
 def start_setup_hotspot() -> None:
     set_state(stage="setup-hotspot", message=f"Starting {SETUP_AP_SSID} on {SETUP_WIFI_INTERFACE}.", last_error=None)
     run_nmcli(["connection", "down", SETUP_AP_CONNECTION], check=False)
@@ -271,6 +319,7 @@ def connect_esp32_setup_wifi() -> None:
 
 def provision_esp32(payload: dict[str, str]) -> dict[str, Any]:
     connect_esp32_setup_wifi()
+    setup_url = esp32_setup_base_url()
     body = {
         "ssid": payload["ssid"],
         "password": payload["password"],
@@ -281,18 +330,18 @@ def provision_esp32(payload: dict[str, str]) -> dict[str, Any]:
         "device_id": payload.get("device_id") or ESP32_DEVICE_ID,
         "device_key": payload.get("device_key") or ESP32_DEVICE_KEY,
     }
-    set_state(stage="esp32-provision", message="Sending Wi-Fi credentials to ESP32.")
-    response = requests.post(f"{ESP32_SETUP_URL}/provision", json=body, timeout=20)
+    set_state(stage="esp32-provision", message=f"Sending Wi-Fi credentials to ESP32 at {setup_url}.")
+    response = requests.post(f"{setup_url}/provision", json=body, timeout=20)
     data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"message": response.text}
     if not response.ok or data.get("success") is False:
         raise RuntimeError(data.get("message") or response.text)
-    return data
+    return {"setup_url": setup_url, "response": data}
 
 
 def verify_esp32() -> dict[str, Any] | None:
     set_state(stage="esp32-verify", message="Checking ESP32 on home Wi-Fi.")
     deadline = time.time() + ESP32_VERIFY_TIMEOUT_SECONDS
-    candidates = ["http://kahrabaiq-esp32.local", ESP32_SETUP_URL]
+    candidates = ESP32_DISCOVERY_CANDIDATES
     while time.time() < deadline:
         for base_url in candidates:
             try:

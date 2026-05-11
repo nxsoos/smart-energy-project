@@ -53,7 +53,7 @@ First boot flow:
 4. The setup page collects the home Wi-Fi SSID/password, home ID, Pi ID, ESP32 device ID, and ESP32 device key.
 5. The Pi connects `wlan0` to the home Wi-Fi.
 6. The Pi uses `wlan1` to connect to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
-7. The Pi posts the same home Wi-Fi credentials and Pi sensor URL to `http://192.168.4.1/provision`.
+7. The Pi detects the ESP32 setup gateway from `wlan1` and posts the same home Wi-Fi credentials and Pi sensor URL to `http://<detected-gateway>/provision`.
 8. The ESP32 saves the config, reboots, joins the home Wi-Fi, and starts posting to the Pi sensor receiver.
 9. The Pi disconnects and turns off `wlan1`.
 10. The Pi writes `/var/lib/kahrabaiq/provisioned.json` and only then allows normal services and the locked kiosk dashboard to start.
@@ -462,7 +462,7 @@ esp32/firmware/ESP32_code.c
 Provisioning support includes:
 
 - Setup hotspot: `KahrabaIQ-ESP32-Setup`
-- Setup URL: `http://192.168.4.1`
+- Setup URL: auto-detected by the Pi from the `wlan1` gateway after it joins the ESP32 setup hotspot
 - `GET /status`
 - `POST /provision`
 - `POST /reset`

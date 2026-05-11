@@ -6,7 +6,7 @@ The ESP32 starts a setup hotspot when no Wi-Fi config is saved:
 
 - SSID: `KahrabaIQ-ESP32-Setup`
 - Password: `kahrabaiq123`
-- Setup URL: `http://192.168.4.1`
+- Setup URL: detected by the Pi from the ESP32 hotspot gateway
 
 After provisioning, it connects to home Wi-Fi, advertises `kahrabaiq-esp32.local`, and posts sensor payloads to the Pi receiver.
 
@@ -23,11 +23,11 @@ wlan1 = TL-WN725N USB adapter used temporarily for setup/provisioning
 
 Sequence:
 
-1. ESP32 starts in setup mode and exposes `KahrabaIQ-ESP32-Setup` at `http://192.168.4.1`.
+1. ESP32 starts in setup mode and exposes `KahrabaIQ-ESP32-Setup`.
 2. Pi first-boot setup collects the home Wi-Fi SSID/password from the installer.
 3. Pi connects `wlan0` to the home Wi-Fi.
 4. Pi connects `wlan1` to `KahrabaIQ-ESP32-Setup`.
-5. Pi sends `POST http://192.168.4.1/provision` with the home Wi-Fi credentials and Pi receiver URL.
+5. Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` with the home Wi-Fi credentials and Pi receiver URL.
 6. ESP32 saves the config, reboots, joins the same home Wi-Fi as the Pi, and starts sending sensor data.
 7. Pi turns `wlan1` off and starts the locked dashboard only after provisioning completes.
 
@@ -35,10 +35,10 @@ The Pi-side implementation is in `pi/agent/pi_provisioning.py`. The dashboard is
 
 ## Provisioning Example
 
-Connect your phone or laptop to the setup hotspot, then send:
+Connect your phone or laptop to the setup hotspot, detect the hotspot gateway from your device network settings, then send:
 
 ```bash
-curl -X POST http://192.168.4.1/provision \
+curl -X POST http://<detected-gateway>/provision \
   -H "Content-Type: application/json" \
   -d '{
     "ssid":"YOUR_WIFI_NAME",

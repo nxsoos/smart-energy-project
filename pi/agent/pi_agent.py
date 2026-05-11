@@ -37,13 +37,13 @@ HEARTBEAT_INTERVAL_SECONDS = float(os.environ.get("PI_HEARTBEAT_INTERVAL_SECONDS
 LIVE_SYNC_INTERVAL_SECONDS = float(os.environ.get("PI_LIVE_SYNC_INTERVAL_SECONDS", "10"))
 COMMAND_POLL_SECONDS = float(os.environ.get("PI_COMMAND_POLL_SECONDS", "3"))
 KIOSK_TOKEN_REFRESH_MARGIN_SECONDS = float(os.environ.get("KIOSK_TOKEN_REFRESH_MARGIN_SECONDS", "240"))
-ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "http://192.168.4.1").rstrip("/")
+ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "").rstrip("/")
 ESP32_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
 ESP32_DISCOVERY_CANDIDATES = [
     item.strip().rstrip("/")
     for item in os.environ.get(
         "ESP32_DISCOVERY_CANDIDATES",
-        "http://kahrabaiq-esp32.local,http://192.168.4.1",
+        "http://kahrabaiq-esp32.local",
     ).split(",")
     if item.strip()
 ]
@@ -312,6 +312,8 @@ def discover_esp32() -> dict[str, Any]:
 
 def provision_esp32(payload: dict[str, Any]) -> dict[str, Any]:
     setup_url = normalize_url(str(payload.get("setup_url") or ESP32_SETUP_URL))
+    if not setup_url:
+        raise RuntimeError("ESP32 setup URL is unavailable. Use first-boot provisioning or provide setup_url explicitly.")
     ssid = str(payload.get("ssid") or "").strip()
     password = str(payload.get("password") or "")
     if not ssid or not password:
@@ -335,6 +337,8 @@ def provision_esp32(payload: dict[str, Any]) -> dict[str, Any]:
 
 def reset_esp32(payload: dict[str, Any]) -> dict[str, Any]:
     base = normalize_url(str(payload.get("base_url") or esp32_link().get("base_url") or ESP32_SETUP_URL))
+    if not base:
+        raise RuntimeError("ESP32 base URL is unavailable. Discover the ESP32 first or provide base_url explicitly.")
     response = requests.post(f"{base}/reset", timeout=8)
     data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"message": response.text}
     if not response.ok:

@@ -63,7 +63,7 @@ Detailed first-boot sequence:
 6. Enter the home Wi-Fi SSID/password, home ID, Pi ID, ESP32 device ID, and ESP32 device key.
 7. The Pi connects `wlan0` to the home Wi-Fi.
 8. The Pi stops the setup AP and connects `wlan1` to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
-9. The Pi sends `POST http://192.168.4.1/provision` to the ESP32 with the same home Wi-Fi credentials and `PI_SENSOR_BASE_URL`.
+9. The Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` to the ESP32 with the same home Wi-Fi credentials and `PI_SENSOR_BASE_URL`.
 10. The ESP32 saves the config, reboots, and joins the home Wi-Fi.
 11. The Pi disconnects and turns off `wlan1`.
 12. The Pi writes `/var/lib/kahrabaiq/provisioned.json`.
@@ -80,10 +80,13 @@ PI_PROVISIONING_PORT=8080
 PROVISIONING_MARKER_PATH=/var/lib/kahrabaiq/provisioned.json
 ESP32_SETUP_SSID=KahrabaIQ-ESP32-Setup
 ESP32_SETUP_PASSWORD=kahrabaiq123
-ESP32_SETUP_URL=http://192.168.4.1
+ESP32_SETUP_URL=
+ESP32_DISCOVERY_CANDIDATES=http://kahrabaiq-esp32.local
 PI_SENSOR_BASE_URL=http://kahrabaiq-pi.local:5000
 PI_LOCAL_BASE_URL=http://kahrabaiq-pi.local:5001
 ```
+
+Leave `ESP32_SETUP_URL` empty for normal installs. The Pi auto-detects the ESP32 setup server from the `wlan1` gateway after joining `ESP32_SETUP_SSID`. If gateway detection fails, provisioning fails with a clear error instead of falling back to a hardcoded IP.
 
 The provisioning service uses NetworkManager/`nmcli`. Verify it exists on the Pi before deployment:
 
