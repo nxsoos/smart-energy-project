@@ -38,7 +38,8 @@ The Pi runs local hardware services and reports compact state to the deployed AP
 
 - `PI_DEVICE_TOKEN` exists only in `/etc/kahrabaiq/pi.env` and Pi processes.
 - The production browser opens `https://dashboard.kahrabaiq.com`.
-- The backend allows the dashboard only when the request public IP matches a fresh Pi heartbeat record in the DB.
+- The backend allows the dashboard only when the request public IP matches a fresh Pi heartbeat record in the DB and the browser has a Pi-issued kiosk session cookie.
+- The Pi launcher creates that cookie through `/dashboard/session/start`; laptops on the same Wi-Fi public IP do not pass without that session.
 - If the Pi is not paired yet, the cloud dashboard shows a waiting-for-pairing screen.
 - The dashboard starts only after `/var/lib/kahrabaiq/provisioned.json` exists.
 - The local kiosk dashboard can be unlocked by admin credentials, then locked again without rebooting.
@@ -108,7 +109,7 @@ nmcli device status
 
 ## Dashboard Admin Unlock
 
-The production kiosk dashboard is served from `https://dashboard.kahrabaiq.com` after provisioning. The local Pi dashboard route at `http://127.0.0.1:5010/dashboard` remains a fallback/debug route.
+The production kiosk dashboard is served from `https://dashboard.kahrabaiq.com` after provisioning. `pi/scripts/launch-kiosk.sh` requests a short-lived kiosk token from `KAHRABAIQ_API_URL`, opens `/dashboard/session/start?token=...`, and receives the HttpOnly dashboard cookie before redirecting to `/dashboard`. The local Pi dashboard route at `http://127.0.0.1:5010/dashboard` remains a fallback/debug route.
 
 Admin unlock options:
 

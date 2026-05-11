@@ -1,5 +1,6 @@
 const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 let statePollTimer = null;
+let sessionRefreshTimer = null;
 let iotSocket = null;
 let mqttPacketId = 1;
 
@@ -22,6 +23,13 @@ async function getJson(path) {
   const response = await fetch(path, { cache: "no-store" });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.success === false) throw new Error(data.detail || data.message || "Request failed");
+  return data;
+}
+
+async function refreshDashboardSession() {
+  const response = await fetch("/api/dashboard/session/refresh", { method: "POST", cache: "no-store" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.success === false) throw new Error(data.detail || data.message || "Session refresh failed");
   return data;
 }
 
@@ -186,6 +194,7 @@ async function start() {
   try {
     const bootstrap = await getJson("/api/dashboard/bootstrap");
     renderBootstrap(bootstrap);
+    sessionRefreshTimer = setInterval(() => refreshDashboardSession().catch(() => setStatus("Session expiring", "warn")), 300000);
     if (bootstrap.paired) {
       connectIotLive().catch(() => document.getElementById("liveMode").textContent = "Polling fallback");
       statePollTimer = setInterval(pollState, 3000);
@@ -203,6 +212,7 @@ async function start() {
 
 window.addEventListener("beforeunload", () => {
   if (statePollTimer) clearInterval(statePollTimer);
+  if (sessionRefreshTimer) clearInterval(sessionRefreshTimer);
   if (iotSocket) iotSocket.close();
 });
 

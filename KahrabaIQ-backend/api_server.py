@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import html
 import ipaddress
 import hashlib
 import hmac
@@ -16,9 +17,9 @@ from zoneinfo import ZoneInfo
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from jwt import PyJWKClient
 from pydantic import BaseModel, Field
 
@@ -79,6 +80,7 @@ KIOSK_COMMAND_TTL_SECONDS = int(os.environ.get("KIOSK_COMMAND_TTL_SECONDS", "300
 KIOSK_SESSION_SECRET = os.environ.get("KIOSK_SESSION_SECRET") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "dev-kiosk-session-secret"
 KIOSK_ALLOWED_COMMANDS = {"provision_esp32", "discover_esp32", "reset_esp32"}
 DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
+DASHBOARD_SESSION_COOKIE = "kahrabaiq_dashboard_session"
 DASHBOARD_ALLOWED_HEARTBEAT_AGE_SECONDS = int(os.environ.get("DASHBOARD_ALLOWED_HEARTBEAT_AGE_SECONDS", "900"))
 DASHBOARD_ACCESS_DEFAULT_ENABLED = os.environ.get("DASHBOARD_ACCESS_DEFAULT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 MATTER_DEVICE_IDS = {"matter_socket_switch", "matter_ac_switch", "light_switch"}
@@ -446,6 +448,175 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def is_dashboard_request(request: Request) -> bool:
+    path = request.url.path.rstrip("/") or "/"
+    return path == "/" or path == "/dashboard" or path.startswith("/dashboard/") or path.startswith("/api/dashboard/")
+
+
+def dashboard_error_title(status_code: int) -> tuple[str, str, str]:
+    if status_code == 401:
+        return ("Pi session expired", "The kiosk session timed out.", "Restart the Raspberry Pi kiosk browser to mint a fresh session.")
+    if status_code == 403:
+        return ("Access locked to Pi kiosk", "This browser is not the registered Raspberry Pi kiosk session.", "Use the Raspberry Pi display, or restart the kiosk service on the Pi.")
+    if status_code == 404:
+        return ("Dashboard route not found", "This dashboard address does not exist.", "Open the kiosk from the configured Pi launcher URL.")
+    return ("Dashboard unavailable", "The kiosk dashboard could not complete this request.", "Check the Pi heartbeat, backend service, and Nginx real-IP headers.")
+
+
+def dashboard_error_page(request: Request, exc: HTTPException) -> HTMLResponse:
+    status_code = int(exc.status_code or 500)
+    title, summary, action = dashboard_error_title(status_code)
+    detail = exc.detail if isinstance(exc.detail, str) else "Dashboard access check failed."
+    public_ip = request.headers.get("x-real-ip") or request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        public_ip = forwarded_for.split(",", 1)[0].strip() or public_ip
+    safe_title = html.escape(title)
+    safe_summary = html.escape(summary)
+    safe_action = html.escape(action)
+    safe_detail = html.escape(str(detail))
+    safe_path = html.escape(request.url.path)
+    safe_ip = html.escape(public_ip or "unknown")
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{status_code} | KahrabaIQ Dashboard</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: oklch(14% 0.055 264);
+      --panel: oklch(20% 0.05 260);
+      --panel-2: oklch(25% 0.045 248);
+      --text: oklch(96% 0.009 250);
+      --muted: oklch(72% 0.035 255);
+      --cyan: oklch(78% 0.16 215);
+      --green: oklch(72% 0.15 160);
+      --red: oklch(69% 0.2 15);
+      --amber: oklch(78% 0.15 75);
+      --line: color-mix(in oklch, var(--cyan) 32%, transparent);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at 18% 12%, oklch(33% 0.1 225 / .7), transparent 34rem),
+        radial-gradient(circle at 82% 88%, oklch(36% 0.09 165 / .36), transparent 30rem),
+        linear-gradient(145deg, oklch(11% 0.05 264), var(--bg));
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 28px;
+    }}
+    main {{
+      width: min(980px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 30px;
+      background: linear-gradient(145deg, color-mix(in oklch, var(--panel) 94%, transparent), color-mix(in oklch, var(--panel-2) 78%, transparent));
+      box-shadow: 0 26px 80px oklch(8% 0.045 264 / .46);
+      overflow: hidden;
+    }}
+    .hero {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 220px;
+      gap: 28px;
+      padding: clamp(28px, 5vw, 58px);
+      align-items: center;
+    }}
+    .brand {{ display: flex; align-items: center; gap: 16px; margin-bottom: 34px; }}
+    .mark {{ width: 58px; height: 58px; flex: 0 0 auto; filter: drop-shadow(0 0 22px oklch(78% 0.16 215 / .32)); }}
+    .brand strong {{ display: block; font-size: 22px; letter-spacing: .01em; }}
+    .brand span {{ color: var(--muted); font-size: 14px; font-weight: 750; }}
+    .eyebrow {{ margin: 0 0 14px; color: var(--cyan); font-size: 13px; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }}
+    h1 {{ margin: 0; max-width: 720px; font-size: clamp(38px, 6vw, 76px); line-height: .94; letter-spacing: -.055em; }}
+    .summary {{ max-width: 64ch; margin: 22px 0 0; color: var(--muted); font-size: 18px; line-height: 1.55; }}
+    .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }}
+    .pill {{
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid color-mix(in oklch, var(--cyan) 28%, transparent);
+      border-radius: 999px;
+      padding: 0 16px;
+      background: oklch(14% 0.04 255 / .7);
+      color: var(--text);
+      font-weight: 850;
+    }}
+    .pill.good {{ border-color: color-mix(in oklch, var(--green) 36%, transparent); color: var(--green); }}
+    .status {{
+      aspect-ratio: 1;
+      border: 1px solid color-mix(in oklch, var(--red) 36%, transparent);
+      border-radius: 28px;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at 50% 24%, oklch(69% 0.2 15 / .24), transparent 64%),
+        oklch(13% 0.045 264 / .82);
+    }}
+    .code {{ font-size: clamp(56px, 10vw, 98px); font-weight: 950; letter-spacing: -.07em; color: var(--red); }}
+    .panel {{
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      border-top: 1px solid var(--line);
+      background: var(--line);
+    }}
+    .cell {{ background: oklch(15% 0.045 260); padding: 18px 22px; min-width: 0; }}
+    .cell span {{ display: block; color: var(--muted); font-size: 12px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }}
+    .cell strong {{ display: block; margin-top: 8px; overflow-wrap: anywhere; font-size: 15px; line-height: 1.4; }}
+    @media (max-width: 760px) {{
+      body {{ padding: 16px; }}
+      main {{ border-radius: 22px; }}
+      .hero {{ grid-template-columns: 1fr; }}
+      .status {{ aspect-ratio: auto; min-height: 150px; }}
+      .panel {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div>
+        <div class="brand">
+          <svg class="mark" viewBox="0 0 64 64" role="img" aria-label="KahrabaIQ logo">
+            <defs><linearGradient id="bolt" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse"><stop stop-color="oklch(78% .16 215)"></stop><stop offset="1" stop-color="oklch(72% .15 160)"></stop></linearGradient></defs>
+            <rect x="5" y="5" width="54" height="54" rx="17" fill="oklch(14% .055 264)" stroke="oklch(78% .16 215 / .42)" stroke-width="2"></rect>
+            <path d="M35.4 8.8 16.8 35.1h13.4l-3.5 20.1 20.5-28H33.9l1.5-18.4Z" fill="url(#bolt)"></path>
+            <path d="M22.5 39.7c4.9 5.3 13.5 5.7 18.9.8" fill="none" stroke="oklch(96% .009 250 / .82)" stroke-width="3" stroke-linecap="round"></path>
+          </svg>
+          <div><strong>KahrabaIQ</strong><span>Cloud kiosk access</span></div>
+        </div>
+        <p class="eyebrow">Protected dashboard</p>
+        <h1>{safe_title}</h1>
+        <p class="summary">{safe_summary} {safe_action}</p>
+        <div class="actions">
+          <span class="pill good">Use the Raspberry Pi kiosk display</span>
+          <span class="pill">Restart kahrabaiq-kiosk-browser if this is the Pi</span>
+        </div>
+      </div>
+      <aside class="status" aria-label="HTTP status"><div class="code">{status_code}</div></aside>
+    </section>
+    <section class="panel" aria-label="Diagnostics">
+      <div class="cell"><span>Reason</span><strong>{safe_detail}</strong></div>
+      <div class="cell"><span>Request</span><strong>{safe_path}</strong></div>
+      <div class="cell"><span>Seen IP</span><strong>{safe_ip}</strong></div>
+    </section>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(content=body, status_code=status_code, headers=exc.headers)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_response(request: Request, exc: HTTPException) -> HTMLResponse | JSONResponse:
+    if is_dashboard_request(request):
+        return dashboard_error_page(request, exc)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
 
 
 class DeviceCommandRequest(BaseModel):
@@ -1473,7 +1644,7 @@ def dashboard_access_enabled(pi: dict[str, Any]) -> bool:
     return value is True
 
 
-def require_dashboard_pi_access(request: Request) -> dict[str, Any]:
+def require_dashboard_ip_access(request: Request) -> dict[str, Any]:
     public_ip = client_public_ip(request)
     if not public_ip:
         raise HTTPException(status_code=403, detail="Dashboard access denied: missing client IP.")
@@ -1495,6 +1666,18 @@ def require_dashboard_pi_access(request: Request) -> dict[str, Any]:
     if max_age_ms > 0 and now_ms() - newest_seen > max_age_ms:
         raise HTTPException(status_code=403, detail="Dashboard access denied: Pi heartbeat is stale.")
     return {"public_ip": public_ip, "pi_id": newest["pi_id"], "home_id": str(newest.get("home_id") or ""), "pi": newest}
+
+
+def require_dashboard_pi_access(request: Request) -> dict[str, Any]:
+    access = require_dashboard_ip_access(request)
+    token = request.cookies.get(DASHBOARD_SESSION_COOKIE, "")
+    if not token:
+        raise HTTPException(status_code=403, detail="Dashboard access denied: missing Pi kiosk session.")
+    actor = kiosk_auth_context_from_token(token)
+    token_pi_id, _home_id = kiosk_pi_and_home(actor)
+    if token_pi_id != access["pi_id"]:
+        raise HTTPException(status_code=403, detail="Dashboard access denied: kiosk session does not match this Pi.")
+    return {**access, "kiosk_session_id": actor.actor_id}
 
 
 def command_status_payload(item: dict[str, Any]) -> dict[str, Any]:
@@ -1629,8 +1812,7 @@ def create_kiosk_token(pi: dict[str, Any]) -> dict[str, Any]:
     return {"token": token, "session_id": session_id, "expires_at_ms": expires_at * 1000}
 
 
-def require_kiosk_session(authorization: str | None = Header(default=None)) -> AuthContext:
-    token = bearer_token(authorization)
+def kiosk_auth_context_from_token(token: str) -> AuthContext:
     if not token:
         raise HTTPException(status_code=401, detail="Missing kiosk session token.")
     try:
@@ -1662,6 +1844,10 @@ def require_kiosk_session(authorization: str | None = Header(default=None)) -> A
         email=None,
         claims={"pi_id": pi_id, "home_id": home_id, **claims},
     )
+
+
+def require_kiosk_session(authorization: str | None = Header(default=None)) -> AuthContext:
+    return kiosk_auth_context_from_token(bearer_token(authorization))
 
 
 def kiosk_pi_and_home(actor: AuthContext) -> tuple[str, str]:
@@ -4379,6 +4565,24 @@ def dashboard_latest_state(access: dict[str, Any]) -> dict[str, Any]:
     return as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
 
 
+def request_is_https(request: Request) -> bool:
+    proto = str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    return proto == "https" or request.url.scheme == "https"
+
+
+def set_dashboard_session_cookie(response: Response, request: Request, token: str, expires_at_ms: int) -> None:
+    max_age = max(60, int((expires_at_ms - now_ms()) / 1000)) if expires_at_ms else KIOSK_SESSION_TTL_SECONDS
+    response.set_cookie(
+        key=DASHBOARD_SESSION_COOKIE,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        secure=request_is_https(request),
+        samesite="strict",
+        path="/",
+    )
+
+
 def dashboard_bootstrap_payload(request: Request) -> dict[str, Any]:
     access = require_dashboard_pi_access(request)
     pi = as_dict(access.get("pi"))
@@ -4422,8 +4626,35 @@ def cloud_dashboard(request: Request) -> FileResponse:
     return cloud_dashboard_root(request)
 
 
+@app.get("/dashboard/session/start")
+def cloud_dashboard_start_session(request: Request, token: str = Query(..., min_length=20)) -> RedirectResponse:
+    actor = kiosk_auth_context_from_token(token)
+    access = require_dashboard_ip_access(request)
+    token_pi_id, _home_id = kiosk_pi_and_home(actor)
+    if token_pi_id != access["pi_id"]:
+        raise HTTPException(status_code=403, detail="Dashboard access denied: kiosk session does not match this Pi.")
+    expires_at_ms = int(as_number((actor.claims or {}).get("exp"), 0) * 1000)
+    response = RedirectResponse(url="/dashboard", status_code=302)
+    set_dashboard_session_cookie(response, request, token, expires_at_ms)
+    return response
+
+
+@app.post("/api/dashboard/session/refresh")
+def dashboard_session_refresh(request: Request, response: Response) -> dict[str, Any]:
+    access = require_dashboard_pi_access(request)
+    session = create_kiosk_token({**as_dict(access.get("pi")), "pi_id": access["pi_id"], "home_id": access.get("home_id")})
+    set_dashboard_session_cookie(response, request, session["token"], int(session["expires_at_ms"]))
+    return {
+        "success": True,
+        "pi_id": access["pi_id"],
+        "home_id": access.get("home_id") or None,
+        "expires_at_ms": session["expires_at_ms"],
+    }
+
+
 @app.get("/dashboard/{asset_path:path}")
-def cloud_dashboard_asset(asset_path: str) -> FileResponse:
+def cloud_dashboard_asset(request: Request, asset_path: str) -> FileResponse:
+    require_dashboard_pi_access(request)
     path = (DASHBOARD_DIR / asset_path).resolve()
     if DASHBOARD_DIR.resolve() not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail="Dashboard asset not found.")

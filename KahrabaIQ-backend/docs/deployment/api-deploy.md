@@ -10,8 +10,9 @@ Core deployment checks:
 - Configure `KIOSK_SESSION_SECRET` with a long random secret.
 - Do not expose `PI_DEVICE_TOKEN` to browsers or mobile clients.
 - Point `api.kahrabaiq.com` and `dashboard.kahrabaiq.com` to the EC2 public IP.
-- Proxy both domains to the backend and pass `X-Real-IP` plus `X-Forwarded-For`; dashboard access is checked against Pi public IPs learned from heartbeat.
+- Proxy both domains to the backend and pass `X-Real-IP` plus `X-Forwarded-For`; dashboard access is checked against Pi public IPs learned from heartbeat plus a Pi-issued kiosk session cookie.
 - Set `DASHBOARD_ALLOWED_HEARTBEAT_AGE_SECONDS=900` and `DASHBOARD_ACCESS_DEFAULT_ENABLED=true` unless you want platform admins to enable each Pi manually.
+- Set `KIOSK_DASHBOARD_URL=https://dashboard.kahrabaiq.com` on the Pi. The Pi launcher starts at `/dashboard/session/start?token=...`, receives the HttpOnly dashboard cookie, then redirects to `/dashboard`.
 
 Nginx must preserve the real client IP:
 

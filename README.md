@@ -356,7 +356,13 @@ curl https://api.your-domain.com/api/health
 The Pi kiosk URL should normally be:
 
 ```env
-KIOSK_DASHBOARD_URL=https://api.your-domain.com/api/kiosk/dashboard
+KIOSK_DASHBOARD_URL=https://dashboard.your-domain.com
+```
+
+For the EC2-hosted production dashboard, use the dashboard domain instead:
+
+```env
+KIOSK_DASHBOARD_URL=https://dashboard.kahrabaiq.com
 ```
 
 ## Cloud Backend Local Run
@@ -435,7 +441,7 @@ MATTER_AC_SWITCH_ENTITY_ID=switch.ac_switch
 
 Leave `PI_LOCAL_BASE_URL` and `PI_SENSOR_BASE_URL` empty for normal installs. The Pi sends its current Wi-Fi IP-derived URLs to ESP32 during provisioning and to the backend on heartbeat. Use `HOME_ASSISTANT_URL=http://127.0.0.1:8123` when Home Assistant runs on the same Pi, including Docker host-network mode.
 
-The production dashboard is served by EC2 at `https://dashboard.kahrabaiq.com`. The backend learns each Pi public IP from heartbeat and only serves the dashboard when the request IP matches a fresh Pi record with dashboard access enabled. Unpaired Pis get a waiting-for-pairing screen; paired Pis get live sensor data with AWS IoT realtime updates and polling fallback.
+The production dashboard is served by EC2 at `https://dashboard.kahrabaiq.com`. The backend learns each Pi public IP from heartbeat and only serves the dashboard when the request IP matches a fresh Pi record with dashboard access enabled and the browser has a valid Pi-issued kiosk session cookie. The Pi launcher gets that cookie through `/dashboard/session/start`; laptops on the same Wi-Fi public IP are blocked unless they have that Pi kiosk session. Unpaired Pis get a waiting-for-pairing screen; paired Pis get live sensor data with AWS IoT realtime updates and polling fallback.
 
 Install flow on the Pi:
 
