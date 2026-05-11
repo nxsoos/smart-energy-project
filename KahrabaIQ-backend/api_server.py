@@ -896,6 +896,14 @@ def home_member_count(home_id: str, *, roles: set[str] | None = None) -> int:
     return count
 
 
+def home_invited_user_count(home_id: str) -> int:
+    return home_member_count(home_id, roles={"member", "viewer"})
+
+
+def remaining_home_invite_slots(home_id: str) -> int:
+    return max(0, HOME_MEMBER_LIMIT - home_invited_user_count(home_id))
+
+
 def hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
@@ -1919,8 +1927,11 @@ def create_home_invite(
     role = validate_role(request.role)
     if role == "home_admin":
         raise HTTPException(status_code=400, detail="Invite role cannot be home_admin.")
-    if home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
-        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
+    remaining_slots = remaining_home_invite_slots(home_id)
+    if remaining_slots <= 0:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} invited users.")
+    if request.max_uses > remaining_slots:
+        raise HTTPException(status_code=409, detail=f"This home only has {remaining_slots} invite slot{'s' if remaining_slots != 1 else ''} remaining.")
     timestamp_ms = now_ms()
     raw_token = secrets.token_urlsafe(24)
     invite_id = f"invite_{timestamp_ms}_{secrets.token_hex(3)}"
@@ -1946,6 +1957,9 @@ def create_home_invite(
         "invite_id": invite_id,
         "token": raw_token,
         "expires_at_ms": timestamp_ms + HOME_INVITE_TTL_MS,
+        "role": role,
+        "max_uses": request.max_uses,
+        "remaining_slots": remaining_slots - request.max_uses,
         "qr_payload": f"kahrabaiq://invite?invite_id={invite_id}&token={raw_token}",
     }
 
@@ -2037,8 +2051,8 @@ def claim_home_invite(
     if not secret_matches(request.token, str(invite.get("token_hash") or "")):
         raise HTTPException(status_code=401, detail="Invalid invite token.")
     home_id = str(invite.get("home_id") or "")
-    if home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
-        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
+    if home_invited_user_count(home_id) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} invited users.")
     existing = as_dict(safe_get(f"/homes/{home_id}/members/{actor.uid}", {}))
     if existing:
         return {"success": True, "home_id": home_id, "role": validate_role(str(existing.get("role", "viewer"))), "already_member": True}
@@ -5009,8 +5023,8 @@ def add_member(
     actor: AuthContext = Depends(require_home_permission("can_manage_users")),
 ) -> dict[str, Any]:
     role = validate_role(request.role)
-    if role == "member" and home_member_count(home_id, roles={"member"}) >= HOME_MEMBER_LIMIT:
-        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} members.")
+    if role in {"member", "viewer"} and home_invited_user_count(home_id) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} invited users.")
     email = request.email.strip().lower()
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email is required.")
@@ -5072,8 +5086,11 @@ def update_member_role(
     existing = as_dict(safe_get(f"/homes/{home_id}/members/{uid}", {}))
     if not existing:
         raise HTTPException(status_code=404, detail="Member does not exist.")
-    if validate_role(str(existing.get("role", "viewer"))) == "home_admin" and role != "home_admin" and admin_count(home_id) <= 1:
+    existing_role = validate_role(str(existing.get("role", "viewer")))
+    if existing_role == "home_admin" and role != "home_admin" and admin_count(home_id) <= 1:
         raise HTTPException(status_code=409, detail="Cannot remove the last admin from the home.")
+    if role in {"member", "viewer"} and existing_role not in {"member", "viewer"} and home_invited_user_count(home_id) >= HOME_MEMBER_LIMIT:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} invited users.")
 
     timestamp_ms = now_ms()
     permissions = get_permissions_for_role(role)

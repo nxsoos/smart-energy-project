@@ -13,16 +13,22 @@ wlan1 = TL-WN725N USB Wi-Fi, temporary setup only
 2. If `/var/lib/kahrabaiq/provisioned.json` does not exist, the Pi starts `KahrabaIQ-Pi-Setup` on `wlan1`.
 3. Connect a phone or laptop to `KahrabaIQ-Pi-Setup`.
 4. Open the setup gateway, commonly `http://10.42.0.1:8080`, or the gateway shown by the device.
-5. Enter the home Wi-Fi SSID/password and device identifiers.
-6. The Pi connects `wlan0` to the home Wi-Fi.
-7. The Pi stops the setup AP, connects `wlan1` to `KahrabaIQ-ESP32-Setup`, detects the `wlan1` gateway, and posts to `http://<detected-gateway>/provision`.
-8. The ESP32 saves the same home Wi-Fi credentials, reboots, and joins the home Wi-Fi.
-9. The Pi turns `wlan1` off.
-10. The Pi writes `/var/lib/kahrabaiq/provisioned.json` and the normal services/dashboard start.
+5. Enter the home Wi-Fi SSID/password and optional ESP32 device values.
+6. The Pi connects `wlan0` to the home Wi-Fi and reaches the backend.
+7. The Pi displays a QR pairing code on the locked setup screen.
+8. Scan the QR with the mobile app. The scanning user becomes `home_admin`.
+9. The Pi waits until the backend returns the real `home_id`.
+10. The setup screen shows `Home paired successfully. Waiting for sensors to connect to the Pi...`.
+11. The Pi stops the setup AP, connects `wlan1` to `KahrabaIQ-ESP32-Setup`, detects the `wlan1` gateway, and posts to `http://<detected-gateway>/provision` with the real `home_id`.
+12. The ESP32 saves the same home Wi-Fi credentials, reboots, and joins the home Wi-Fi.
+13. The Pi turns `wlan1` off.
+14. The Pi writes `/var/lib/kahrabaiq/provisioned.json` and the normal services/dashboard start.
 
 The dashboard does not start until provisioning succeeds.
 
 The ESP32 setup server IP is not hardcoded in the Pi flow. `ESP32_SETUP_URL` should normally stay empty; the Pi detects the setup gateway from `wlan1`. If the gateway cannot be detected, provisioning fails instead of falling back to a fixed IP.
+
+The ESP32 is not provisioned until QR pairing returns a real `home_id`. This ensures sensor payloads are linked to the correct backend home.
 
 ## Normal Boot
 

@@ -49,14 +49,18 @@ First boot flow:
 
 1. `kahrabaiq-provisioning.service` starts before the dashboard and checks `/var/lib/kahrabaiq/provisioned.json`.
 2. If the marker does not exist, the Pi starts `KahrabaIQ-Pi-Setup` on `wlan1`.
-3. The installer connects a phone/laptop to the Pi setup hotspot and opens the setup page on port `8080`.
-4. The setup page collects the home Wi-Fi SSID/password, home ID, Pi ID, ESP32 device ID, and ESP32 device key.
-5. The Pi connects `wlan0` to the home Wi-Fi.
-6. The Pi uses `wlan1` to connect to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
-7. The Pi detects the ESP32 setup gateway from `wlan1` and posts the same home Wi-Fi credentials and Pi sensor URL to `http://<detected-gateway>/provision`.
-8. The ESP32 saves the config, reboots, joins the home Wi-Fi, and starts posting to the Pi sensor receiver.
-9. The Pi disconnects and turns off `wlan1`.
-10. The Pi writes `/var/lib/kahrabaiq/provisioned.json` and only then allows normal services and the locked kiosk dashboard to start.
+3. `kahrabaiq-setup-screen.service` opens a locked setup screen on the Pi display with hotspot instructions, QR pairing, and sensor setup progress.
+4. The installer connects a phone/laptop to the Pi setup hotspot and opens the setup page on port `8080`.
+5. The setup page collects the home Wi-Fi SSID/password and optional ESP32 device values. It does not ask for `home_id`.
+6. The Pi connects `wlan0` to the home Wi-Fi and verifies backend access.
+7. The Pi requests a short-lived QR pairing token from the backend and displays it on the setup screen.
+8. The user scans the QR code in the KahrabaIQ mobile app. The scanning user becomes `home_admin`.
+9. After backend pairing returns the real `home_id`, the setup screen shows `Home paired successfully. Waiting for sensors to connect to the Pi...`.
+10. The Pi uses `wlan1` to connect to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
+11. The Pi detects the ESP32 setup gateway from `wlan1` and posts the same home Wi-Fi credentials, real `home_id`, Pi sensor URL, Pi ID, device ID, and device key to `http://<detected-gateway>/provision`.
+12. The ESP32 saves the config, reboots, joins the home Wi-Fi, and starts posting to the Pi sensor receiver.
+13. The Pi disconnects and turns off `wlan1`.
+14. The Pi writes `/var/lib/kahrabaiq/provisioned.json` and only then allows normal services and the locked kiosk dashboard to start.
 
 Normal boot flow:
 
@@ -142,6 +146,7 @@ smart-energy-project/
       setup-home-stack.sh            Home Assistant/Matter container setup
     systemd/
       kahrabaiq-provisioning.service
+      kahrabaiq-setup-screen.service
       kahrabaiq-agent.service
       kahrabaiq-sensor-receiver.service
       kahrabaiq-summary-sync.service
@@ -481,7 +486,8 @@ ESP32 documentation:
 - The Pi obtains short-lived kiosk tokens from the AWS API.
 - The kiosk dashboard can display a pairing QR payload.
 - The first phone user who scans the Pi QR becomes `home_admin`.
-- The `home_admin` can invite members according to `HOME_MEMBER_LIMIT`.
+- The `home_admin` mobile panel can generate invite QR codes for `viewer` or `member` access and remove existing viewers/members.
+- `HOME_MEMBER_LIMIT` caps the total non-admin users per home: `member + viewer <= 3` by default.
 
 ## Verification
 
