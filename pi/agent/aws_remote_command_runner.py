@@ -25,7 +25,7 @@ AWS_DYNAMODB_SUMMARIES_TABLE = os.environ.get(
     "AWS_DYNAMODB_SUMMARIES_TABLE",
     "SmartEnergySummaries",
 )
-REMOTE_COMMAND_POLL_SECONDS = float(os.environ.get("REMOTE_COMMAND_POLL_SECONDS", "5"))
+REMOTE_COMMAND_POLL_SECONDS = float(os.environ.get("REMOTE_COMMAND_POLL_SECONDS", "2"))
 REMOTE_COMMAND_QUERY_LIMIT = int(os.environ.get("REMOTE_COMMAND_QUERY_LIMIT", "25"))
 REMOTE_COMMAND_SOURCE = os.environ.get("REMOTE_COMMAND_SOURCE", "dynamodb").strip().lower()
 KAHRABAIQ_API_URL = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
@@ -42,6 +42,7 @@ ALLOWED_DEVICES = {
     "socket_breaker",
     "matter_socket_switch",
     "matter_ac_switch",
+    "light_switch",
 }
 ALLOWED_COMMANDS = {"turn_on", "turn_off"}
 STATUS_PENDING = "PENDING"
@@ -350,12 +351,18 @@ def process_command(command: dict[str, Any]) -> None:
     device_id = DEVICE_ALIASES.get(raw_device_id, raw_device_id)
     action = str(command.get("command") or command.get("action") or "").strip().lower()
     command_id = str(command.get("command_id") or command.get("commandId") or "")
+    requested_at_ms = command.get("requested_at_ms") or command.get("requestedAtMs")
+    try:
+        queue_age_ms = now_ms() - int(requested_at_ms) if requested_at_ms is not None else None
+    except (TypeError, ValueError):
+        queue_age_ms = None
     log(
         "Received command "
         f"id={command_id or '<missing>'} device={raw_device_id or '<missing>'} "
         f"canonical_device={device_id or '<missing>'} "
         f"action={action or '<missing>'} source={command.get('source')} "
-        f"requested_by={command.get('requested_by') or command.get('requestedBy')}"
+        f"requested_by={command.get('requested_by') or command.get('requestedBy')} "
+        f"queue_age_ms={queue_age_ms if queue_age_ms is not None else '<unknown>'}"
     )
 
     if raw_device_id not in ALLOWED_DEVICES or action not in ALLOWED_COMMANDS:
@@ -365,6 +372,7 @@ def process_command(command: dict[str, Any]) -> None:
 
     processing = mark_processing(command)
     executing = mark_executing(processing)
+    execute_started = time.time()
     log(f"Executing {command_id}: {device_id} {action}")
     try:
         result = execute_local_command(
@@ -376,17 +384,21 @@ def process_command(command: dict[str, Any]) -> None:
             alert_id=executing.get("alert_id") or executing.get("alertId"),
         )
         mark_done(executing, result)
-        log(f"Completed {command_id}: {result.get('status')} {result.get('message')}")
+        elapsed_ms = round((time.time() - execute_started) * 1000)
+        log(f"Completed {command_id}: {result.get('status')} elapsed_ms={elapsed_ms} {result.get('message')}")
     except Exception as error:
         mark_failed(executing, error)
         log(f"Failed {command_id}: {error}")
 
 
 def run_once() -> int:
-    sync_home_assistant_device_states()
     commands = query_pending_commands()
+    if not commands:
+        sync_home_assistant_device_states()
+        return 0
     for command in commands:
         process_command(command)
+    sync_home_assistant_device_states(force=True)
     return len(commands)
 
 

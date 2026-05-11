@@ -144,11 +144,11 @@ Maintenance flow:
 6. `wlan1` becomes the temporary setup/provisioning adapter again.
 7. After successful setup, `wlan1` turns off and the dashboard can be locked again.
 
-## Home Assistant Breakers, Matter
+## Home Assistant Breakers, Matter, Light
 
-The Pi hosts Home Assistant and the Matter server locally. KahrabaIQ breaker and Matter switch commands are queued by AWS and executed by `kahrabaiq-command-runner` on the Pi through the Home Assistant REST API.
+The Pi hosts Home Assistant and the Matter server locally. KahrabaIQ breaker, switch, and light commands are queued by AWS and executed by `kahrabaiq-command-runner` on the Pi through the Home Assistant REST API.
 
-Required breaker values:
+Required Home Assistant values:
 
 ```env
 USE_HOME_ASSISTANT_FOR_BREAKERS=true
@@ -157,6 +157,12 @@ AC_BREAKER_ENTITY_ID=switch.ac_breaker_switch
 SOCKET_BREAKER_ENTITY_ID=switch.socket_breaker_switch
 MATTER_AC_SWITCH_ENTITY_ID=switch.ac_breaker_switch
 MATTER_SOCKET_SWITCH_ENTITY_ID=switch.socket_breaker_switch
+LIGHT_SWITCH_ENTITY_ID=switch.light_switch_switch_1
+REMOTE_COMMAND_POLL_SECONDS=2
+LOCAL_COMMAND_VERIFY_DELAY_SECONDS=0.5
+LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS=2
+PI_LIVE_SYNC_INTERVAL_SECONDS=5
+AWS_IOT_LIVE_INTERVAL_SECONDS=3
 ```
 
 See `pi/docs/home-assistant-matter.md`.

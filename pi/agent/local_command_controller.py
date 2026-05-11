@@ -33,8 +33,8 @@ TUYA_ACCESS_ID = os.environ.get("TUYA_ACCESS_ID", "")
 TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "")
 TUYA_API_ENDPOINT = os.environ.get("TUYA_API_ENDPOINT", "https://openapi.tuyaeu.com")
 TUYA_VERIFY_ATTEMPTS = int(os.environ.get("TUYA_VERIFY_ATTEMPTS", "7"))
-LOCAL_COMMAND_VERIFY_DELAY_SECONDS = float(os.environ.get("LOCAL_COMMAND_VERIFY_DELAY_SECONDS", "1.5"))
-LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS = float(os.environ.get("LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS", "5"))
+LOCAL_COMMAND_VERIFY_DELAY_SECONDS = float(os.environ.get("LOCAL_COMMAND_VERIFY_DELAY_SECONDS", "0.5"))
+LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS = float(os.environ.get("LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS", "2"))
 USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKERS", "true").strip().lower() in {
     "1",
     "true",
@@ -73,18 +73,21 @@ HA_ENTITY_ENV = {
     "breaker_02": "SOCKET_BREAKER_ENTITY_ID",
     "matter_socket_switch": "MATTER_SOCKET_SWITCH_ENTITY_ID",
     "matter_ac_switch": "MATTER_AC_SWITCH_ENTITY_ID",
+    "light_switch": "LIGHT_SWITCH_ENTITY_ID",
 }
 HA_ENTITY_ENV_FALLBACKS = {
     "breaker_01": ("AC_BREAKER_ENTITY_ID", "BREAKER_01_ENTITY_ID", "MATTER_AC_SWITCH_ENTITY_ID"),
     "breaker_02": ("SOCKET_BREAKER_ENTITY_ID", "BREAKER_02_ENTITY_ID", "MATTER_SOCKET_SWITCH_ENTITY_ID"),
     "matter_socket_switch": ("MATTER_SOCKET_SWITCH_ENTITY_ID", "SOCKET_BREAKER_ENTITY_ID"),
     "matter_ac_switch": ("MATTER_AC_SWITCH_ENTITY_ID", "AC_BREAKER_ENTITY_ID"),
+    "light_switch": ("LIGHT_SWITCH_ENTITY_ID",),
 }
 HA_DEVICE_NAMES = {
     "breaker_01": "AC Breaker",
     "breaker_02": "Socket Breaker",
     "matter_socket_switch": "Socket Switch",
     "matter_ac_switch": "AC Switch",
+    "light_switch": "Light Switch",
 }
 HA_BREAKER_SENSOR_ENV = {
     "breaker_01": {
@@ -605,6 +608,92 @@ def log_ha_config(device_id: str, entity_id: str) -> None:
     )
 
 
+def sync_home_assistant_device_state(device_id: str) -> None:
+    device_id = canonical_device_id(device_id)
+    env_key = HA_ENTITY_ENV.get(device_id)
+    if not env_key:
+        return
+    if device_id.startswith("breaker_") and not USE_HOME_ASSISTANT_FOR_BREAKERS:
+        return
+
+    timestamp_ms = now_ms()
+    timestamp_iso = ms_to_iso(timestamp_ms)
+    current_device = as_dict(local_ref(f"devices/{device_id}").get())
+    entity_id = ha_entity_for_device(device_id, current_device)
+    is_breaker = device_id.startswith("breaker_")
+    is_light = device_id == "light_switch"
+    metering = read_ha_breaker_metering(device_id) if is_breaker else {}
+    base_payload = {
+        "type": "smart_breaker" if is_breaker else "light_switch" if is_light else "matter_switch",
+        "name": current_device.get("name") or HA_DEVICE_NAMES.get(device_id, device_id),
+        "control_method": "home_assistant",
+        "ha_entity_id": entity_id or os.environ.get(env_key, "").strip(),
+        "cloud_online": False,
+        "energy_supported": is_breaker,
+        "controllable": True,
+        "metering": {**as_dict(current_device.get("metering")), **metering},
+        **metering,
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": timestamp_iso,
+    }
+
+    if not base_payload["ha_entity_id"]:
+        local_ref(f"devices/{device_id}").update(
+            {
+                **base_payload,
+                "online": False,
+                "local_online": False,
+                "state": "unknown",
+                "display_state": "unknown",
+                "last_command_message": f"{env_key} is not configured.",
+                "last_command": {
+                    "status": "failed",
+                    "user_message": f"{env_key} is not configured.",
+                    "error_code": "HA_ENTITY_NOT_FOUND",
+                },
+            }
+        )
+        return
+
+    try:
+        state = get_entity_state(str(base_payload["ha_entity_id"]))
+        switch_on = state == "on"
+        local_ref(f"devices/{device_id}").update(
+            {
+                **base_payload,
+                "online": True,
+                "local_online": True,
+                "state": state,
+                "display_state": state,
+                "status": {
+                    **as_dict(current_device.get("status")),
+                    "online": True,
+                    "switch": switch_on,
+                    "relay_status": state,
+                    "lastSeenMs": timestamp_ms,
+                    "last_seen_ms": timestamp_ms,
+                    "last_seen_iso": timestamp_iso,
+                },
+            }
+        )
+    except HomeAssistantError as error:
+        local_ref(f"devices/{device_id}").update(
+            {
+                **base_payload,
+                "online": False,
+                "local_online": False,
+                "state": "unknown",
+                "display_state": "unknown",
+                "last_command_message": error.user_message,
+                "last_command": {
+                    "status": "failed",
+                    "user_message": error.user_message,
+                    "error_code": error.code,
+                },
+            }
+        )
+
+
 def sync_home_assistant_device_states(force: bool = False) -> None:
     global _LAST_HA_STATE_SYNC_MS
 
@@ -616,84 +705,8 @@ def sync_home_assistant_device_states(force: bool = False) -> None:
         return
     _LAST_HA_STATE_SYNC_MS = current_ms
 
-    for device_id, env_key in HA_ENTITY_ENV.items():
-        if device_id.startswith("breaker_") and not USE_HOME_ASSISTANT_FOR_BREAKERS:
-            continue
-        timestamp_ms = now_ms()
-        timestamp_iso = ms_to_iso(timestamp_ms)
-        current_device = as_dict(local_ref(f"devices/{device_id}").get())
-        entity_id = ha_entity_for_device(device_id, current_device)
-        is_breaker = device_id.startswith("breaker_")
-        metering = read_ha_breaker_metering(device_id) if is_breaker else {}
-        base_payload = {
-            "type": "smart_breaker" if is_breaker else "matter_switch",
-            "name": current_device.get("name") or HA_DEVICE_NAMES.get(device_id, device_id),
-            "control_method": "home_assistant",
-            "ha_entity_id": entity_id or os.environ.get(env_key, "").strip(),
-            "cloud_online": False,
-            "energy_supported": is_breaker,
-            "controllable": True,
-            "metering": {**as_dict(current_device.get("metering")), **metering},
-            **metering,
-            "updated_at_ms": timestamp_ms,
-            "updated_at_iso": timestamp_iso,
-        }
-
-        if not base_payload["ha_entity_id"]:
-            local_ref(f"devices/{device_id}").update(
-                {
-                    **base_payload,
-                    "online": False,
-                    "local_online": False,
-                    "state": "unknown",
-                    "display_state": "unknown",
-                    "last_command_message": f"{env_key} is not configured.",
-                    "last_command": {
-                        "status": "failed",
-                        "user_message": f"{env_key} is not configured.",
-                        "error_code": "HA_ENTITY_NOT_FOUND",
-                    },
-                }
-            )
-            continue
-
-        try:
-            state = get_entity_state(str(base_payload["ha_entity_id"]))
-            switch_on = state == "on"
-            local_ref(f"devices/{device_id}").update(
-                {
-                    **base_payload,
-                    "online": True,
-                    "local_online": True,
-                    "state": state,
-                    "display_state": state,
-                    "status": {
-                        **as_dict(current_device.get("status")),
-                        "online": True,
-                        "switch": switch_on,
-                        "relay_status": state,
-                        "lastSeenMs": timestamp_ms,
-                        "last_seen_ms": timestamp_ms,
-                        "last_seen_iso": timestamp_iso,
-                    },
-                }
-            )
-        except HomeAssistantError as error:
-            local_ref(f"devices/{device_id}").update(
-                {
-                    **base_payload,
-                    "online": False,
-                    "local_online": False,
-                    "state": "unknown",
-                    "display_state": "unknown",
-                    "last_command_message": error.user_message,
-                    "last_command": {
-                        "status": "failed",
-                        "user_message": error.user_message,
-                        "error_code": error.code,
-                    },
-                }
-            )
+    for device_id in HA_ENTITY_ENV:
+        sync_home_assistant_device_state(device_id)
 
 
 def execute_ha_command(device_id: str, action: str, command: dict[str, Any]) -> tuple[bool, bool]:
@@ -751,8 +764,12 @@ def execute_local_command(
     alert_id: str | None = None,
 ) -> dict[str, Any]:
     device_id = canonical_device_id(device_id)
-    if device_id.startswith("matter_") or (device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS):
-        sync_home_assistant_device_states(force=True)
+    if (
+        device_id.startswith("matter_")
+        or device_id == "light_switch"
+        or (device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS)
+    ):
+        sync_home_assistant_device_state(device_id)
     command = create_pending_command(
         device_id,
         action,
