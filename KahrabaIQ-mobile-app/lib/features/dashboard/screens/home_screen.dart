@@ -44,6 +44,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   static const String _dashboardCachePrefix = 'kahrabaiq.dashboard.cache.';
+  static const Duration _optimisticCommandHold = Duration(seconds: 12);
 
   final KahrabaIqApiService _api = KahrabaIqApiService();
   String? _homeId;
@@ -60,6 +61,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _scenarioAiBusy = false;
   final Set<String> _localPendingCommands = {};
   final Map<String, String> _localCommandErrors = {};
+  final Map<String, bool> _localOptimisticDeviceStates = {};
+  final Map<String, DateTime> _localOptimisticDeviceStartedAt = {};
   final Set<String> _dismissedAlertIds = {};
   final Set<String> _notifiedSmokeAlertIds = {};
   bool _smokeDialogVisible = false;
@@ -244,10 +247,10 @@ class _HomeScreenState extends State<HomeScreen> {
   DashboardData _mergeLiveDashboardData(DashboardData incoming) {
     final previous = _dashboard;
     if (previous == null) {
-      return incoming;
+      return _applyOptimisticCommandState(incoming);
     }
     if (previous.scenarioId != incoming.scenarioId) {
-      return incoming;
+      return _applyOptimisticCommandState(incoming);
     }
 
     final hasIntelligence =
@@ -271,7 +274,7 @@ class _HomeScreenState extends State<HomeScreen> {
         'incomingOnline=${_onlineControlDeviceCount(incoming.devices)}',
       );
     } else if (hasIntelligence) {
-      return incoming;
+      return _applyOptimisticCommandState(incoming);
     }
 
     final operationalReading = degradedOperationalSnapshot
@@ -305,7 +308,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    return DashboardData(
+    return _applyOptimisticCommandState(DashboardData(
       reading: reading,
       sensors: degradedOperationalSnapshot
           ? previous.sensors
@@ -351,7 +354,56 @@ class _HomeScreenState extends State<HomeScreen> {
       scenarioName: previous.scenarioName,
       scenarioDescription: previous.scenarioDescription,
       deviceControlEnabled: incoming.deviceControlEnabled,
-    );
+    ));
+  }
+
+  DashboardData _applyOptimisticCommandState(DashboardData dashboard) {
+    if (_localOptimisticDeviceStates.isEmpty) {
+      return dashboard;
+    }
+
+    final now = DateTime.now();
+    var changed = false;
+    final devices = dashboard.devices.map((device) {
+      final targetIsOn = _localOptimisticDeviceStates[device.id];
+      final startedAt = _localOptimisticDeviceStartedAt[device.id];
+      if (targetIsOn == null || startedAt == null) {
+        return device;
+      }
+
+      final expired = now.difference(startedAt) > _optimisticCommandHold;
+      final message = (device.lastCommandMessage ?? '').toLowerCase();
+      final failed = message.contains('failed') ||
+          message.contains('could not') ||
+          message.contains('unavailable');
+      final confirmed = device.isOn == targetIsOn && !device.commandInProgress;
+
+      if (confirmed || failed || expired) {
+        _localOptimisticDeviceStates.remove(device.id);
+        _localOptimisticDeviceStartedAt.remove(device.id);
+        return device;
+      }
+
+      if (device.isOn != targetIsOn || !device.commandInProgress) {
+        changed = true;
+        debugPrint(
+          '[KahrabaIQ COMMAND MERGE] protected optimistic state '
+          'device=${device.id} target=${targetIsOn ? 'on' : 'off'} '
+          'incoming=${device.isOn ? 'on' : 'off'}',
+        );
+      }
+
+      return device.copyWith(
+        isOn: targetIsOn,
+        commandInProgress: true,
+        pendingTargetState: targetIsOn ? 'on' : 'off',
+        statusLabel: device.online && !device.stale
+            ? 'online'
+            : device.statusLabel,
+      );
+    }).toList();
+
+    return changed ? dashboard.copyWith(devices: devices) : dashboard;
   }
 
   bool _isOperationalDowngrade(DashboardData previous, DashboardData incoming) {
@@ -765,6 +817,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     setState(() {
       _localPendingCommands.add(device.id);
+      _localOptimisticDeviceStates[device.id] = value;
+      _localOptimisticDeviceStartedAt[device.id] = DateTime.now();
       _localCommandErrors.remove(device.id);
       _dashboard = _dashboardWithOptimisticDeviceState(
         device.id,
@@ -789,6 +843,8 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!result.success) {
         setState(() {
           _localCommandErrors[device.id] = result.message;
+          _localOptimisticDeviceStates.remove(device.id);
+          _localOptimisticDeviceStartedAt.remove(device.id);
           _dashboard = _dashboardWithOptimisticDeviceState(
             device.id,
             device.isOn,
@@ -816,6 +872,8 @@ class _HomeScreenState extends State<HomeScreen> {
           'Exception: ',
           '',
         );
+        _localOptimisticDeviceStates.remove(device.id);
+        _localOptimisticDeviceStartedAt.remove(device.id);
         _dashboard = _dashboardWithOptimisticDeviceState(
           device.id,
           device.isOn,
@@ -895,6 +953,8 @@ class _HomeScreenState extends State<HomeScreen> {
           ? 'Simulation Mode is active. Generating AI insight from EC2 using simulated scenario data...'
           : 'Simulation Mode is active. Using local demo AI fallback. No real devices will be controlled.';
       _localPendingCommands.clear();
+      _localOptimisticDeviceStates.clear();
+      _localOptimisticDeviceStartedAt.clear();
       _localCommandErrors.clear();
       _dismissedAlertIds.clear();
       _notifiedSmokeAlertIds.clear();
