@@ -485,6 +485,7 @@ def dashboard_error_page(request: Request, exc: HTTPException) -> HTMLResponse:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{status_code} | KahrabaIQ Dashboard</title>
+  <link rel="icon" href="/dashboard/assets/favicon.ico" sizes="any">
   <style>
     :root {{
       color-scheme: dark;
@@ -529,7 +530,7 @@ def dashboard_error_page(request: Request, exc: HTTPException) -> HTMLResponse:
       align-items: center;
     }}
     .brand {{ display: flex; align-items: center; gap: 16px; margin-bottom: 34px; }}
-    .mark {{ width: 58px; height: 58px; flex: 0 0 auto; filter: drop-shadow(0 0 22px oklch(78% 0.16 215 / .32)); }}
+    .mark {{ width: 112px; height: auto; flex: 0 0 auto; filter: drop-shadow(0 0 22px oklch(78% 0.16 215 / .32)); }}
     .brand strong {{ display: block; font-size: 22px; letter-spacing: .01em; }}
     .brand span {{ color: var(--muted); font-size: 14px; font-weight: 750; }}
     .eyebrow {{ margin: 0 0 14px; color: var(--cyan); font-size: 13px; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }}
@@ -583,12 +584,7 @@ def dashboard_error_page(request: Request, exc: HTTPException) -> HTMLResponse:
     <section class="hero">
       <div>
         <div class="brand">
-          <svg class="mark" viewBox="0 0 64 64" role="img" aria-label="KahrabaIQ logo">
-            <defs><linearGradient id="bolt" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse"><stop stop-color="oklch(78% .16 215)"></stop><stop offset="1" stop-color="oklch(72% .15 160)"></stop></linearGradient></defs>
-            <rect x="5" y="5" width="54" height="54" rx="17" fill="oklch(14% .055 264)" stroke="oklch(78% .16 215 / .42)" stroke-width="2"></rect>
-            <path d="M35.4 8.8 16.8 35.1h13.4l-3.5 20.1 20.5-28H33.9l1.5-18.4Z" fill="url(#bolt)"></path>
-            <path d="M22.5 39.7c4.9 5.3 13.5 5.7 18.9.8" fill="none" stroke="oklch(96% .009 250 / .82)" stroke-width="3" stroke-linecap="round"></path>
-          </svg>
+          <img class="mark" src="/dashboard/assets/kahrabaiq-brand-identity.png" alt="KahrabaIQ logo">
           <div><strong>KahrabaIQ</strong><span>Cloud kiosk access</span></div>
         </div>
         <p class="eyebrow">Protected dashboard</p>
@@ -4654,7 +4650,8 @@ def dashboard_session_refresh(request: Request, response: Response) -> dict[str,
 
 @app.get("/dashboard/{asset_path:path}")
 def cloud_dashboard_asset(request: Request, asset_path: str) -> FileResponse:
-    require_dashboard_pi_access(request)
+    if not asset_path.startswith("assets/"):
+        require_dashboard_pi_access(request)
     path = (DASHBOARD_DIR / asset_path).resolve()
     if DASHBOARD_DIR.resolve() not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail="Dashboard asset not found.")
