@@ -157,6 +157,12 @@ Maintenance flow:
 6. `wlan1` becomes the temporary setup/provisioning adapter again.
 7. After successful setup, `wlan1` turns off and the dashboard can be locked again.
 
+To force the Pi setup hotspot from SSH, run:
+
+```bash
+sudo /opt/kahrabaiq/pi/scripts/force-pi-setup-hotspot.sh
+```
+
 ## Home Assistant Breakers, Matter, Light
 
 The Pi hosts Home Assistant and the Matter server locally. KahrabaIQ breaker, switch, and light commands are queued by AWS and executed by `kahrabaiq-command-runner` on the Pi through the Home Assistant REST API.

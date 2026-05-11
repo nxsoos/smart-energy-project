@@ -10,6 +10,7 @@ SERVICE_DIR="/etc/systemd/system"
 
 sudo install -d -m 0755 "$PI_ENV_DIR" "$STATE_DIR"
 sudo install -d -m 0700 "$PI_CERT_DIR"
+chmod +x "$REPO_DIR/pi/scripts/force-pi-setup-hotspot.sh" "$REPO_DIR/pi/scripts/harden-kiosk-x11.sh" "$REPO_DIR/pi/scripts/launch-kiosk.sh" || true
 if [ ! -f "$PI_ENV_DIR/pi.env" ]; then
   sudo install -m 0600 "$REPO_DIR/pi/.env.sample" "$PI_ENV_DIR/pi.env"
   printf 'Created %s. Edit it with real HOME_ID, PI_ID, PI_DEVICE_TOKEN, API URL, and ESP32 key.\n' "$PI_ENV_DIR/pi.env"
