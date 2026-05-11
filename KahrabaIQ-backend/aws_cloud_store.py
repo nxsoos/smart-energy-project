@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from timestamp_utils import TIMEZONE, ms_to_iso, now_ms
 
@@ -148,6 +149,16 @@ def summary_prefix(period: str) -> str:
     return f"SUMMARY#{normalized}#"
 
 
+def summary_range_key(period: str, timestamp_ms: int) -> str:
+    normalized = period.strip().upper()
+    dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=ZoneInfo(TIMEZONE))
+    if normalized == "HOURLY":
+        return f"SUMMARY#HOURLY#{dt.strftime('%Y-%m-%dT%H')}"
+    if normalized == "DAILY":
+        return f"SUMMARY#DAILY#{dt.strftime('%Y-%m-%d')}"
+    raise ValueError("period must be hourly or daily")
+
+
 def _summary_bucket(period: str, item: dict[str, Any]) -> int:
     return int(
         item.get("startAtMs")
@@ -179,6 +190,21 @@ def query_summaries_between(
     end_at_ms: int | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
+    if start_at_ms is not None and end_at_ms is not None:
+        response = _table().query(
+            KeyConditionExpression="PK = :pk AND SK BETWEEN :start_sk AND :end_sk",
+            ExpressionAttributeValues={
+                ":pk": home_pk(home_id),
+                ":start_sk": summary_range_key(period, int(start_at_ms)),
+                ":end_sk": summary_range_key(period, int(end_at_ms)),
+            },
+            ScanIndexForward=False,
+            Limit=max(1, min(int(limit), 744)),
+        )
+        items = [_from_dynamodb(item) for item in response.get("Items", [])]
+        items.sort(key=lambda item: _summary_bucket(period, item), reverse=True)
+        return items
+
     items = query_summaries(home_id, period, limit=limit)
     filtered = []
     for item in items:

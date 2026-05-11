@@ -205,8 +205,25 @@ class _HomeScreenState extends State<HomeScreen> {
       return incoming;
     }
 
+    final reading = !incoming.reading.monthDataAvailable &&
+            previous.reading.monthDataAvailable
+        ? EnergyReading(
+            timestamp: incoming.reading.timestamp,
+            voltage: incoming.reading.voltage,
+            current: incoming.reading.current,
+            power: incoming.reading.power,
+            energyToday: incoming.reading.energyToday,
+            energyMonth: previous.reading.energyMonth,
+            energyTotal: incoming.reading.energyTotal,
+            costToday: incoming.reading.costToday,
+            costMonth: previous.reading.costMonth,
+            monthDataAvailable: true,
+            monthSource: previous.reading.monthSource,
+          )
+        : incoming.reading;
+
     return DashboardData(
-      reading: incoming.reading,
+      reading: reading,
       sensors: incoming.sensors,
       devices: incoming.devices,
       alerts: incoming.alerts,
@@ -608,6 +625,7 @@ class _HomeScreenState extends State<HomeScreen> {
         homeId: _homeId ?? NetworkConfig.defaultHomeId,
         scenarioId: _selectedDemoScenario?.id,
         scenarioName: _selectedDemoScenario?.name,
+        dashboard: _dashboard,
       ),
     ),
   );

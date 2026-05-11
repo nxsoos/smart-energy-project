@@ -18,12 +18,14 @@ class AiChatbotScreen extends StatefulWidget {
     this.homeName = 'Home 1',
     this.scenarioId,
     this.scenarioName,
+    this.dashboard,
   });
 
   final String homeId;
   final String homeName;
   final String? scenarioId;
   final String? scenarioName;
+  final DashboardData? dashboard;
 
   @override
   State<AiChatbotScreen> createState() => _AiChatbotScreenState();
@@ -361,6 +363,7 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
         mode: _chatMode,
         scenarioId: widget.scenarioId,
         scenarioName: widget.scenarioName,
+        context: _chatContext(),
       );
       if (!mounted) {
         return;
@@ -401,6 +404,101 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
         curve: Curves.easeOut,
       );
     });
+  }
+
+  Map<String, dynamic>? _chatContext() {
+    final dashboard = widget.dashboard;
+    if (dashboard == null) {
+      return null;
+    }
+    final sensorAge = DateTime.now().difference(dashboard.sensors.timestamp);
+    final sensorStale = !dashboard.sensors.online ||
+        dashboard.sensors.timestamp.year < 2024 ||
+        sensorAge.inSeconds > 45;
+    return {
+      'mode': _chatMode,
+      'simulation': _isDemo,
+      'scenario_id': widget.scenarioId,
+      'scenario_name': widget.scenarioName,
+      'energy': {
+        'current_power_w': dashboard.reading.power,
+        'energy_today_kwh': dashboard.reading.energyToday,
+        'cost_today_bhd': dashboard.reading.costToday,
+        'month_kwh': dashboard.reading.energyMonth,
+        'month_cost_bhd': dashboard.reading.costMonth,
+        'month_data_available': dashboard.reading.monthDataAvailable,
+        'month_source': dashboard.reading.monthSource,
+      },
+      'sensors': {
+        'online': dashboard.sensors.online && !sensorStale,
+        'stale': sensorStale,
+        'status_label': sensorStale ? 'offline' : 'online',
+        'last_seen_iso': dashboard.sensors.timestamp.toIso8601String(),
+        'last_seen_ms': dashboard.sensors.timestamp.millisecondsSinceEpoch,
+        'last_seen_age_seconds': sensorAge.inSeconds,
+        'temperature': dashboard.sensors.temperature,
+        'humidity': dashboard.sensors.humidity,
+        'motion': dashboard.sensors.isOccupied,
+        'smoke_status': dashboard.sensors.smokeStatus,
+        'noise_status': dashboard.sensors.noiseStatus,
+        'light_status': dashboard.sensors.lightStatus,
+        'aqi': dashboard.sensors.aqi,
+      },
+      'hub_status': dashboard.hubStatus,
+      'devices': [
+        for (final device in dashboard.devices)
+          {
+            'id': device.id,
+            'name': device.name,
+            'online': device.online,
+            'stale': device.stale,
+            'status_label': device.statusLabel,
+            'is_on': device.isOn,
+            'power_w': device.currentPower,
+            'branch': device.branch,
+            'last_seen_iso': device.lastSeen?.toIso8601String(),
+            'last_seen_age_seconds': device.lastSeenAgeSeconds,
+          },
+      ],
+      'ai': dashboard.aiDashboard == null
+          ? null
+          : {
+              'status_label': dashboard.aiDashboard!.statusLabel,
+              'status_tone': dashboard.aiDashboard!.statusTone,
+              'status_summary': dashboard.aiDashboard!.statusSummary,
+              'action_title': dashboard.aiDashboard!.actionTitle,
+              'recommendation_type': dashboard.aiDashboard!.recommendationType,
+              'explanation': dashboard.aiDashboard!.explanation,
+              'energy_waste': dashboard.aiDashboard!.energyWaste,
+              'next_hour_energy_kwh': dashboard.aiDashboard!.nextHourEnergyKwh,
+              'next_hour_cost_bhd': dashboard.aiDashboard!.nextHourCostBhd,
+              'source': dashboard.aiDashboard!.source,
+            },
+      'alerts': [for (final alert in dashboard.alerts) alert.toJson()],
+      'notifications': [
+        for (final item in dashboard.aiNotifications)
+          {
+            'id': item.id,
+            'severity': item.severity,
+            'category': item.category,
+            'title': item.title,
+            'message': item.message,
+            'recommendation_type': item.recommendationType,
+            'confidence': item.confidence,
+          },
+      ],
+      'suggestions': [
+        for (final item in dashboard.actionSuggestions)
+          {
+            'id': item.id,
+            'device_name': item.deviceName,
+            'device_id': item.deviceId,
+            'suggested_command': item.suggestedCommand,
+            'reason': item.reason,
+            'status': item.status,
+          },
+      ],
+    };
   }
 }
 

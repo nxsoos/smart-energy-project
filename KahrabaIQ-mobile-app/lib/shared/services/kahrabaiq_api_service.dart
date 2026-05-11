@@ -611,6 +611,7 @@ class KahrabaIqApiService {
     String mode = 'live',
     String? scenarioId,
     String? scenarioName,
+    Map<String, dynamic>? context,
   }) async {
     final response = await _dio.post(
       '/api/home/$homeId/chat/sessions',
@@ -654,6 +655,7 @@ class KahrabaIqApiService {
     String mode = 'live',
     String? scenarioId,
     String? scenarioName,
+    Map<String, dynamic>? context,
   }) async {
     final response = await _dio.post(
       '/api/home/$homeId/chat/sessions/$sessionId/message',
@@ -663,6 +665,7 @@ class KahrabaIqApiService {
         'mode': mode,
         'scenario_id': ?scenarioId,
         'scenario_name': ?scenarioName,
+        'context': ?context,
       },
     );
     final data = _asMap(response.data);

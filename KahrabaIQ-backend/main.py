@@ -81,6 +81,7 @@ class ChatRequest(BaseModel):
     home_name: str | None = None
     scenario_id: str | None = None
     scenario_name: str | None = None
+    context: dict[str, Any] | None = None
     conversation_history: list[dict[str, Any]] | None = None
 
 
@@ -509,12 +510,22 @@ def summarize_devices(devices: Any) -> dict[str, Any]:
 
 def build_chat_derived_context(context: dict[str, Any]) -> dict[str, Any]:
     now = now_ms()
+    app_context = ensure_dict(context.get("app_context"))
+    app_sensors = ensure_dict(app_context.get("sensors"))
     latest_sensor_timestamp = latest_sensor_timestamp_ms(context)
     latest_sensor_age_seconds = (
         round((now - latest_sensor_timestamp) / 1000, 1)
         if latest_sensor_timestamp is not None
         else None
     )
+    app_sensor_age = app_sensors.get("last_seen_age_seconds")
+    if isinstance(app_sensor_age, (int, float)):
+        latest_sensor_age_seconds = round(float(app_sensor_age), 1)
+    app_sensor_online = app_sensors.get("online")
+    app_sensor_stale = app_sensors.get("stale")
+    app_sensor_fresh = None
+    if isinstance(app_sensor_online, bool):
+        app_sensor_fresh = app_sensor_online and app_sensor_stale is not True
 
     latest_prediction = ensure_dict(context.get("latest_prediction"))
     device_health = ensure_dict(context.get("device_health"))
@@ -525,11 +536,16 @@ def build_chat_derived_context(context: dict[str, Any]) -> dict[str, Any]:
         "current_time_readable": format_bahrain_time(now),
         "timezone": "Asia/Bahrain (UTC+03:00)",
         "latest_sensor_data_time_ms": latest_sensor_timestamp,
-        "latest_sensor_data_time_readable": format_bahrain_time(latest_sensor_timestamp),
+        "latest_sensor_data_time_readable": app_sensors.get("last_seen_readable") or format_bahrain_time(latest_sensor_timestamp),
         "latest_sensor_data_age_seconds": latest_sensor_age_seconds,
         "latest_sensor_data_is_fresh": (
-            latest_sensor_age_seconds is not None and latest_sensor_age_seconds <= 600
+            app_sensor_fresh
+            if app_sensor_fresh is not None
+            else latest_sensor_age_seconds is not None and latest_sensor_age_seconds <= 45
         ),
+        "sensor_feed_online": app_sensor_online,
+        "sensor_feed_stale": app_sensor_stale,
+        "sensor_status_label": app_sensors.get("status_label"),
         "latest_ai_checked_at_readable": format_bahrain_time(
             latest_prediction.get("last_checked_at") or latest_prediction.get("created_at")
         ),
@@ -546,17 +562,20 @@ def build_chat_derived_context(context: dict[str, Any]) -> dict[str, Any]:
 def latest_sensor_timestamp_ms(context: dict[str, Any]) -> int | None:
     candidates: list[float] = []
 
+    app_context = ensure_dict(context.get("app_context"))
+    app_sensors = ensure_dict(app_context.get("sensors"))
+    app_last_seen = app_sensors.get("last_seen_ms")
+    if isinstance(app_last_seen, (int, float)) and app_last_seen > 0:
+        return int(app_last_seen)
+
     dashboard_environment = ensure_dict(context.get("dashboard_environment"))
     current_state = ensure_dict(context.get("current_state"))
-    latest_hourly_summary = ensure_dict(context.get("latest_hourly_summary"))
     device_health = ensure_dict(context.get("device_health"))
     devices = ensure_dict(context.get("devices"))
 
     for value in [
         dashboard_environment.get("updated_at"),
         current_state.get("last_processed_at"),
-        latest_hourly_summary.get("created_at"),
-        latest_hourly_summary.get("hour_start"),
     ]:
         if isinstance(value, (int, float)) and value > 0:
             candidates.append(float(value))
@@ -636,6 +655,7 @@ def has_chat_context(context: dict[str, Any]) -> bool:
         "device_health",
         "latest_hourly_summary",
         "devices",
+        "app_context",
     ]:
         value = context.get(key)
         if value is not None and value != {} and value != []:
@@ -1516,6 +1536,8 @@ You are the KahrabaIQ Intelligence assistant.
 Rules:
 - Answer the user's exact question first. Do not switch topics unless the user asks.
 - Answer using the system data provided below.
+- If app_context is present, treat it as the same dashboard context currently shown in the mobile app and prefer it over older stored paths.
+- In demo scenario mode, use app_context only unless the user explicitly asks about live data.
 - Do not invent energy values, costs, device states, alerts, or recommendations.
 - For hypothetical "what if I connect/install..." questions, give a clearly labeled estimate range using normal appliance assumptions and explain that it is not a measured value.
 - If a value is missing, say that information is not available.
@@ -1552,6 +1574,15 @@ def answer_direct_chat_question(user_message: str, context: dict[str, Any]) -> s
     """Answer simple factual backend store questions without asking Gemini to reason."""
     normalized = normalize_text(user_message)
 
+    asks_month_cost = (
+        any(phrase in normalized for phrase in ["this month", "monthly", "month"])
+        and any(word in normalized for word in ["cost", "bill", "bhd", "usage", "energy", "kwh", "total"])
+    )
+    asks_scenario_waste = (
+        ensure_dict(context.get("app_context")).get("simulation") is True
+        and any(word in normalized for word in ["why", "waste", "scenario", "happen"])
+    )
+
     asks_time = any(
         phrase in normalized
         for phrase in [
@@ -1562,7 +1593,7 @@ def answer_direct_chat_question(user_message: str, context: dict[str, Any]) -> s
             "real time",
             "this format",
         ]
-    )
+    ) or ("sensor" in normalized and "last time" in normalized)
     asks_sensor_status = (
         "sensor" in normalized
         and any(
@@ -1589,6 +1620,14 @@ def answer_direct_chat_question(user_message: str, context: dict[str, Any]) -> s
         and any(word in normalized for word in ["power", "watt", "kw", "ac", "charger"])
     )
 
+    if asks_month_cost:
+        return build_monthly_usage_answer(context)
+
+    if asks_scenario_waste:
+        answer = build_scenario_ai_answer(context)
+        if answer:
+            return answer
+
     if asks_sensor_status:
         return build_sensor_status_answer(context)
 
@@ -1604,8 +1643,65 @@ def answer_direct_chat_question(user_message: str, context: dict[str, Any]) -> s
     return None
 
 
+def build_monthly_usage_answer(context: dict[str, Any]) -> str | None:
+    app_context = ensure_dict(context.get("app_context"))
+    energy = ensure_dict(app_context.get("energy"))
+    if not energy:
+        energy = ensure_dict(context.get("dashboard_energy"))
+    month_kwh = first_present(
+        energy.get("month_kwh"),
+        energy.get("energyMonth"),
+        energy.get("monthKwh"),
+        energy.get("monthly_kwh"),
+    )
+    month_cost = first_present(
+        energy.get("month_cost_bhd"),
+        energy.get("costMonth"),
+        energy.get("monthCostBhd"),
+        energy.get("monthly_cost_bhd"),
+    )
+    available = energy.get("month_data_available")
+    if available is False:
+        reason = energy.get("reason_if_unavailable") or "monthly cloud summaries are not available yet"
+        return f"Monthly usage is not available right now because {reason}."
+    has_kwh = month_kwh is not None and as_number(month_kwh) > 0
+    has_cost = month_cost is not None and as_number(month_cost) >= 0
+    if not has_kwh and not has_cost:
+        return None
+    simulation = app_context.get("simulation") is True
+    prefix = "In this demo scenario, " if simulation else "For this month, "
+    parts = []
+    if has_cost:
+        parts.append(f"the total cost is {as_number(month_cost):.3f} BHD")
+    if has_kwh:
+        parts.append(f"the total usage is {as_number(month_kwh):.1f} kWh")
+    source = energy.get("month_source")
+    source_text = f" Source: {source}." if source else ""
+    return prefix + " and ".join(parts) + "." + source_text
+
+
+def build_scenario_ai_answer(context: dict[str, Any]) -> str | None:
+    app_context = ensure_dict(context.get("app_context"))
+    ai = ensure_dict(app_context.get("ai"))
+    if not ai:
+        return None
+    summary = first_present(ai.get("status_summary"), ai.get("ai_status_summary"), ai.get("summary"))
+    action = first_present(ai.get("action_title"), ai.get("ai_action_title"), ai.get("recommendation_type"))
+    explanation = first_present(ai.get("explanation"), ai.get("message"), summary)
+    if not explanation and not summary:
+        return None
+    answer = "In this demo scenario, "
+    answer += str(summary or explanation)
+    if action:
+        answer += f" Suggested action: {action}."
+    if explanation and explanation != summary:
+        answer += f" Reason: {explanation}."
+    return answer
+
+
 def build_latest_sensor_time_answer(context: dict[str, Any]) -> str:
     derived = ensure_dict(context.get("derived_context"))
+    app_sensors = ensure_dict(ensure_dict(context.get("app_context")).get("sensors"))
     readable_time = derived.get("latest_sensor_data_time_readable")
     raw_time = derived.get("latest_sensor_data_time_ms")
     age_seconds = derived.get("latest_sensor_data_age_seconds")
@@ -1617,13 +1713,26 @@ def build_latest_sensor_time_answer(context: dict[str, Any]) -> str:
     if isinstance(age_seconds, (int, float)):
         age_text = f" That is about {round(float(age_seconds))} seconds before this chat request."
 
-    return (
-        f"The latest room sensor reading was recorded at {readable_time}."
-        f"{age_text} The raw timestamp is {raw_time}."
-    )
+    status = ""
+    if app_sensors:
+        label = app_sensors.get("status_label") or ("online" if app_sensors.get("online") is True else "offline")
+        status = f" The sensor feed is currently {label}."
+
+    return f"The latest room sensor reading was recorded at {readable_time}.{age_text}{status}"
 
 
 def build_sensor_status_answer(context: dict[str, Any]) -> str:
+    app_context = ensure_dict(context.get("app_context"))
+    app_sensors = ensure_dict(app_context.get("sensors"))
+    if app_sensors:
+        readable_time = app_sensors.get("last_seen_readable") or ensure_dict(context.get("derived_context")).get("latest_sensor_data_time_readable")
+        online = app_sensors.get("online") is True
+        stale = app_sensors.get("stale") is True
+        label = str(app_sensors.get("status_label") or ("online" if online and not stale else "offline"))
+        if not online or stale:
+            time_text = f" Last update shown by the dashboard was {readable_time}." if readable_time else ""
+            return f"The room sensor feed is currently {label}.{time_text}"
+
     environment = ensure_dict(context.get("dashboard_environment"))
     current_state = ensure_dict(context.get("current_state"))
     derived = ensure_dict(context.get("derived_context"))
@@ -1666,7 +1775,7 @@ def build_sensor_status_answer(context: dict[str, Any]) -> str:
     else:
         missing_sensors.append("smoke/gas")
 
-    status_text = "The room sensor feed is recent." if is_fresh else "The room sensor feed looks old."
+    status_text = "The room sensor feed is recent." if is_fresh else "The room sensor feed is stale or offline."
     details = []
     if temperature is not None:
         details.append(f"temperature {temperature} C")
@@ -2239,6 +2348,17 @@ def chat_home(home_id: str, request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=400, detail="Message must not be empty.")
 
     context = read_chat_context(home_id, request.scenario_id)
+    if request.context:
+        context["app_context"] = request.context
+        context["derived_context"] = build_chat_derived_context(context)
+        print(
+            "[KahrabaIQ CHAT CONTEXT] "
+            f"home_id={home_id} scenario_id={request.scenario_id} "
+            f"simulation={request.context.get('simulation')} "
+            f"sensor_status={ensure_dict(request.context.get('sensors')).get('status_label')} "
+            f"month_source={ensure_dict(request.context.get('energy')).get('month_source')}",
+            flush=True,
+        )
     if request.conversation_history:
         context["current_conversation_latest"] = request.conversation_history[-8:]
     used_data = has_chat_context(context)

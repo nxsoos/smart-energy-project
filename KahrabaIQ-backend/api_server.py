@@ -525,6 +525,7 @@ class ChatProxyRequest(BaseModel):
     home_name: str | None = None
     scenario_id: str | None = None
     scenario_name: str | None = None
+    context: dict[str, Any] | None = None
     conversation_history: list[dict[str, Any]] | None = None
 
 
@@ -545,6 +546,7 @@ class ChatSessionMessageRequest(BaseModel):
     mode: str | None = None
     scenario_id: str | None = None
     scenario_name: str | None = None
+    context: dict[str, Any] | None = None
 
 
 class SignupProfileRequest(BaseModel):
@@ -3576,11 +3578,23 @@ def build_monthly_energy_summary(home_id: str, settings: dict[str, Any]) -> dict
             "hourly",
             start_at_ms=start_ms,
             end_at_ms=end_ms,
-            limit=100,
+            limit=744,
         )
         source = "hourly_summary" if summaries else "unavailable"
     month_kwh = round(sum(summary_energy_value(summary) for summary in summaries), 6)
     tariff = as_number(settings.get("cost_per_kwh"), 0.029)
+    reason = None
+    if not summaries:
+        reason = "no current-month daily or hourly cloud summaries were found"
+    elif month_kwh <= 0:
+        reason = "current-month summaries were found but their energy totals are zero"
+    print(
+        "[KahrabaIQ MONTHLY] "
+        f"home_id={home_id} start={iso_from_ms(start_ms)} end={iso_from_ms(end_ms)} "
+        f"daily_count={len(daily)} selected_source={source} selected_count={len(summaries)} "
+        f"month_kwh={month_kwh} reason={reason}",
+        flush=True,
+    )
     return {
         "month_kwh": month_kwh,
         "month_cost_bhd": round(month_kwh * tariff, 6),
@@ -3592,6 +3606,7 @@ def build_monthly_energy_summary(home_id: str, settings: dict[str, Any]) -> dict
         "month_data_available": bool(summaries and month_kwh > 0),
         "month_summary_count": len(summaries),
         "monthly_summary_count": len(summaries),
+        "reason_if_unavailable": reason,
     }
 
 
@@ -6043,6 +6058,7 @@ def call_ai_chat_service(home_id: str, request: ChatProxyRequest, history: list[
         home_name=request.home_name,
         scenario_id=request.scenario_id,
         scenario_name=request.scenario_name,
+        context=request.context,
         conversation_history=history,
     )
     try:
@@ -6106,6 +6122,7 @@ def send_chat_session_message(
         home_name=request.home_name,
         scenario_id=requested_scenario_id if requested_mode == "demo_scenario" else None,
         scenario_name=request.scenario_name if requested_mode == "demo_scenario" else None,
+        context=request.context,
         conversation_history=history,
     )
     ai_data = call_ai_chat_service(home_id, proxy_request, history)
@@ -6304,6 +6321,7 @@ def chat_with_ai(
         mode=normalize_chat_mode(None, request.scenario_id),
         scenario_id=request.scenario_id,
         scenario_name=request.scenario_name,
+        context=request.context,
     )
     return send_chat_session_message(home_id, str(session["session_id"]), session_request, actor)
 
