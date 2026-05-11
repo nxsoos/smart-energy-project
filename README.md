@@ -419,8 +419,8 @@ Required Pi values:
 HOME_ID=
 PI_ID=pi_unique_id
 PI_DEVICE_TOKEN=change_me
-KAHRABAIQ_API_URL=https://api.your-domain.com
-KIOSK_DASHBOARD_URL=https://api.your-domain.com/api/kiosk/dashboard
+KAHRABAIQ_API_URL=https://api.kahrabaiq.com
+KIOSK_DASHBOARD_URL=https://dashboard.kahrabaiq.com
 PI_AGENT_PORT=5010
 PI_SENSOR_PORT=5000
 PI_LOCAL_BASE_URL=
@@ -434,6 +434,8 @@ MATTER_AC_SWITCH_ENTITY_ID=switch.ac_switch
 ```
 
 Leave `PI_LOCAL_BASE_URL` and `PI_SENSOR_BASE_URL` empty for normal installs. The Pi sends its current Wi-Fi IP-derived URLs to ESP32 during provisioning and to the backend on heartbeat. Use `HOME_ASSISTANT_URL=http://127.0.0.1:8123` when Home Assistant runs on the same Pi, including Docker host-network mode.
+
+The production dashboard is served by EC2 at `https://dashboard.kahrabaiq.com`. The backend learns each Pi public IP from heartbeat and only serves the dashboard when the request IP matches a fresh Pi record with dashboard access enabled. Unpaired Pis get a waiting-for-pairing screen; paired Pis get live sensor data with AWS IoT realtime updates and polling fallback.
 
 Install flow on the Pi:
 
