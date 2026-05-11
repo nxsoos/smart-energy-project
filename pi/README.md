@@ -6,6 +6,7 @@ The Pi runs local hardware services and reports compact state to the deployed AP
 
 - `kahrabaiq-agent`: local token bridge, heartbeat, compact live-state sync to EC2/API, kiosk command polling, and ESP32 provisioning actions.
 - `kahrabaiq-provisioning`: first-boot setup portal. It uses `wlan1` for temporary setup, connects `wlan0` to home Wi-Fi, provisions the ESP32, turns `wlan1` off, then allows the dashboard to start.
+- `kahrabaiq-setup-screen`: locked first-boot Chromium screen shown on the Pi display while setup is incomplete. It shows hotspot instructions, QR pairing, and sensor setup progress.
 - `kahrabaiq-sensor-receiver`: receives ESP32 sensor posts on the local network and writes SQLite state.
 - `kahrabaiq-tuya-breaker-poller`: legacy Tuya Cloud breaker polling. Keep disabled for the normal Home Assistant breaker path.
 - `kahrabaiq-summary-sync`: builds hourly/daily SQLite summaries and uploads them to DynamoDB.
@@ -19,7 +20,7 @@ The Pi runs local hardware services and reports compact state to the deployed AP
 1. Copy the repo to `/opt/kahrabaiq` on the Pi.
 2. Run `KAHRABAIQ_REPO_DIR=/opt/kahrabaiq /opt/kahrabaiq/pi/scripts/install-pi.sh`.
 3. Edit `/etc/kahrabaiq/pi.env` with the real API URL, Pi identity, and ESP32 key.
-4. Run `sudo systemctl enable --now kahrabaiq-provisioning kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-iot-live-publisher kahrabaiq-kiosk-browser`.
+4. Run `sudo systemctl enable --now kahrabaiq-provisioning kahrabaiq-setup-screen kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-iot-live-publisher kahrabaiq-kiosk-browser`.
 5. For Matter devices, install Docker and run `KAHRABAIQ_REPO_DIR=/opt/kahrabaiq /opt/kahrabaiq/pi/scripts/setup-home-stack.sh`.
 6. Finish Home Assistant onboarding, create a long-lived access token, set `HOME_ASSISTANT_TOKEN`, and configure the breaker/Matter entity IDs in `/etc/kahrabaiq/pi.env`.
 
@@ -60,14 +61,18 @@ Detailed first-boot sequence:
 3. If the marker exists, setup is skipped, `wlan1` stays off, and normal services start.
 4. If the marker does not exist, the Pi starts `KahrabaIQ-Pi-Setup` on `wlan1`.
 5. Connect a phone/laptop to `KahrabaIQ-Pi-Setup` and open the setup page on port `8080`.
-6. Enter the home Wi-Fi SSID/password, home ID, Pi ID, ESP32 device ID, and ESP32 device key.
-7. The Pi connects `wlan0` to the home Wi-Fi.
-8. The Pi stops the setup AP and connects `wlan1` to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
-9. The Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` to the ESP32 with the same home Wi-Fi credentials and `PI_SENSOR_BASE_URL`.
-10. The ESP32 saves the config, reboots, and joins the home Wi-Fi.
-11. The Pi disconnects and turns off `wlan1`.
-12. The Pi writes `/var/lib/kahrabaiq/provisioned.json`.
-13. `kahrabaiq-agent`, `kahrabaiq-sensor-receiver`, command/sync services, and `kahrabaiq-kiosk-browser` start.
+6. Enter the home Wi-Fi SSID/password and optional ESP32 device values. Do not enter `home_id`; QR pairing provides it.
+7. The Pi connects `wlan0` to the home Wi-Fi and reaches the backend.
+8. The Pi generates a backend QR pairing token and displays it on the locked setup screen.
+9. The user scans the QR in the mobile app and becomes `home_admin` for the newly linked home.
+10. The Pi polls pairing status until the backend returns `paired` and a real `home_id`.
+11. The setup screen shows `Home paired successfully. Waiting for sensors to connect to the Pi...`.
+12. The Pi stops the setup AP and connects `wlan1` to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
+13. The Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` with the same home Wi-Fi credentials, real `home_id`, `PI_SENSOR_BASE_URL`, `PI_ID`, device ID, and device key.
+14. The ESP32 saves the config, reboots, and joins the home Wi-Fi.
+15. The Pi disconnects and turns off `wlan1`.
+16. The Pi writes `/var/lib/kahrabaiq/provisioned.json`.
+17. `kahrabaiq-agent`, `kahrabaiq-sensor-receiver`, command/sync services, and `kahrabaiq-kiosk-browser` start.
 
 Required provisioning environment values:
 
@@ -82,11 +87,15 @@ ESP32_SETUP_SSID=KahrabaIQ-ESP32-Setup
 ESP32_SETUP_PASSWORD=kahrabaiq123
 ESP32_SETUP_URL=
 ESP32_DISCOVERY_CANDIDATES=http://kahrabaiq-esp32.local
+PI_PAIRING_POLL_SECONDS=2
+PI_PAIRING_WAIT_TIMEOUT_SECONDS=900
 PI_SENSOR_BASE_URL=http://kahrabaiq-pi.local:5000
 PI_LOCAL_BASE_URL=http://kahrabaiq-pi.local:5001
 ```
 
 Leave `ESP32_SETUP_URL` empty for normal installs. The Pi auto-detects the ESP32 setup server from the `wlan1` gateway after joining `ESP32_SETUP_SSID`. If gateway detection fails, provisioning fails with a clear error instead of falling back to a hardcoded IP.
+
+The Wi-Fi password is kept in memory during the active setup session so it can be sent to the ESP32 only after QR pairing returns the real `home_id`. It is not written to `/var/lib/kahrabaiq/provisioned.json`. If the setup service restarts before ESP32 provisioning finishes, the user must re-enter Wi-Fi credentials.
 
 The provisioning service uses NetworkManager/`nmcli`. Verify it exists on the Pi before deployment:
 

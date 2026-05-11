@@ -1,0 +1,17 @@
+[Unit]
+Description=KahrabaIQ locked first-boot setup screen
+ConditionPathExists=!/var/lib/kahrabaiq/provisioned.json
+After=graphical.target kahrabaiq-provisioning.service
+Wants=kahrabaiq-provisioning.service
+Conflicts=kahrabaiq-kiosk-browser.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/kahrabaiq/pi.env
+ExecStart=/usr/bin/chromium-browser --kiosk --noerrdialogs --disable-infobars --check-for-update-interval=31536000 --app=http://127.0.0.1:8080/setup-screen
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=graphical.target

@@ -105,7 +105,7 @@ class _QrScannerScreenState extends State<QrScannerScreen>
           minLines: 1,
           maxLines: 3,
           decoration: const InputDecoration(
-            hintText: 'kahrabaiq://pair?... or pairing token',
+            hintText: 'kahrabaiq://pair?... or kahrabaiq://invite?...',
           ),
         ),
         actions: [
