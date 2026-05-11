@@ -42,7 +42,7 @@ dashboard starts directly
 
 ## Admin Unlock
 
-The local dashboard at `http://127.0.0.1:5010/dashboard` has a hidden admin unlock:
+The local dashboard at `http://127.0.0.1:5010/dashboard` and the first-boot setup screen have a hidden admin unlock:
 
 ```text
 Long press the top-right corner for 5 seconds
@@ -54,19 +54,25 @@ Admin can:
 - Lock the dashboard again without rebooting.
 - View Pi/ESP32 status.
 - Restart the kiosk service.
+- Exit the kiosk/setup browser to the Raspberry Pi OS desktop/session.
+- Return to the correct kiosk mode.
 - Start maintenance provisioning mode.
 
-The installer adds a limited `/etc/sudoers.d/kahrabaiq-admin` rule so the local Pi agent can restart the kiosk and start provisioning without giving broad root access.
+The installer adds a limited `/etc/sudoers.d/kahrabaiq-admin` rule so the local Pi agent can restart/stop kiosk services and start provisioning without giving broad root access. Exiting kiosk does not unlock Raspberry Pi OS credentials, SSH, root, or arbitrary sudo access.
 
 Set credentials in `/etc/kahrabaiq/pi.env`:
 
 ```env
+PI_CLOUD_ADMIN_UNLOCK_ENABLED=true
+COGNITO_REGION=eu-west-1
+COGNITO_APP_CLIENT_ID=your_cognito_app_client_id
 KIOSK_ADMIN_USERNAME=admin
-KIOSK_ADMIN_PASSWORD=change_this_admin_password
+KIOSK_ADMIN_PASSWORD=
 KIOSK_ADMIN_PIN=
+KIOSK_ADMIN_PIN_HASH=change_this_to_a_sha256_pin_hash
 ```
 
-For production, use `KIOSK_ADMIN_PASSWORD_HASH` or `KIOSK_ADMIN_PIN_HASH`. The hash is a SHA-256 hex digest.
+For production, platform admin cloud unlock is the normal path and `KIOSK_ADMIN_PIN_HASH` is the offline recovery path. Only backend `platform_admin` users can unlock with cloud credentials. The hash is a SHA-256 hex digest.
 
 ## Maintenance
 

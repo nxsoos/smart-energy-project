@@ -37,6 +37,9 @@ HEARTBEAT_INTERVAL_SECONDS = float(os.environ.get("PI_HEARTBEAT_INTERVAL_SECONDS
 LIVE_SYNC_INTERVAL_SECONDS = float(os.environ.get("PI_LIVE_SYNC_INTERVAL_SECONDS", "10"))
 COMMAND_POLL_SECONDS = float(os.environ.get("PI_COMMAND_POLL_SECONDS", "3"))
 KIOSK_TOKEN_REFRESH_MARGIN_SECONDS = float(os.environ.get("KIOSK_TOKEN_REFRESH_MARGIN_SECONDS", "240"))
+PI_CLOUD_ADMIN_UNLOCK_ENABLED = os.environ.get("PI_CLOUD_ADMIN_UNLOCK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+COGNITO_REGION = os.environ.get("COGNITO_REGION") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "")
+COGNITO_APP_CLIENT_ID = os.environ.get("COGNITO_APP_CLIENT_ID", "")
 ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "").rstrip("/")
 ESP32_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
 ESP32_DISCOVERY_CANDIDATES = [
@@ -51,7 +54,7 @@ PI_SENSOR_BASE_URL = os.environ.get("PI_SENSOR_BASE_URL", "http://kahrabaiq-pi.l
 PI_LOCAL_BASE_URL = os.environ.get("PI_LOCAL_BASE_URL", "http://kahrabaiq-pi.local:5001").rstrip("/")
 PROVISIONING_MARKER_PATH = Path(os.environ.get("PROVISIONING_MARKER_PATH", "/var/lib/kahrabaiq/provisioned.json"))
 KIOSK_ADMIN_USERNAME = os.environ.get("KIOSK_ADMIN_USERNAME", "admin")
-KIOSK_ADMIN_PASSWORD = os.environ.get("KIOSK_ADMIN_PASSWORD", "change-me")
+KIOSK_ADMIN_PASSWORD = os.environ.get("KIOSK_ADMIN_PASSWORD", "")
 KIOSK_ADMIN_PASSWORD_HASH = os.environ.get("KIOSK_ADMIN_PASSWORD_HASH", "")
 KIOSK_ADMIN_PIN = os.environ.get("KIOSK_ADMIN_PIN", "")
 KIOSK_ADMIN_PIN_HASH = os.environ.get("KIOSK_ADMIN_PIN_HASH", "")
@@ -68,6 +71,15 @@ _agent_state: dict[str, Any] = {
     "last_command_poll_at_ms": None,
 }
 _admin_sessions: dict[str, int] = {}
+
+
+@app.after_request
+def add_local_admin_cors(response: Response) -> Response:
+    if request.path.startswith("/api/admin/"):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Admin-Token"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 
 def now_ms() -> int:
@@ -99,6 +111,50 @@ def secret_matches(provided: str, plain: str, hashed: str) -> bool:
     if hashed and hmac.compare_digest(hash_secret(provided), hashed):
         return True
     return bool(plain) and hmac.compare_digest(provided, plain)
+
+
+def recovery_pin_ok(pin: str) -> bool:
+    return bool(pin) and secret_matches(pin, KIOSK_ADMIN_PIN, KIOSK_ADMIN_PIN_HASH)
+
+
+def local_admin_password_ok(username: str, password: str) -> bool:
+    return bool(username and password) and username == KIOSK_ADMIN_USERNAME and secret_matches(password, KIOSK_ADMIN_PASSWORD, KIOSK_ADMIN_PASSWORD_HASH)
+
+
+def cognito_password_login(email: str, password: str) -> str:
+    if not COGNITO_REGION or not COGNITO_APP_CLIENT_ID:
+        raise RuntimeError("Cognito app client is not configured for Pi cloud admin unlock.")
+    try:
+        import boto3
+    except Exception as error:
+        raise RuntimeError("boto3 is required for Pi cloud admin unlock.") from error
+    client = boto3.client("cognito-idp", region_name=COGNITO_REGION)
+    response = client.initiate_auth(
+        ClientId=COGNITO_APP_CLIENT_ID,
+        AuthFlow="USER_PASSWORD_AUTH",
+        AuthParameters={"USERNAME": email, "PASSWORD": password},
+    )
+    token = str(response.get("AuthenticationResult", {}).get("IdToken") or "")
+    if not token:
+        raise RuntimeError("Cognito did not return an ID token.")
+    return token
+
+
+def authorize_platform_admin(id_token: str) -> dict[str, Any]:
+    response = api_request("GET", "/api/pi/admin-authorize", headers={"Authorization": f"Bearer {id_token}"})
+    data = response.json()
+    if not response.ok or data.get("success") is False or data.get("can_unlock_pi") is not True:
+        raise RuntimeError(data.get("detail") or data.get("message") or "Platform admin authorization failed.")
+    return data
+
+
+def cloud_admin_password_ok(email: str, password: str) -> dict[str, Any]:
+    if not PI_CLOUD_ADMIN_UNLOCK_ENABLED:
+        raise RuntimeError("Pi cloud admin unlock is disabled.")
+    if not email or not password:
+        raise RuntimeError("Email and password are required for platform admin unlock.")
+    id_token = cognito_password_login(email, password)
+    return authorize_platform_admin(id_token)
 
 
 def create_admin_session() -> dict[str, Any]:
@@ -697,11 +753,11 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   <div class="overlay" id="adminOverlay">
     <div class="admin-panel">
       <h2>Admin Access</h2>
-      <p id="adminCopy">Enter admin credentials to unlock maintenance controls. Press Lock Dashboard to return to kiosk mode.</p>
+      <p id="adminCopy">Use platform admin credentials to unlock Pi maintenance. Use local recovery PIN only if cloud unlock is unavailable.</p>
       <div id="adminLogin">
-        <input id="adminUsername" placeholder="Username" autocomplete="username" value="admin">
+        <input id="adminEmail" placeholder="Platform admin email" autocomplete="username">
         <input id="adminPassword" placeholder="Password" type="password" autocomplete="current-password">
-        <input id="adminPin" placeholder="PIN optional" type="password" inputmode="numeric">
+        <input id="adminPin" placeholder="Recovery PIN optional" type="password" inputmode="numeric">
         <button class="primary" type="button" id="adminLoginButton">Unlock</button>
       </div>
       <div id="adminControls" style="display:none">
@@ -709,6 +765,8 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
           <button class="primary" type="button" id="lockDashboardButton">Lock Dashboard</button>
           <button type="button" id="refreshAdminStatusButton">Refresh Status</button>
           <button type="button" id="restartDashboardButton">Restart Dashboard</button>
+          <button type="button" id="exitKioskButton">Exit Kiosk To Desktop</button>
+          <button type="button" id="returnKioskButton">Return To Kiosk</button>
           <button class="danger" type="button" id="maintenanceButton">Enter Maintenance</button>
         </div>
         <div class="admin-log" id="adminLog">Admin mode unlocked.</div>
@@ -960,7 +1018,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     document.getElementById("adminLoginButton").onclick = async () => {
       try {
         const payload = {
-          username: document.getElementById("adminUsername").value,
+          email: document.getElementById("adminEmail").value,
           password: document.getElementById("adminPassword").value,
           pin: document.getElementById("adminPin").value,
         };
@@ -983,7 +1041,12 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     };
     document.getElementById("refreshAdminStatusButton").onclick = refreshAdminStatus;
     document.getElementById("restartDashboardButton").onclick = async () => adminLog(await adminFetch("/api/admin/services/restart-dashboard", { method: "POST" }));
-    document.getElementById("maintenanceButton").onclick = async () => adminLog(await adminFetch("/api/admin/maintenance/start", { method: "POST" }));
+    document.getElementById("exitKioskButton").onclick = async () => adminLog(await adminFetch("/api/admin/kiosk/exit", { method: "POST" }));
+    document.getElementById("returnKioskButton").onclick = async () => adminLog(await adminFetch("/api/admin/kiosk/start", { method: "POST" }));
+    document.getElementById("maintenanceButton").onclick = async () => {
+      if (!confirm("This will stop the dashboard and return the Pi to setup mode. Continue?")) return;
+      adminLog(await adminFetch("/api/admin/maintenance/start", { method: "POST" }));
+    };
 
     refresh();
     setInterval(refresh, 5000);
@@ -1029,15 +1092,23 @@ def loop_worker(name: str, interval: float, fn) -> None:
 @app.post("/api/admin/login")
 def admin_login() -> Any:
     payload = request.get_json(silent=True) or {}
-    username = str(payload.get("username") or "")
+    email = str(payload.get("email") or payload.get("username") or "").strip()
+    username = str(payload.get("username") or "").strip()
     password = str(payload.get("password") or "")
     pin = str(payload.get("pin") or "")
-    password_ok = username == KIOSK_ADMIN_USERNAME and secret_matches(password, KIOSK_ADMIN_PASSWORD, KIOSK_ADMIN_PASSWORD_HASH)
-    pin_ok = bool(pin) and secret_matches(pin, KIOSK_ADMIN_PIN, KIOSK_ADMIN_PIN_HASH)
-    if not password_ok and not pin_ok:
+    auth_source = ""
+    try:
+        if recovery_pin_ok(pin):
+            auth_source = "local_recovery_pin"
+        elif local_admin_password_ok(username, password):
+            auth_source = "local_password"
+        else:
+            cloud_admin_password_ok(email, password)
+            auth_source = "platform_admin"
+    except Exception:
         return jsonify({"success": False, "message": "Invalid admin credentials."}), 401
     session = create_admin_session()
-    return jsonify({"success": True, **session})
+    return jsonify({"success": True, "auth_source": auth_source, **session})
 
 
 @app.post("/api/admin/logout")
@@ -1110,6 +1181,35 @@ def admin_restart_dashboard() -> Any:
         return jsonify({"success": False, "message": message}), 401
     command = run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "restart", "kahrabaiq-kiosk-browser.service"], timeout=20)
     return jsonify({"success": command["success"], "command": command})
+
+
+@app.post("/api/admin/kiosk/exit")
+def admin_exit_kiosk() -> Any:
+    ok, message = require_admin()
+    if not ok:
+        return jsonify({"success": False, "message": message}), 401
+    commands = [
+        run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "stop", "kahrabaiq-kiosk-browser.service"], timeout=20),
+        run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "stop", "kahrabaiq-setup-screen.service"], timeout=20),
+    ]
+    return jsonify(
+        {
+            "success": all(item["success"] for item in commands),
+            "message": "Kiosk stopped. Raspberry Pi OS desktop is available if the session is unlocked.",
+            "commands": commands,
+        }
+    )
+
+
+@app.post("/api/admin/kiosk/start")
+def admin_start_kiosk() -> Any:
+    ok, message = require_admin()
+    if not ok:
+        return jsonify({"success": False, "message": message}), 401
+    provisioned = PROVISIONING_MARKER_PATH.exists()
+    service = "kahrabaiq-kiosk-browser.service" if provisioned else "kahrabaiq-setup-screen.service"
+    command = run_admin_command(["sudo", "-n", "/usr/bin/systemctl", "start", service], timeout=20)
+    return jsonify({"success": command["success"], "mode": "dashboard" if provisioned else "setup", "command": command})
 
 
 @app.get("/api/kiosk/session")

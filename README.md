@@ -77,10 +77,13 @@ Admin unlock flow:
 ```text
 Long press the dashboard top-right corner for 5 seconds
 or press Ctrl+Alt+A
-  -> enter admin credentials
-  -> view status, restart dashboard, or enter maintenance provisioning
+  -> enter platform admin credentials or recovery PIN
+  -> backend confirms platform_admin for cloud unlock
+  -> view status, restart dashboard, exit kiosk to desktop, return to kiosk, or enter maintenance provisioning
   -> press Lock Dashboard to return to locked kiosk mode without rebooting
 ```
+
+Cloud Pi unlock only unlocks the browser maintenance overlay. It does not unlock Raspberry Pi OS, SSH, root, or arbitrary sudo access.
 
 See `pi/README.md`, `pi/docs/first-boot-provisioning.md`, and `esp32/README.md` for device-specific details.
 
@@ -226,6 +229,7 @@ Recommended setup:
 - Create the app client without a client secret for Flutter mobile use.
 - Create groups `SmartEnergyAdmins` and `SmartEnergyMembers` if you use group-based policy mapping.
 - Add your platform admin email to `PLATFORM_ADMIN_EMAILS` in the backend environment.
+- Use the same Cognito app client values on the Pi for platform-admin kiosk unlock.
 
 If the Flutter app uses direct AWS request signing, also configure:
 
@@ -488,6 +492,7 @@ ESP32 documentation:
 - The first phone user who scans the Pi QR becomes `home_admin`.
 - The `home_admin` mobile panel can generate invite QR codes for `viewer` or `member` access and remove existing viewers/members.
 - The fixed global admin account is configured with `PLATFORM_ADMIN_EMAILS=admin@kahrabaiq.com` and can delete homes or remove members across all homes.
+- The same platform admin credentials can unlock Pi browser maintenance controls when `PI_CLOUD_ADMIN_UNLOCK_ENABLED=true`; local recovery PIN remains the offline fallback.
 - Deleting a home marks the linked Pi as `unpaired` and queues a `reset_pairing` command so it returns to pairing mode when online.
 - `HOME_MEMBER_LIMIT` caps the total non-admin users per home: `member + viewer <= 3` by default.
 

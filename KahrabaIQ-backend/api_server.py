@@ -2140,6 +2140,16 @@ def require_platform_admin(actor: AuthContext = Depends(require_authenticated_us
     return actor
 
 
+@app.get("/api/pi/admin-authorize")
+def pi_admin_authorize(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
+    return {
+        "success": True,
+        "can_unlock_pi": True,
+        "platform_role": actor.actor_role,
+        "email": actor.email,
+    }
+
+
 @app.get("/api/admin/users")
 def admin_users(actor: AuthContext = Depends(require_platform_admin)) -> dict[str, Any]:
     users = object_to_list(safe_get("/users", {}))

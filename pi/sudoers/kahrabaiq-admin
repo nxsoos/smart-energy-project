@@ -1,4 +1,6 @@
 __KAHRABAIQ_SERVICE_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop kahrabaiq-kiosk-browser.service
+__KAHRABAIQ_SERVICE_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop kahrabaiq-setup-screen.service
+__KAHRABAIQ_SERVICE_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start kahrabaiq-kiosk-browser.service
 __KAHRABAIQ_SERVICE_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start kahrabaiq-provisioning.service
 __KAHRABAIQ_SERVICE_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start kahrabaiq-setup-screen.service
 __KAHRABAIQ_SERVICE_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl restart kahrabaiq-kiosk-browser.service
