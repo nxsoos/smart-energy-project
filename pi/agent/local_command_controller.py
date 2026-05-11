@@ -764,12 +764,6 @@ def execute_local_command(
     alert_id: str | None = None,
 ) -> dict[str, Any]:
     device_id = canonical_device_id(device_id)
-    if (
-        device_id.startswith("matter_")
-        or device_id == "light_switch"
-        or (device_id.startswith("breaker_") and USE_HOME_ASSISTANT_FOR_BREAKERS)
-    ):
-        sync_home_assistant_device_state(device_id)
     command = create_pending_command(
         device_id,
         action,

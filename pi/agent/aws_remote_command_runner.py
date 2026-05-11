@@ -28,6 +28,12 @@ AWS_DYNAMODB_SUMMARIES_TABLE = os.environ.get(
 REMOTE_COMMAND_POLL_SECONDS = float(os.environ.get("REMOTE_COMMAND_POLL_SECONDS", "2"))
 REMOTE_COMMAND_QUERY_LIMIT = int(os.environ.get("REMOTE_COMMAND_QUERY_LIMIT", "25"))
 REMOTE_COMMAND_SOURCE = os.environ.get("REMOTE_COMMAND_SOURCE", "dynamodb").strip().lower()
+REMOTE_COMMAND_EC2_ACK_STATES = os.environ.get("REMOTE_COMMAND_EC2_ACK_STATES", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 KAHRABAIQ_API_URL = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
 PI_ID = os.environ.get("PI_ID", "pi_local_001")
 PI_DEVICE_TOKEN = os.environ.get("PI_DEVICE_TOKEN", "")
@@ -70,6 +76,17 @@ def api_request(method: str, path: str, **kwargs: Any) -> requests.Response:
     if not KAHRABAIQ_API_URL:
         raise RuntimeError("KAHRABAIQ_API_URL is required when REMOTE_COMMAND_SOURCE=ec2.")
     return requests.request(method, f"{KAHRABAIQ_API_URL}{path}", timeout=15, **kwargs)
+
+
+def response_json(response: requests.Response) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as error:
+        text = (response.text or "").strip()
+        raise RuntimeError(f"Non-JSON response from EC2 ({response.status_code}): {text[:240]}") from error
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected EC2 response ({response.status_code}): {data!r}")
+    return data
 
 
 def response_error_message(response: requests.Response, fallback: str | None = None) -> str:
@@ -116,13 +133,14 @@ def home_pk() -> str:
 
 def query_pending_commands() -> list[dict[str, Any]]:
     if REMOTE_COMMAND_SOURCE == "ec2":
+        started = time.time()
         response = api_request(
             "GET",
             f"/api/pi/{PI_ID}/remote-commands",
             headers=pi_headers(),
             params={"limit": REMOTE_COMMAND_QUERY_LIMIT},
         )
-        data = response.json()
+        data = response_json(response)
         if not response.ok or data.get("success") is False:
             raise RuntimeError(data.get("detail") or data.get("message") or response.text)
         commands = [
@@ -130,6 +148,9 @@ def query_pending_commands() -> list[dict[str, Any]]:
             for item in data.get("commands") or []
             if isinstance(item, dict) and str(item.get("status")).upper() == STATUS_PENDING
         ]
+        elapsed_ms = round((time.time() - started) * 1000)
+        if elapsed_ms > 1000 or commands:
+            log(f"EC2 pending command poll elapsed_ms={elapsed_ms} count={len(commands)}")
         if commands:
             log(
                 "Fetched pending command(s) from EC2: "
@@ -179,6 +200,8 @@ def write_command(command: dict[str, Any], updates: dict[str, Any]) -> dict[str,
 def mark_processing(command: dict[str, Any]) -> dict[str, Any]:
     timestamp_ms = now_ms()
     if REMOTE_COMMAND_SOURCE == "ec2":
+        if not REMOTE_COMMAND_EC2_ACK_STATES:
+            return {**command, "status": STATUS_CLAIMED}
         command_id = str(command.get("command_id") or command.get("commandId") or "")
         response = api_request(
             "POST",
@@ -191,7 +214,7 @@ def mark_processing(command: dict[str, Any]) -> dict[str, Any]:
                 "executing command without claim step"
             )
             return {**command, "status": STATUS_CLAIMED}
-        data = response.json()
+        data = response_json(response)
         if not response.ok or data.get("success") is False:
             raise RuntimeError(response_error_message(response))
         claimed = data.get("command")
@@ -215,6 +238,8 @@ def mark_processing(command: dict[str, Any]) -> dict[str, Any]:
 def mark_executing(command: dict[str, Any]) -> dict[str, Any]:
     timestamp_ms = now_ms()
     if REMOTE_COMMAND_SOURCE == "ec2":
+        if not REMOTE_COMMAND_EC2_ACK_STATES:
+            return {**command, "status": STATUS_EXECUTING}
         command_id = str(command.get("command_id") or command.get("commandId") or "")
         response = api_request(
             "POST",
@@ -227,7 +252,7 @@ def mark_executing(command: dict[str, Any]) -> dict[str, Any]:
                 "continuing with local execution"
             )
             return {**command, "status": STATUS_EXECUTING}
-        data = response.json()
+        data = response_json(response)
         if not response.ok or data.get("success") is False:
             raise RuntimeError(response_error_message(response))
         updated = data.get("command")
@@ -264,15 +289,18 @@ def mark_done(command: dict[str, Any], result: dict[str, Any]) -> None:
     }
     if REMOTE_COMMAND_SOURCE == "ec2":
         command_id = str(command.get("command_id") or command.get("commandId") or "")
+        started = time.time()
         response = api_request(
             "POST",
             f"/api/pi/{PI_ID}/remote-commands/{command_id}/complete",
             headers=pi_headers(),
             json=payload,
         )
-        data = response.json()
+        data = response_json(response)
         if not response.ok or data.get("success") is False:
             raise RuntimeError(response_error_message(response))
+        elapsed_ms = round((time.time() - started) * 1000)
+        log(f"EC2 command complete write elapsed_ms={elapsed_ms} id={command_id}")
         return
 
     write_command(
@@ -321,7 +349,7 @@ def mark_failed(command: dict[str, Any], error: Any) -> None:
             headers=pi_headers(),
             json=payload,
         )
-        data = response.json()
+        data = response_json(response)
         if not response.ok or data.get("success") is False:
             raise RuntimeError(response_error_message(response))
         return
@@ -398,7 +426,6 @@ def run_once() -> int:
         return 0
     for command in commands:
         process_command(command)
-    sync_home_assistant_device_states(force=True)
     return len(commands)
 
 

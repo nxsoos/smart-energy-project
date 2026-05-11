@@ -1158,9 +1158,19 @@ class KahrabaIqApiService {
 
   Device _parseAwsIotLiveDevice(String deviceId, Map<String, dynamic> data) {
     final metering = _asMap(data['metering']);
-    final state = _asString(
-      _pick(data, ['state', 'displayState']),
+    final commandInProgress = _asBool(
+      _pick(data, ['commandInProgress', 'command_in_progress']),
+    );
+    final pendingTargetState = _asNullableString(
+      _pick(data, ['pendingTargetState', 'pending_target_state']),
+    )?.toLowerCase();
+    final rawState = _asString(
+      _pick(data, ['displayState', 'display_state', 'state']),
     ).toLowerCase();
+    final state = commandInProgress &&
+            (pendingTargetState == 'on' || pendingTargetState == 'off')
+        ? pendingTargetState!
+        : rawState;
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final rawType = _asString(_pick(data, ['type']));
     final online = _asBool(_pick(data, ['online']), fallback: false);
@@ -1200,9 +1210,7 @@ class KahrabaIqApiService {
       ),
       stale: stale,
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
-      commandInProgress: _asBool(
-        _pick(data, ['commandInProgress', 'command_in_progress']),
-      ),
+      commandInProgress: commandInProgress,
       energySupported: _asBool(
         _pick(data, ['energySupported', 'energy_supported']),
         fallback: true,
@@ -1228,9 +1236,7 @@ class KahrabaIqApiService {
       controlMethod: _asNullableString(
         _pick(data, ['controlMethod', 'control_method']),
       ),
-      pendingTargetState: _asNullableString(
-        _pick(data, ['pendingTargetState', 'pending_target_state']),
-      ),
+      pendingTargetState: pendingTargetState,
       lastCommandMessage: _asNullableString(
         _pick(data, ['lastCommandMessage', 'last_command_message']),
       ),
@@ -1584,9 +1590,17 @@ class KahrabaIqApiService {
   }
 
   Device _parseApiDevice(String deviceId, Map<String, dynamic> data) {
-    final displayState = _asString(
+    final commandInProgress = _asBool(_pick(data, ['command_in_progress']));
+    final pendingTargetState = _asNullableString(
+      _pick(data, ['pending_target_state', 'pendingTargetState']),
+    )?.toLowerCase();
+    final rawDisplayState = _asString(
       _pick(data, ['display_state', 'state']),
     ).toLowerCase();
+    final displayState = commandInProgress &&
+            (pendingTargetState == 'on' || pendingTargetState == 'off')
+        ? pendingTargetState!
+        : rawDisplayState;
     final rawType = _asString(_pick(data, ['type']));
     final name = _asString(_pick(data, ['name']), fallback: deviceId);
     final lastCommand = _asMap(data['last_command']);
@@ -1626,7 +1640,7 @@ class KahrabaIqApiService {
       ),
       stale: stale,
       controllable: _asBool(_pick(data, ['controllable']), fallback: true),
-      commandInProgress: _asBool(_pick(data, ['command_in_progress'])),
+      commandInProgress: commandInProgress,
       energySupported: energySupported,
       voltage: _asDouble(_pick(data, ['voltage_v', 'voltage_V', 'voltageV'])),
       current: _asDouble(_pick(data, ['current_a', 'current_A', 'currentA'])),
@@ -1636,9 +1650,7 @@ class KahrabaIqApiService {
       controlMethod: _asNullableString(
         _pick(data, ['control_method', 'controlMethod']),
       ),
-      pendingTargetState: _asNullableString(
-        _pick(data, ['pending_target_state']),
-      ),
+      pendingTargetState: pendingTargetState,
       lastCommandMessage: _asNullableString(
         _pick(lastCommand, ['user_message']) ??
             _pick(data, ['last_command_message']),
