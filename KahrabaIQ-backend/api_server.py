@@ -1680,13 +1680,41 @@ def pi_sensor_state(
         and str(first_present(alert.get("status"), alert.get("state"), "OPEN")).upper()
         not in {"RESOLVED", "AUTO_RESOLVED", "CLEARED"}
     ][:20]
+    previous_latest = as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
+    previous_devices = as_dict(previous_latest.get("devices"))
+    previous_energy = as_dict(previous_latest.get("energy"))
+    incoming_devices = as_dict(request.devices)
+    incoming_energy = as_dict(request.energy)
+    merged_devices = (
+        {**previous_devices, **incoming_devices}
+        if incoming_devices
+        else previous_devices
+    )
+    merged_energy = (
+        {**previous_energy, **incoming_energy}
+        if incoming_energy
+        else previous_energy
+    )
+    if not incoming_devices and previous_devices:
+        print(
+            "[KahrabaIQ PI STATE] preserving previous devices because incoming sensor-state had no devices "
+            f"home_id={home_id} pi_id={pi_id} previous_device_count={len(previous_devices)}",
+            flush=True,
+        )
+    if not incoming_energy and previous_energy:
+        print(
+            "[KahrabaIQ PI STATE] preserving previous energy because incoming sensor-state had no energy "
+            f"home_id={home_id} pi_id={pi_id}",
+            flush=True,
+        )
+
     latest = {
         "home_id": home_id,
         "pi_id": pi_id,
         "dashboard": request.dashboard,
         "room": request.room,
-        "devices": request.devices,
-        "energy": request.energy,
+        "devices": merged_devices,
+        "energy": merged_energy,
         "commands": request.commands,
         "alerts": active_alerts,
         "notifications": [],

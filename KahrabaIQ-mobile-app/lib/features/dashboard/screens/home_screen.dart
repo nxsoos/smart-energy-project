@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/theme/color_tokens.dart';
@@ -41,6 +43,8 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static const String _dashboardCachePrefix = 'kahrabaiq.dashboard.cache.';
+
   final KahrabaIqApiService _api = KahrabaIqApiService();
   String? _homeId;
   String? _currentUserUid;
@@ -84,6 +88,22 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     await _liveSubscription?.cancel();
+    if (_dashboard == null) {
+      final cached = await _loadCachedDashboard();
+      if (mounted && cached != null) {
+        debugPrint(
+          '[KahrabaIQ DASHBOARD CACHE] restored cached dashboard '
+          'home=${_homeId ?? NetworkConfig.defaultHomeId} '
+          'power=${cached.reading.power} devices=${cached.devices.length}',
+        );
+        setState(() {
+          _dashboard = cached;
+          _isLoading = false;
+          _dashboardNotice =
+              'Showing latest saved dashboard while refreshing live data...';
+        });
+      }
+    }
     setState(() {
       _isLoading = _dashboard == null;
       _error = null;
@@ -154,13 +174,17 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
       if (_dashboard != null) {
+        setState(() {
+          _isLoading = false;
+          _dashboardNotice =
+              'Could not refresh from EC2. Showing the latest saved dashboard data.';
+        });
         return;
       }
       setState(() {
-        _dashboard = _offlineDashboard();
         _isLoading = false;
-        _dashboardNotice =
-            'The Pi is offline or frozen. Showing the dashboard shell until live data returns.';
+        _error =
+            'Could not load the latest dashboard. Please check the backend connection and try again.';
       });
     }
 
@@ -186,6 +210,9 @@ class _HomeScreenState extends State<HomeScreen> {
       'month=${mergedDashboard.reading.energyMonth} '
       'monthAvailable=${mergedDashboard.reading.monthDataAvailable} '
       'devices=${mergedDashboard.devices.length}',
+    );
+    unawaited(
+      _cacheDashboard(_homeId ?? NetworkConfig.defaultHomeId, mergedDashboard),
     );
     final liveDeviceIds = mergedDashboard.devices
         .map((device) => device.id)
@@ -233,27 +260,43 @@ class _HomeScreenState extends State<HomeScreen> {
         incoming.automationLogs.isNotEmpty ||
         incoming.nextSchedule != null ||
         incoming.settingsSummary.isNotEmpty;
-    if (hasIntelligence) {
+    final degradedOperationalSnapshot =
+        hasIntelligence && _isOperationalDowngrade(previous, incoming);
+    if (degradedOperationalSnapshot) {
+      debugPrint(
+        '[KahrabaIQ DASHBOARD MERGE] preserved live operational state; '
+        'snapshot looked stale/partial '
+        'previousPower=${previous.reading.power} incomingPower=${incoming.reading.power} '
+        'previousOnline=${_onlineControlDeviceCount(previous.devices)} '
+        'incomingOnline=${_onlineControlDeviceCount(incoming.devices)}',
+      );
+    } else if (hasIntelligence) {
       return incoming;
     }
 
+    final operationalReading = degradedOperationalSnapshot
+        ? _readingWithPreviousLiveValues(
+            incoming: incoming.reading,
+            previous: previous.reading,
+          )
+        : incoming.reading;
     final reading =
-        !incoming.reading.monthDataAvailable &&
+        !operationalReading.monthDataAvailable &&
             previous.reading.monthDataAvailable
         ? EnergyReading(
-            timestamp: incoming.reading.timestamp,
-            voltage: incoming.reading.voltage,
-            current: incoming.reading.current,
-            power: incoming.reading.power,
-            energyToday: incoming.reading.energyToday,
+            timestamp: operationalReading.timestamp,
+            voltage: operationalReading.voltage,
+            current: operationalReading.current,
+            power: operationalReading.power,
+            energyToday: operationalReading.energyToday,
             energyMonth: previous.reading.energyMonth,
-            energyTotal: incoming.reading.energyTotal,
-            costToday: incoming.reading.costToday,
+            energyTotal: operationalReading.energyTotal,
+            costToday: operationalReading.costToday,
             costMonth: previous.reading.costMonth,
             monthDataAvailable: true,
             monthSource: previous.reading.monthSource,
           )
-        : incoming.reading;
+        : operationalReading;
     if (!incoming.reading.monthDataAvailable &&
         previous.reading.monthDataAvailable) {
       debugPrint(
@@ -264,23 +307,35 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return DashboardData(
       reading: reading,
-      sensors: incoming.sensors,
-      devices: incoming.devices.isNotEmpty
+      sensors: degradedOperationalSnapshot
+          ? previous.sensors
+          : incoming.sensors,
+      devices: degradedOperationalSnapshot
+          ? previous.devices
+          : incoming.devices.isNotEmpty
           ? incoming.devices
           : previous.devices,
       alerts: incoming.alerts,
       tariffBhdPerKwh: incoming.tariffBhdPerKwh,
       pendingDeviceCommands: incoming.pendingDeviceCommands,
       deviceCommandErrors: incoming.deviceCommandErrors,
-      aiDashboard: previous.aiDashboard,
-      aiDailySummary: previous.aiDailySummary,
-      aiRecommendation: previous.aiRecommendation,
-      aiAlert: previous.aiAlert,
-      aiNotifications: previous.aiNotifications,
+      aiDashboard: incoming.aiDashboard ?? previous.aiDashboard,
+      aiDailySummary: incoming.aiDailySummary ?? previous.aiDailySummary,
+      aiRecommendation: incoming.aiRecommendation ?? previous.aiRecommendation,
+      aiAlert: incoming.aiAlert ?? previous.aiAlert,
+      aiNotifications: incoming.aiNotifications.isNotEmpty
+          ? incoming.aiNotifications
+          : previous.aiNotifications,
       control: incoming.control,
-      actionSuggestions: previous.actionSuggestions,
-      automationLogs: previous.automationLogs,
-      settingsSummary: previous.settingsSummary,
+      actionSuggestions: incoming.actionSuggestions.isNotEmpty
+          ? incoming.actionSuggestions
+          : previous.actionSuggestions,
+      automationLogs: incoming.automationLogs.isNotEmpty
+          ? incoming.automationLogs
+          : previous.automationLogs,
+      settingsSummary: incoming.settingsSummary.isNotEmpty
+          ? incoming.settingsSummary
+          : previous.settingsSummary,
       occupancy: incoming.occupancy.isNotEmpty
           ? incoming.occupancy
           : previous.occupancy,
@@ -296,6 +351,74 @@ class _HomeScreenState extends State<HomeScreen> {
       scenarioName: previous.scenarioName,
       scenarioDescription: previous.scenarioDescription,
       deviceControlEnabled: incoming.deviceControlEnabled,
+    );
+  }
+
+  bool _isOperationalDowngrade(DashboardData previous, DashboardData incoming) {
+    final previousOnline = _onlineControlDeviceCount(previous.devices);
+    final incomingOnline = _onlineControlDeviceCount(incoming.devices);
+    final previousPower = _effectivePower(previous);
+    final incomingPower = _effectivePower(incoming);
+    final previousHasFreshOperationalState =
+        previousOnline > 0 || previousPower > 0.5;
+    final incomingLooksEmpty =
+        incoming.devices.isEmpty ||
+        incomingOnline < previousOnline ||
+        (previousPower > 0.5 && incomingPower <= 0.1);
+    return previousHasFreshOperationalState && incomingLooksEmpty;
+  }
+
+  int _onlineControlDeviceCount(List<Device> devices) {
+    return devices
+        .where(
+          (device) =>
+              (device.id.startsWith('breaker_') ||
+                  device.id.startsWith('matter_')) &&
+              device.online &&
+              !device.stale,
+        )
+        .length;
+  }
+
+  double _effectivePower(DashboardData dashboard) {
+    final devicePower = dashboard.devices.fold<double>(
+      0,
+      (sum, device) => sum + device.currentPower,
+    );
+    return dashboard.reading.power > 0 ? dashboard.reading.power : devicePower;
+  }
+
+  EnergyReading _readingWithPreviousLiveValues({
+    required EnergyReading incoming,
+    required EnergyReading previous,
+  }) {
+    return EnergyReading(
+      timestamp: previous.timestamp.isAfter(incoming.timestamp)
+          ? previous.timestamp
+          : incoming.timestamp,
+      voltage: previous.voltage > 0 ? previous.voltage : incoming.voltage,
+      current: previous.current > 0 ? previous.current : incoming.current,
+      power: previous.power > 0 ? previous.power : incoming.power,
+      energyToday: previous.energyToday > 0
+          ? previous.energyToday
+          : incoming.energyToday,
+      energyMonth: incoming.monthDataAvailable
+          ? incoming.energyMonth
+          : previous.energyMonth,
+      energyTotal: previous.energyTotal > 0
+          ? previous.energyTotal
+          : incoming.energyTotal,
+      costToday: previous.costToday > 0
+          ? previous.costToday
+          : incoming.costToday,
+      costMonth: incoming.monthDataAvailable
+          ? incoming.costMonth
+          : previous.costMonth,
+      monthDataAvailable:
+          incoming.monthDataAvailable || previous.monthDataAvailable,
+      monthSource: incoming.monthDataAvailable
+          ? incoming.monthSource
+          : previous.monthSource,
     );
   }
 
@@ -361,10 +484,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (_dashboard == null) {
       setState(() {
-        _dashboard = _offlineDashboard();
         _isLoading = false;
         _dashboardNotice =
-            'The Pi is offline or frozen. Showing the dashboard shell until live data returns.';
+            'Live updates are paused. Waiting for the latest dashboard snapshot.';
       });
       return;
     }
@@ -374,87 +496,103 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  DashboardData _offlineDashboard() {
-    final now = DateTime.now();
+  Future<DashboardData?> _loadCachedDashboard() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final preferredHomeId = _homeId ?? NetworkConfig.defaultHomeId;
+      final raw =
+          prefs.getString('$_dashboardCachePrefix$preferredHomeId') ??
+          prefs.getString('${_dashboardCachePrefix}last');
+      if (raw == null || raw.isEmpty) {
+        debugPrint('[KahrabaIQ DASHBOARD CACHE] no cached dashboard found');
+        return null;
+      }
+      final data = jsonDecode(raw);
+      if (data is! Map<String, dynamic>) {
+        return null;
+      }
+      final dashboard = _dashboardFromCache(data);
+      final cachedAt = DateTime.tryParse(data['cachedAt']?.toString() ?? '');
+      final ageSeconds = cachedAt == null
+          ? null
+          : DateTime.now().difference(cachedAt).inSeconds;
+      debugPrint(
+        '[KahrabaIQ DASHBOARD CACHE] loaded cached dashboard '
+        'ageSeconds=${ageSeconds ?? 'unknown'}',
+      );
+      return dashboard;
+    } catch (error) {
+      debugPrint('[KahrabaIQ DASHBOARD CACHE] restore failed: $error');
+      return null;
+    }
+  }
+
+  Future<void> _cacheDashboard(String homeId, DashboardData dashboard) async {
+    if (dashboard.scenarioId != null || dashboard.devices.isEmpty) {
+      return;
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = jsonEncode(_dashboardToCache(dashboard));
+      await prefs.setString('$_dashboardCachePrefix$homeId', raw);
+      await prefs.setString('${_dashboardCachePrefix}last', raw);
+      debugPrint(
+        '[KahrabaIQ DASHBOARD CACHE] saved dashboard '
+        'home=$homeId power=${dashboard.reading.power} devices=${dashboard.devices.length}',
+      );
+    } catch (error) {
+      debugPrint('[KahrabaIQ DASHBOARD CACHE] save failed: $error');
+    }
+  }
+
+  Map<String, dynamic> _dashboardToCache(DashboardData dashboard) {
+    return {
+      'cachedAt': DateTime.now().toIso8601String(),
+      'reading': dashboard.reading.toJson(),
+      'sensors': dashboard.sensors.toJson(),
+      'devices': dashboard.devices.map((device) => device.toJson()).toList(),
+      'alerts': dashboard.alerts.map((alert) => alert.toJson()).toList(),
+      'tariffBhdPerKwh': dashboard.tariffBhdPerKwh,
+      'hubStatus': dashboard.hubStatus,
+      'occupancy': dashboard.occupancy,
+      'safety': dashboard.safety,
+      'criticalAlerts': dashboard.criticalAlerts,
+      'deviceControlEnabled': dashboard.deviceControlEnabled,
+    };
+  }
+
+  DashboardData _dashboardFromCache(Map<String, dynamic> data) {
+    final devices = (data['devices'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(Device.fromJson)
+        .toList();
+    final alerts = (data['alerts'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(Alert.fromJson)
+        .toList();
     return DashboardData(
-      reading: EnergyReading(
-        timestamp: now,
-        voltage: 0,
-        current: 0,
-        power: 0,
-        energyToday: 0,
-        energyTotal: 0,
-        monthDataAvailable: false,
-        monthSource: 'unavailable',
+      reading: EnergyReading.fromJson(
+        Map<String, dynamic>.from(data['reading'] as Map? ?? const {}),
       ),
-      sensors: SensorData(
-        timestamp: DateTime.fromMillisecondsSinceEpoch(0),
-        temperature: 0,
-        humidity: 0,
-        isOccupied: false,
-        smokeStatus: 'Unknown',
-        noiseStatus: 'Unknown',
-        lightStatus: 'Unknown',
-        online: false,
+      sensors: SensorData.fromJson(
+        Map<String, dynamic>.from(data['sensors'] as Map? ?? const {}),
       ),
-      devices: [
-        Device(
-          id: 'matter_socket_switch',
-          name: 'Socket Switch',
-          type: DeviceType.socket,
-          isOn: false,
-          currentPower: 0,
-          branch: 'Main',
-          online: false,
-          localOnline: false,
-          cloudOnline: false,
-          statusLabel: 'offline',
-          controlMethod: 'home_assistant',
-        ),
-        Device(
-          id: 'matter_ac_switch',
-          name: 'AC Switch',
-          type: DeviceType.airConditioner,
-          isOn: false,
-          currentPower: 0,
-          branch: 'Main',
-          online: false,
-          localOnline: false,
-          cloudOnline: false,
-          statusLabel: 'offline',
-          controlMethod: 'home_assistant',
-        ),
-        Device(
-          id: 'breaker_01',
-          name: 'AC Breaker',
-          type: DeviceType.airConditioner,
-          isOn: false,
-          currentPower: 0,
-          branch: 'AC',
-          online: false,
-          localOnline: false,
-          cloudOnline: false,
-          statusLabel: 'offline',
-          controlMethod: 'home_assistant',
-        ),
-        Device(
-          id: 'breaker_02',
-          name: 'Socket Breaker',
-          type: DeviceType.socket,
-          isOn: false,
-          currentPower: 0,
-          branch: 'Socket',
-          online: false,
-          localOnline: false,
-          cloudOnline: false,
-          statusLabel: 'offline',
-          controlMethod: 'home_assistant',
-        ),
-      ],
-      alerts: const [],
-      tariffBhdPerKwh: ElectricityPricing.costPerKWh,
-      hubStatus: const {'online': false, 'status_label': 'offline'},
-      deviceControlEnabled: false,
+      devices: devices,
+      alerts: alerts,
+      tariffBhdPerKwh:
+          (data['tariffBhdPerKwh'] as num?)?.toDouble() ??
+          ElectricityPricing.costPerKWh,
+      hubStatus: Map<String, dynamic>.from(
+        data['hubStatus'] as Map? ?? const {},
+      ),
+      occupancy: Map<String, dynamic>.from(
+        data['occupancy'] as Map? ?? const {},
+      ),
+      safety: Map<String, dynamic>.from(data['safety'] as Map? ?? const {}),
+      criticalAlerts: (data['criticalAlerts'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .toList(),
+      deviceControlEnabled: data['deviceControlEnabled'] as bool? ?? true,
     );
   }
 
