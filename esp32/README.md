@@ -26,10 +26,12 @@ Sequence:
 1. ESP32 starts in setup mode and exposes `KahrabaIQ-ESP32-Setup`.
 2. Pi first-boot setup collects the home Wi-Fi SSID/password from the installer.
 3. Pi connects `wlan0` to the home Wi-Fi.
-4. Pi connects `wlan1` to `KahrabaIQ-ESP32-Setup`.
-5. Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` with the home Wi-Fi credentials and Pi receiver URL.
-6. ESP32 saves the config, reboots, joins the same home Wi-Fi as the Pi, and starts sending sensor data.
-7. Pi turns `wlan1` off and starts the locked dashboard only after provisioning completes.
+4. Pi displays a QR pairing code after internet is available.
+5. The mobile app scans the QR and the backend returns the real `home_id`.
+6. Pi connects `wlan1` to `KahrabaIQ-ESP32-Setup`.
+7. Pi detects the ESP32 setup gateway from `wlan1` and sends `POST http://<detected-gateway>/provision` with the home Wi-Fi credentials, real `home_id`, and Pi receiver URL.
+8. ESP32 saves the config, reboots, joins the same home Wi-Fi as the Pi, and starts sending sensor data.
+9. Pi turns `wlan1` off and starts the locked dashboard only after provisioning completes.
 
 The Pi-side implementation is in `pi/agent/pi_provisioning.py`. The dashboard is blocked until `/var/lib/kahrabaiq/provisioned.json` exists.
 

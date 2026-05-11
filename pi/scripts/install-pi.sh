@@ -17,7 +17,7 @@ fi
 
 python3 -m venv "$REPO_DIR/.venv"
 "$REPO_DIR/.venv/bin/pip" install --upgrade pip
-"$REPO_DIR/.venv/bin/pip" install flask python-dotenv requests boto3 tuya-connector-python awsiotsdk
+"$REPO_DIR/.venv/bin/pip" install flask python-dotenv requests qrcode boto3 tuya-connector-python awsiotsdk
 
 sudo install -m 0644 "$REPO_DIR/pi/systemd/"*.service "$SERVICE_DIR/"
 sudo sed -i "s/^User=pi$/User=$SERVICE_USER/" "$SERVICE_DIR"/kahrabaiq-*.service
@@ -29,7 +29,7 @@ fi
 sudo systemctl daemon-reload
 
 printf 'Installed KahrabaIQ Pi services. Enable after configuring /etc/kahrabaiq/pi.env:\n'
-printf '  sudo systemctl enable --now kahrabaiq-provisioning kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-iot-live-publisher kahrabaiq-kiosk-browser\n'
+printf '  sudo systemctl enable --now kahrabaiq-provisioning kahrabaiq-setup-screen kahrabaiq-agent kahrabaiq-sensor-receiver kahrabaiq-summary-sync kahrabaiq-command-runner kahrabaiq-iot-live-publisher kahrabaiq-kiosk-browser\n'
 printf 'Provisioning uses NetworkManager/nmcli. Install network-manager first if nmcli is unavailable.\n'
 printf 'For Home Assistant and Matter containers, install Docker and run:\n'
 printf '  KAHRABAIQ_REPO_DIR=%s %s/pi/scripts/setup-home-stack.sh\n' "$REPO_DIR" "$REPO_DIR"

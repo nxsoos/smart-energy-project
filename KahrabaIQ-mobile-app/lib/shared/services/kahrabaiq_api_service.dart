@@ -289,12 +289,14 @@ class HomeMember {
     required this.email,
     required this.displayName,
     required this.role,
+    this.addedAt,
   });
 
   final String uid;
   final String email;
   final String displayName;
   final String role;
+  final DateTime? addedAt;
 }
 
 class HomeInvite {
@@ -303,12 +305,18 @@ class HomeInvite {
     required this.token,
     required this.qrPayload,
     required this.expiresAtMs,
+    required this.role,
+    required this.maxUses,
+    required this.remainingSlots,
   });
 
   final String inviteId;
   final String token;
   final String qrPayload;
   final int expiresAtMs;
+  final String role;
+  final int maxUses;
+  final int remainingSlots;
 }
 
 class DeviceCommandState {
@@ -1986,11 +1994,12 @@ class KahrabaIqApiService {
 
   Future<HomeInvite> createHomeInvite({
     required String homeId,
-    String role = 'member',
+    required String role,
+    required int maxUses,
   }) async {
     final response = await _dio.post(
       '/api/home/$homeId/invites',
-      data: {'role': role, 'max_uses': 1},
+      data: {'role': role, 'max_uses': maxUses},
     );
     final data = _asMap(response.data);
     return HomeInvite(
@@ -1998,6 +2007,9 @@ class KahrabaIqApiService {
       token: _asString(data['token']),
       qrPayload: _asString(data['qr_payload']),
       expiresAtMs: _asInt(data['expires_at_ms']),
+      role: _asString(data['role'], fallback: role),
+      maxUses: _asInt(data['max_uses'], fallback: maxUses),
+      remainingSlots: _asInt(data['remaining_slots']),
     );
   }
 
@@ -2687,6 +2699,9 @@ class KahrabaIqApiService {
         fallback: 'User',
       ),
       role: _asString(_pick(data, ['role']), fallback: 'viewer'),
+      addedAt: _parseOptionalDateTime(
+        _pick(data, ['added_at_ms', 'added_at_iso', 'addedAt']),
+      ),
     );
   }
 

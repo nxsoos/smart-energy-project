@@ -1,5 +1,6 @@
 [Unit]
 Description=KahrabaIQ Pi touchscreen kiosk browser
+ConditionPathExists=/var/lib/kahrabaiq/provisioned.json
 After=graphical.target kahrabaiq-provisioning.service kahrabaiq-agent.service
 Wants=kahrabaiq-agent.service
 Requires=kahrabaiq-provisioning.service
@@ -7,7 +8,6 @@ Requires=kahrabaiq-provisioning.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/kahrabaiq/pi.env
-ExecStartPre=/bin/sh -c 'test -f "${PROVISIONING_MARKER_PATH:-/var/lib/kahrabaiq/provisioned.json}"'
 ExecStart=/opt/kahrabaiq/pi/scripts/launch-kiosk.sh
 Restart=always
 RestartSec=5

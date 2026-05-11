@@ -21,6 +21,7 @@ import '../../demo/widgets/demo_scenario_selector.dart';
 import '../../pairing/screens/qr_scanner_screen.dart';
 import '../../sensors/screens/sensors_status_screen.dart';
 import 'breakers_screen.dart';
+import 'home_admin_panel_screen.dart';
 import 'notifications_screen.dart';
 import '../widgets/ai_insights_banner.dart';
 import '../widgets/dashboard_header.dart';
@@ -41,6 +42,8 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final KahrabaIqApiService _api = KahrabaIqApiService();
   String? _homeId;
+  String? _currentUserUid;
+  UserHomeAccess? _currentHomeAccess;
   DashboardData? _dashboard;
   StreamSubscription<DashboardData>? _liveSubscription;
   bool _isLoading = true;
@@ -92,16 +95,21 @@ class _HomeScreenState extends State<HomeScreen> {
       pairedHomeId = NetworkConfig.defaultHomeId;
       setState(() {
         _homeId = pairedHomeId;
+        _currentUserUid = null;
+        _currentHomeAccess = null;
       });
     } else {
       try {
         final profile = await AuthService().loadCurrentUserProfile();
-        pairedHomeId = _selectPairedHome(profile)?.homeId;
+        final selectedHome = _selectPairedHome(profile);
+        pairedHomeId = selectedHome?.homeId;
         if (!mounted) {
           return;
         }
         setState(() {
           _homeId = pairedHomeId;
+          _currentUserUid = profile.uid;
+          _currentHomeAccess = selectedHome;
         });
         if (pairedHomeId == null || pairedHomeId.isEmpty) {
           setState(() {
@@ -450,6 +458,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final dashboard = _dashboard;
     final isPaired = _homeId != null && _homeId!.isNotEmpty;
+    final canOpenAdminPanel =
+        _currentHomeAccess?.permissions.canGenerateInvites == true ||
+        _currentHomeAccess?.role == 'home_admin';
     return Scaffold(
       body: SafeArea(
         child: _isLoading
@@ -566,6 +577,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     _DashboardActions(
                       onSensors: _openSensors,
                       onPair: _openQrScanner,
+                      onAdmin: canOpenAdminPanel ? _openAdminPanel : null,
                       isPairing: _isPairing,
                       showPair: false,
                     ),
@@ -772,6 +784,8 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _dashboard = null;
         _homeId = null;
+        _currentUserUid = null;
+        _currentHomeAccess = null;
         _localPendingCommands.clear();
         _localCommandErrors.clear();
       });
@@ -787,7 +801,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (payload == null || payload.isEmpty) {
       return;
     }
-    final parsed = _parsePairingPayload(payload);
+    final parsed = _parseScannedQrPayload(payload);
     if (parsed == null) {
       if (!mounted) {
         return;
@@ -799,20 +813,29 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     setState(() => _isPairing = true);
     try {
-      final result = await _api.claimPi(
-        piId: parsed.piId,
-        token: parsed.token,
-        homeName: 'KahrabaIQ Home',
-      );
+      final Map<String, dynamic> result;
+      final String successMessage;
+      if (parsed is _PiPairingPayload) {
+        result = await _api.claimPi(
+          piId: parsed.piId,
+          token: parsed.token,
+          homeName: 'KahrabaIQ Home',
+        );
+        successMessage = 'Paired ${result['pi_id'] ?? parsed.piId} successfully.';
+      } else if (parsed is _HomeInvitePayload) {
+        result = await _api.claimHomeInvite(
+          inviteId: parsed.inviteId,
+          token: parsed.token,
+        );
+        successMessage = 'Joined home as ${result['role'] ?? 'member'}.';
+      } else {
+        throw Exception('Unsupported QR code.');
+      }
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Paired ${result['pi_id'] ?? parsed.piId} successfully.',
-          ),
-        ),
+        SnackBar(content: Text(successMessage)),
       );
       await _loadDashboard();
     } catch (error) {
@@ -851,7 +874,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return activeHomes.first;
   }
 
-  _PairingPayload? _parsePairingPayload(String payload) {
+  _ScannedQrPayload? _parseScannedQrPayload(String payload) {
     final uri = Uri.tryParse(payload);
     if (uri != null && uri.scheme == 'kahrabaiq' && uri.host == 'pair') {
       final piId = uri.queryParameters['pi_id']?.trim();
@@ -860,17 +883,39 @@ class _HomeScreenState extends State<HomeScreen> {
           piId.isNotEmpty &&
           token != null &&
           token.isNotEmpty) {
-        return _PairingPayload(piId: piId, token: token);
+        return _PiPairingPayload(piId: piId, token: token);
+      }
+    }
+    if (uri != null && uri.scheme == 'kahrabaiq' && uri.host == 'invite') {
+      final inviteId = uri.queryParameters['invite_id']?.trim();
+      final token = uri.queryParameters['token']?.trim();
+      if (inviteId != null &&
+          inviteId.isNotEmpty &&
+          token != null &&
+          token.isNotEmpty) {
+        return _HomeInvitePayload(inviteId: inviteId, token: token);
       }
     }
     final parts = payload.split(RegExp(r'\s+'));
     if (parts.length >= 2) {
-      return _PairingPayload(
+      return _PiPairingPayload(
         piId: parts.first.trim(),
         token: parts.last.trim(),
       );
     }
-    return _PairingPayload(piId: NetworkConfig.defaultHomePiId, token: payload);
+    return _PiPairingPayload(piId: NetworkConfig.defaultHomePiId, token: payload);
+  }
+
+  Future<void> _openAdminPanel() async {
+    final homeId = _homeId;
+    final userUid = _currentUserUid;
+    if (homeId == null || homeId.isEmpty || userUid == null || userUid.isEmpty) {
+      return;
+    }
+    await Navigator.of(context).push(
+      fadeSlideRoute(HomeAdminPanelScreen(homeId: homeId, currentUserUid: userUid)),
+    );
+    await _loadDashboard();
   }
 
   String _displayName() {
@@ -957,9 +1002,9 @@ class _UnpairedHomeState extends StatelessWidget {
         const SizedBox(height: 28),
         AppEmptyState(
           icon: Icons.home_work_outlined,
-          title: 'Pair your home',
+          title: 'Join or pair a home',
           message:
-              'Scan or enter the Pi pairing code to unlock live energy, breakers, and sensors.',
+              'Scan a Pi pairing QR or a home invite QR to continue.',
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
@@ -971,7 +1016,7 @@ class _UnpairedHomeState extends StatelessWidget {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Icon(Icons.qr_code_scanner),
-          label: Text(isPairing ? 'Pairing' : 'Pair home'),
+          label: Text(isPairing ? 'Pairing' : 'Scan QR'),
         ),
       ],
     );
@@ -1269,11 +1314,13 @@ class _DashboardActions extends StatelessWidget {
     required this.onSensors,
     required this.onPair,
     required this.isPairing,
+    this.onAdmin,
     this.showPair = true,
   });
 
   final VoidCallback onSensors;
   final VoidCallback onPair;
+  final VoidCallback? onAdmin;
   final bool isPairing;
   final bool showPair;
 
@@ -1288,6 +1335,16 @@ class _DashboardActions extends StatelessWidget {
             label: const Text('Sensors'),
           ),
         ),
+        if (onAdmin != null) ...[
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: onAdmin,
+              icon: const Icon(Icons.admin_panel_settings),
+              label: const Text('Admin Panel'),
+            ),
+          ),
+        ],
         if (showPair) ...[
           const SizedBox(width: 12),
           Expanded(
@@ -1385,9 +1442,20 @@ class _SmokeAlertDialog extends StatelessWidget {
   }
 }
 
-class _PairingPayload {
-  const _PairingPayload({required this.piId, required this.token});
+sealed class _ScannedQrPayload {
+  const _ScannedQrPayload();
+}
+
+class _PiPairingPayload extends _ScannedQrPayload {
+  const _PiPairingPayload({required this.piId, required this.token});
 
   final String piId;
+  final String token;
+}
+
+class _HomeInvitePayload extends _ScannedQrPayload {
+  const _HomeInvitePayload({required this.inviteId, required this.token});
+
+  final String inviteId;
   final String token;
 }
