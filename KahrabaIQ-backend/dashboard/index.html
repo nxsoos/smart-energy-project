@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KahrabaIQ Dashboard</title>
+  <link rel="stylesheet" href="/dashboard/dashboard.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 64 64" role="img" aria-label="KahrabaIQ logo">
+          <defs>
+            <linearGradient id="brandBolt" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#11d9ff"></stop>
+              <stop offset="1" stop-color="#12c48b"></stop>
+            </linearGradient>
+          </defs>
+          <rect x="5" y="5" width="54" height="54" rx="17" fill="#071024" stroke="rgba(17,217,255,.42)" stroke-width="2"></rect>
+          <path d="M35.4 8.8 16.8 35.1h13.4l-3.5 20.1 20.5-28H33.9l1.5-18.4Z" fill="url(#brandBolt)"></path>
+          <path d="M22.5 39.7c4.9 5.3 13.5 5.7 18.9.8" fill="none" stroke="#f7f8ff" stroke-opacity=".82" stroke-width="3" stroke-linecap="round"></path>
+        </svg>
+        <div>
+          <h1>KahrabaIQ</h1>
+          <p id="subtitle">Checking Pi access...</p>
+        </div>
+      </div>
+      <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">Connecting</span></div>
+    </header>
+
+    <section class="notice" id="notice" hidden></section>
+
+    <section class="pairing" id="pairingPanel" hidden>
+      <div>
+        <p class="eyebrow">Pi online</p>
+        <h2>Waiting for pairing</h2>
+        <p>This Pi is allowed to open the cloud dashboard. Pair it to a home to show live sensor data.</p>
+      </div>
+      <dl>
+        <div><dt>Pi ID</dt><dd id="pairPiId">--</dd></div>
+        <div><dt>Wi-Fi</dt><dd id="pairWifi">--</dd></div>
+        <div><dt>Public IP</dt><dd id="pairPublicIp">--</dd></div>
+      </dl>
+    </section>
+
+    <section class="grid" id="dashboardGrid">
+      <article class="card hero">
+        <p class="label">Live Power</p>
+        <div><span class="value" id="power">--</span><span class="unit">W</span></div>
+        <div class="metrics">
+          <div><p class="label">Today</p><strong id="energyToday">-- kWh</strong></div>
+          <div><p class="label">Cost</p><strong id="costToday">-- BD</strong></div>
+          <div><p class="label">Breakers</p><strong id="breakerCount">--</strong></div>
+        </div>
+      </article>
+
+      <article class="card room">
+        <p class="label">Room Sensors</p>
+        <div class="sensor-grid">
+          <div><p>Temperature</p><strong id="temperature">-- C</strong></div>
+          <div><p>Humidity</p><strong id="humidity">-- %</strong></div>
+          <div><p>Motion</p><strong id="motion">--</strong></div>
+          <div><p>Smoke/Gas</p><strong id="smoke">--</strong></div>
+        </div>
+      </article>
+
+      <article class="card wide">
+        <div class="card-head"><p class="label">Devices</p><span id="liveMode">Polling fallback</span></div>
+        <div class="devices" id="devices">No device data yet.</div>
+      </article>
+
+      <article class="card wide">
+        <p class="label">Alerts & Notes</p>
+        <div id="alerts">No active alerts.</div>
+      </article>
+    </section>
+  </main>
+
+  <script src="/dashboard/dashboard.js" defer></script>
+</body>
+</html>

@@ -37,9 +37,9 @@ The Pi runs local hardware services and reports compact state to the deployed AP
 ## Security Model
 
 - `PI_DEVICE_TOKEN` exists only in `/etc/kahrabaiq/pi.env` and Pi processes.
-- The browser requests a short-lived kiosk token from `http://127.0.0.1:5010/api/kiosk/session`.
-- The deployed dashboard uses that kiosk token for AWS kiosk APIs.
-- A laptop or phone that opens the dashboard URL directly will not have the local token bridge.
+- The production browser opens `https://dashboard.kahrabaiq.com`.
+- The backend allows the dashboard only when the request public IP matches a fresh Pi heartbeat record in the DB.
+- If the Pi is not paired yet, the cloud dashboard shows a waiting-for-pairing screen.
 - The dashboard starts only after `/var/lib/kahrabaiq/provisioned.json` exists.
 - The local kiosk dashboard can be unlocked by admin credentials, then locked again without rebooting.
 
@@ -108,7 +108,7 @@ nmcli device status
 
 ## Dashboard Admin Unlock
 
-The local kiosk dashboard is served from `http://127.0.0.1:5010/dashboard` and is locked by default after provisioning.
+The production kiosk dashboard is served from `https://dashboard.kahrabaiq.com` after provisioning. The local Pi dashboard route at `http://127.0.0.1:5010/dashboard` remains a fallback/debug route.
 
 Admin unlock options:
 
