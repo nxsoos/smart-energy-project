@@ -139,12 +139,26 @@ class HomeSettings {
   final Map<String, dynamic> values;
 
   double get costPerKwh => _asDoubleValue(values['cost_per_kwh'], 0.029);
+  double get monthlyCostLimitBhd =>
+      _asDoubleValue(values['monthly_cost_limit_bhd'], 2.0);
+  double get monthlyEnergyLimitKwh =>
+      _asDoubleValue(values['monthly_energy_limit_kwh'], 70);
+  double get dailyCostLimitBhd =>
+      _asDoubleValue(values['daily_cost_limit_bhd'], 0.25);
+  double get dailyEnergyLimitKwh =>
+      _asDoubleValue(values['daily_energy_limit_kwh'], 10);
+  double get highUsageWarningPercent =>
+      _asDoubleValue(values['high_usage_warning_percent'], 80);
   double get comfortMin =>
       _asDoubleValue(values['comfort_temperature_min'], 22);
   double get comfortMax =>
       _asDoubleValue(values['comfort_temperature_max'], 25);
   double get highTempThreshold =>
       _asDoubleValue(values['high_temperature_threshold'], 28);
+  double get humidityMin => _asDoubleValue(values['humidity_min'], 30);
+  double get humidityMax => _asDoubleValue(values['humidity_max'], 70);
+  bool get airQualityAlertEnabled =>
+      _asBoolValue(values['air_quality_alert_enabled'], true);
   int get lightWasteMinutes => _asIntValue(values['light_waste_minutes'], 5);
   int get motionRecentSeconds =>
       _asIntValue(values['motion_recent_seconds'], 90);
@@ -158,6 +172,10 @@ class HomeSettings {
       _asDoubleValue(values['occupancy_confidence_threshold'], 0.65);
   int get deviceOfflineMinutes =>
       _asIntValue(values['device_offline_minutes'], 2);
+  int get sensorStaleMinutes => _asIntValue(values['sensor_stale_minutes'], 3);
+  int get breakerStaleMinutes =>
+      _asIntValue(values['breaker_stale_minutes'], 3);
+  int get hubOfflineMinutes => _asIntValue(values['hub_offline_minutes'], 5);
   bool get quietHoursEnabled =>
       _asBoolValue(values['quiet_hours_enabled'], true);
   String get quietHoursStart =>
@@ -165,10 +183,24 @@ class HomeSettings {
   String get quietHoursEnd => values['quiet_hours_end']?.toString() ?? '06:00';
   bool get aiRecommendationsEnabled =>
       _asBoolValue(values['ai_recommendations_enabled'], true);
+  bool get aiAnomalyDetectionEnabled =>
+      _asBoolValue(values['ai_anomaly_detection_enabled'], true);
+  bool get aiCostForecastEnabled =>
+      _asBoolValue(values['ai_cost_forecast_enabled'], true);
   bool get autoControlEnabled =>
       _asBoolValue(values['auto_control_enabled'], true);
   bool get notificationsEnabled =>
       _asBoolValue(values['notifications_enabled'], true);
+  bool get costNotificationsEnabled =>
+      _asBoolValue(values['cost_notifications_enabled'], true);
+  bool get energyNotificationsEnabled =>
+      _asBoolValue(values['energy_notifications_enabled'], true);
+  bool get safetyNotificationsEnabled =>
+      _asBoolValue(values['safety_notifications_enabled'], true);
+  bool get deviceStatusNotificationsEnabled =>
+      _asBoolValue(values['device_status_notifications_enabled'], true);
+  bool get aiNotificationsEnabled =>
+      _asBoolValue(values['ai_notifications_enabled'], true);
   bool get schedulesEnabled => _asBoolValue(values['schedules_enabled'], true);
 
   static double _asDoubleValue(dynamic value, double fallback) {

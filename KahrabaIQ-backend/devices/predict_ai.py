@@ -8,9 +8,10 @@ from typing import Any
 import joblib
 import pandas as pd
 
-
-BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "models" / "smart_energy_ai.joblib"
+try:
+    from ai_pipeline import MODEL_PATH, as_number
+except ModuleNotFoundError:
+    from devices.ai_pipeline import MODEL_PATH, as_number
 
 
 def load_payload(payload_arg: str | None) -> dict[str, Any]:
@@ -34,22 +35,8 @@ def load_payload(payload_arg: str | None) -> dict[str, Any]:
         "noise_count": 1,
         "high_temp_count": 20,
         "occupancy_score": 0.05,
-        "occupancy_state": "empty",
-        "occupancy_confidence": 0.82,
-        "occupied": False,
-        "minutes_since_last_activity": 12,
-        "motion_recent": False,
-        "sound_recent": False,
-        "sound_active": False,
-        "light_on_while_empty": True,
-        "device_on_while_empty": True,
-        "empty_room_power_w": 100.0,
         "switch_avg_power_W": 20.0,
-        "switch_peak_power_W": 50.0,
-        "switch_energy_kWh": 0.02,
         "ac_avg_power_W": 80.0,
-        "ac_peak_power_W": 120.0,
-        "ac_energy_kWh": 0.08,
         "total_avg_power_W": 100.0,
         "total_peak_power_W": 170.0,
         "total_energy_kWh": 0.1,
@@ -59,103 +46,104 @@ def load_payload(payload_arg: str | None) -> dict[str, Any]:
 
 
 def confidence_from_model(model: Any, row: pd.DataFrame, prediction: Any) -> float | None:
-    classifier = model.named_steps.get("model")
-    if not hasattr(classifier, "predict_proba"):
+    estimator = model.named_steps.get("model")
+    if not hasattr(estimator, "predict_proba"):
         return None
-
     probabilities = model.predict_proba(row)[0]
-    classes = list(classifier.classes_)
-    predicted_index = classes.index(prediction)
-    return round(float(probabilities[predicted_index]), 4)
+    classes = list(estimator.classes_)
+    if prediction not in classes:
+        return None
+    return round(float(probabilities[classes.index(prediction)]), 4)
 
 
-def build_explanation(result: dict[str, Any], payload: dict[str, Any]) -> str:
-    waste = result["waste_event"]["value"]
-    anomaly = result["anomaly_label"]["value"]
-    recommendation = result["recommendation_type"]["value"]
+def top_factors(bundle: dict[str, Any], payload: dict[str, Any], limit: int = 5) -> list[dict[str, Any]]:
+    metrics = bundle.get("evaluation_metrics") or {}
+    columns = bundle.get("feature_columns") or []
+    factors = []
+    for column in columns:
+        value = payload.get(column)
+        if value in {None, "", False}:
+            continue
+        numeric = abs(as_number(value, 0))
+        if numeric <= 0 and not isinstance(value, str):
+            continue
+        factors.append({"feature": column, "value": value, "reason": "available_runtime_feature"})
+    return factors[:limit]
 
-    if waste:
-        if payload.get("light_on_while_empty") or payload.get("device_on_while_empty"):
-            return "Energy waste is likely because light or device power is active while the room appears empty."
-        if payload.get("occupancy_score", 1) < 0.2 and payload.get("total_avg_power_W", 0) > 0:
-            return "Energy waste is likely because power usage is active while occupancy appears low."
-        return "Energy waste is likely based on the current power, room, and time pattern."
 
-    if anomaly != "normal":
-        return f"Abnormal usage pattern detected: {anomaly}."
-
-    if recommendation != "none":
-        return f"The AI recommends a {recommendation} action based on the current pattern."
-
-    return "Current usage looks normal compared with the training pattern."
+def confidence_label(confidence: float | None) -> str:
+    if confidence is None:
+        return "unknown"
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.55:
+        return "medium"
+    return "low"
 
 
 def predict(payload: dict[str, Any]) -> dict[str, Any]:
     if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"Model not found: {MODEL_PATH}. Run train_ai_model.py first."
-        )
+        raise FileNotFoundError(f"Model not found: {MODEL_PATH}. Run train_ai_model.py first.")
 
     bundle = joblib.load(MODEL_PATH)
     feature_columns: list[str] = bundle["feature_columns"]
     models: dict[str, Any] = bundle["models"]
-
     row = pd.DataFrame([{column: payload.get(column) for column in feature_columns}])
-
     result: dict[str, Any] = {
         "model_name": bundle["model_name"],
         "model_version": bundle["model_version"],
+        "ai_mode": "full_ml",
+        "predictions": {},
+        "top_factors": top_factors(bundle, payload),
+        "data_source": payload.get("data_source", "manual_payload"),
     }
 
+    confidences: list[float] = []
     for target, model in models.items():
         prediction = model.predict(row)[0]
         value: Any = prediction.item() if hasattr(prediction, "item") else prediction
-
-        result[target] = {
-            "value": value,
-        }
-
+        item = {"value": value, "model": bundle.get("selected_models", {}).get(target)}
         confidence = confidence_from_model(model, row, prediction)
         if confidence is not None:
-            result[target]["confidence"] = confidence
+            item["confidence"] = confidence
+            confidences.append(confidence)
+        result["predictions"][target] = item
+        result[target] = item
 
+    confidence = round(sum(confidences) / len(confidences), 4) if confidences else None
+    result["confidence"] = {"value": confidence, "label": confidence_label(confidence)}
     result["energy_efficiency_score"] = calculate_efficiency_score(result, payload)
     result["explanation"] = build_explanation(result, payload)
-
     return result
+
+
+def build_explanation(result: dict[str, Any], payload: dict[str, Any]) -> str:
+    waste = bool(result["waste_event"]["value"])
+    anomaly = str(result["anomaly_label"]["value"])
+    recommendation = str(result["recommendation_type"]["value"])
+    if waste and as_number(payload.get("occupancy_score"), 1) < 0.2:
+        return "Energy waste is likely because power is active while occupancy evidence is low."
+    if anomaly not in {"normal", "low_usage_normal"}:
+        return f"AI detected {anomaly} and recommends {recommendation}."
+    return "Current usage looks normal for the available features."
 
 
 def calculate_efficiency_score(result: dict[str, Any], payload: dict[str, Any]) -> int:
     score = 100
-
-    if result["waste_event"]["value"]:
+    if bool(result["waste_event"]["value"]):
         score -= 30
-
-    if result["anomaly_label"]["value"] != "normal":
+    if str(result["anomaly_label"]["value"]) not in {"normal", "low_usage_normal"}:
         score -= 20
-
-    if payload.get("high_temp_count", 0) > 0 and payload.get("ac_avg_power_W", 0) > 0:
-        score -= 10
-
-    if payload.get("device_on_while_empty") or (
-        payload.get("occupancy_score", 1) < 0.2 and payload.get("total_avg_power_W", 0) > 0
-    ):
+    if as_number(payload.get("occupancy_score"), 1) < 0.2 and as_number(payload.get("total_avg_power_W")) > 20:
         score -= 20
-
     return max(0, min(100, score))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run KahrabaIQ Intelligence prediction.")
-    parser.add_argument(
-        "--payload",
-        help="JSON string or path to a JSON file. If omitted, a demo payload is used.",
-    )
+    parser.add_argument("--payload", help="JSON string or path to a JSON file. If omitted, a demo payload is used.")
     args = parser.parse_args()
-
-    payload = load_payload(args.payload)
-    result = predict(payload)
-    print(json.dumps(result, indent=2))
+    print(json.dumps(predict(load_payload(args.payload)), indent=2, default=str))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ class AppNotification {
       id: _asString(json['notification_id'] ?? json['id']),
       title: _asString(json['title'], fallback: 'KahrabaIQ Alert'),
       body: _asString(json['body'] ?? json['message'], fallback: 'New home notification.'),
-      type: _asString(json['type'], fallback: 'notification'),
+      type: _asString(json['category'] ?? json['type'], fallback: 'notification'),
       severity: _asString(json['severity'], fallback: 'info'),
       createdAt: _parseTimestamp(
         json['created_at_ms'] ?? json['timestamp_ms'] ?? json['created_at_iso'],

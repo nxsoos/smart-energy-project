@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import html
+import json
 import ipaddress
 import hashlib
 import hmac
@@ -61,6 +62,7 @@ from aws_cloud_store import (
     query_summaries_between,
     query_recent_remote_commands,
     store_ai_result,
+    store_summary_item,
     update_remote_command,
 )
 
@@ -393,12 +395,18 @@ DEFAULT_UNKNOWN_DEVICE_SAFETY = {
 DEFAULT_SETTINGS = {
     "currency": "BHD",
     "cost_per_kwh": 0.029,
+    "monthly_cost_limit_bhd": 2.0,
+    "monthly_energy_limit_kwh": 70,
+    "daily_cost_limit_bhd": 0.25,
+    "daily_energy_limit_kwh": 10,
+    "high_usage_warning_percent": 80,
     "temperature_unit": "C",
     "comfort_temperature_min": 22,
     "comfort_temperature_max": 25,
     "high_temperature_threshold": 28,
     "humidity_min": 30,
     "humidity_max": 70,
+    "air_quality_alert_enabled": True,
     "light_waste_minutes": 5,
     "motion_recent_seconds": DEFAULT_OCCUPANCY_SETTINGS["motion_recent_seconds"],
     "sound_recent_seconds": DEFAULT_OCCUPANCY_SETTINGS["sound_recent_seconds"],
@@ -407,12 +415,22 @@ DEFAULT_SETTINGS = {
     "occupancy_confidence_threshold": DEFAULT_OCCUPANCY_SETTINGS["occupancy_confidence_threshold"],
     "occupancy_history_interval_minutes": DEFAULT_OCCUPANCY_SETTINGS["occupancy_history_interval_minutes"],
     "device_offline_minutes": 2,
+    "sensor_stale_minutes": 3,
+    "breaker_stale_minutes": 3,
+    "hub_offline_minutes": 5,
     "quiet_hours_enabled": True,
     "quiet_hours_start": "23:00",
     "quiet_hours_end": "06:00",
     "ai_recommendations_enabled": True,
+    "ai_anomaly_detection_enabled": True,
+    "ai_cost_forecast_enabled": True,
     "auto_control_enabled": True,
     "notifications_enabled": True,
+    "cost_notifications_enabled": True,
+    "energy_notifications_enabled": True,
+    "safety_notifications_enabled": True,
+    "device_status_notifications_enabled": True,
+    "ai_notifications_enabled": True,
     "schedules_enabled": True,
     "chat_history_retention_days": 90,
 }
@@ -420,18 +438,28 @@ DEFAULT_SETTINGS = {
 SETTINGS_OPTIONS = {
     "currency": ["BHD"],
     "temperature_unit": ["C", "F"],
-    "cost_per_kwh": {"min": 0, "max": 1},
+    "cost_per_kwh": {"min": 0.001, "max": 1},
+    "monthly_cost_limit_bhd": {"min": 0.1, "max": 1000},
+    "monthly_energy_limit_kwh": {"min": 1, "max": 100000},
+    "daily_cost_limit_bhd": {"min": 0.1, "max": 1000},
+    "daily_energy_limit_kwh": {"min": 1, "max": 10000},
+    "high_usage_warning_percent": {"min": 1, "max": 100},
     "comfort_temperature_min": {"min": 16, "max": 30},
     "comfort_temperature_max": {"min": 18, "max": 35},
-    "high_temperature_threshold": {"min": 20, "max": 45},
+    "high_temperature_threshold": {"min": 25, "max": 45},
+    "humidity_min": {"min": 0, "max": 100},
+    "humidity_max": {"min": 0, "max": 100},
     "light_waste_minutes": {"min": 1, "max": 60},
-    "motion_recent_seconds": {"min": 10, "max": 600},
-    "sound_recent_seconds": {"min": 10, "max": 600},
+    "motion_recent_seconds": {"min": 5, "max": 600},
+    "sound_recent_seconds": {"min": 5, "max": 600},
     "occupancy_empty_minutes": {"min": 1, "max": 120},
     "sound_activity_threshold": {"min": 0, "max": 4095},
     "occupancy_confidence_threshold": {"min": 0, "max": 1},
     "occupancy_history_interval_minutes": {"min": 1, "max": 60},
-    "device_offline_minutes": {"min": 1, "max": 60},
+    "device_offline_minutes": {"min": 1, "max": 180},
+    "sensor_stale_minutes": {"min": 1, "max": 180},
+    "breaker_stale_minutes": {"min": 1, "max": 180},
+    "hub_offline_minutes": {"min": 1, "max": 180},
     "chat_history_retention_days": {"min": 1, "max": 3650},
 }
 
@@ -687,12 +715,18 @@ class SuggestionDecisionResponse(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     currency: str | None = None
     cost_per_kwh: float | None = None
+    monthly_cost_limit_bhd: float | None = None
+    monthly_energy_limit_kwh: float | None = None
+    daily_cost_limit_bhd: float | None = None
+    daily_energy_limit_kwh: float | None = None
+    high_usage_warning_percent: float | None = None
     temperature_unit: str | None = None
     comfort_temperature_min: float | None = None
     comfort_temperature_max: float | None = None
     high_temperature_threshold: float | None = None
     humidity_min: float | None = None
     humidity_max: float | None = None
+    air_quality_alert_enabled: bool | None = None
     light_waste_minutes: int | None = None
     motion_recent_seconds: int | None = None
     sound_recent_seconds: int | None = None
@@ -701,12 +735,22 @@ class SettingsUpdateRequest(BaseModel):
     occupancy_confidence_threshold: float | None = None
     occupancy_history_interval_minutes: int | None = None
     device_offline_minutes: int | None = None
+    sensor_stale_minutes: int | None = None
+    breaker_stale_minutes: int | None = None
+    hub_offline_minutes: int | None = None
     quiet_hours_enabled: bool | None = None
     quiet_hours_start: str | None = None
     quiet_hours_end: str | None = None
     ai_recommendations_enabled: bool | None = None
+    ai_anomaly_detection_enabled: bool | None = None
+    ai_cost_forecast_enabled: bool | None = None
     auto_control_enabled: bool | None = None
     notifications_enabled: bool | None = None
+    cost_notifications_enabled: bool | None = None
+    energy_notifications_enabled: bool | None = None
+    safety_notifications_enabled: bool | None = None
+    device_status_notifications_enabled: bool | None = None
+    ai_notifications_enabled: bool | None = None
     schedules_enabled: bool | None = None
     updated_by: str = "api"
 
@@ -822,6 +866,21 @@ class PiSensorStateRequest(BaseModel):
     occupancy: dict[str, Any] = Field(default_factory=dict)
     safety: dict[str, Any] = Field(default_factory=dict)
     updated_at_ms: int | None = None
+
+
+class PiSummarySyncItem(BaseModel):
+    summary_id: str
+    period: str | None = None
+    start_at_ms: int | None = None
+    end_at_ms: int | None = None
+    value: dict[str, Any] = Field(default_factory=dict)
+    local_created_at_ms: int | None = None
+    local_updated_at_ms: int | None = None
+
+
+class PiSummarySyncRequest(BaseModel):
+    home_id: str | None = None
+    summaries: list[PiSummarySyncItem] = Field(default_factory=list)
 
 
 class PiEsp32LinkRequest(BaseModel):
@@ -2058,11 +2117,67 @@ def pi_sensor_state(
     if request.alerts:
         sync_pi_alerts(home_id, request.alerts, timestamp_ms=timestamp_ms)
     resolve_smoke_emergency_if_clear(home_id)
+    sanitized_latest = latest_without_resolved_smoke_alert(home_id, latest)
+    if sanitized_latest != latest:
+        safe_set(f"/homes/{home_id}/latest_state", sanitized_latest)
+        safe_set(f"/homes/{home_id}/dashboard/latest", sanitized_latest)
     safe_update(
         f"/pis/{pi_id}",
         {"last_state_sync_at_ms": timestamp_ms, "last_state_sync_at_iso": iso_from_ms(timestamp_ms)},
     )
     return {"success": True, "home_id": home_id, "pi_id": pi_id, "updated_at_ms": timestamp_ms}
+
+
+@app.post("/api/pi/{pi_id}/summaries")
+def pi_sync_summaries(
+    pi_id: str,
+    request: PiSummarySyncRequest,
+    x_pi_id: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    pi = pi_auth_context(pi_id, x_pi_id, x_device_token)
+    home_id = request.home_id or str(pi.get("home_id") or "")
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Pi is not paired to a home.")
+    if pi.get("home_id") and home_id != pi.get("home_id"):
+        raise HTTPException(status_code=403, detail="Pi cannot write summaries for this home.")
+    if not request.summaries:
+        return {"success": True, "home_id": home_id, "pi_id": pi_id, "synced": 0, "summary_ids": []}
+
+    summary_ids: list[str] = []
+    for item in request.summaries[:100]:
+        value = dict(item.value)
+        if item.period and "period" not in value:
+            value["period"] = item.period
+        if item.start_at_ms is not None and "startAtMs" not in value:
+            value["startAtMs"] = item.start_at_ms
+        if item.end_at_ms is not None and "endAtMs" not in value:
+            value["endAtMs"] = item.end_at_ms
+        store_summary_item(
+            home_id,
+            item.summary_id,
+            value,
+            local_created_at_ms=item.local_created_at_ms,
+            local_updated_at_ms=item.local_updated_at_ms,
+        )
+        summary_ids.append(item.summary_id)
+
+    timestamp_ms = now_ms()
+    safe_update(
+        f"/pis/{pi_id}",
+        {
+            "last_summary_sync_at_ms": timestamp_ms,
+            "last_summary_sync_at_iso": iso_from_ms(timestamp_ms),
+            "last_summary_sync_count": len(summary_ids),
+        },
+    )
+    return {
+        "success": True,
+        "home_id": home_id,
+        "pi_id": pi_id,
+        "synced": len(summary_ids),
+        "summary_ids": summary_ids,
+    }
 
 
 @app.post("/api/pi/{pi_id}/esp32/link")
@@ -2742,8 +2857,7 @@ def latest_smoke_is_clear_for(home_id: str, clear_delay_ms: int = SMOKE_CLEAR_DE
     status = as_dict(esp32.get("status"))
     smoke_state = as_dict(safe_get(f"/homes/{home_id}/safety/smoke_state", {}))
     smoke = normalize_bool(sensors.get("smoke"))
-    smoke_text = str(sensors.get("smoke_text", "")).lower()
-    if smoke is True or "detect" in smoke_text or "smoke" in smoke_text or "gas" in smoke_text:
+    if smoke is True or smoke_text_is_active(sensors.get("smoke_text")) or smoke_text_is_active(sensors.get("smoke_status")):
         return False
     clear_started_at_ms = as_number(smoke_state.get("last_clear_at_ms"))
     if clear_started_at_ms <= 0:
@@ -2766,6 +2880,15 @@ def latest_smoke_is_clear_for(home_id: str, clear_delay_ms: int = SMOKE_CLEAR_DE
     if now_ms() - latest_sensor_timestamp_ms > 2 * 60 * 1000:
         return False
     return now_ms() - clear_started_at_ms >= clear_delay_ms
+
+
+def smoke_text_is_active(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if any(token in text for token in ("no smoke", "no gas", "clear", "normal", "safe", "not detected")):
+        return False
+    return "detect" in text or "smoke" in text or "gas" in text or text in {"1", "true", "yes", "on", "alarm"}
 
 
 def resolve_smoke_emergency_if_clear(home_id: str) -> None:
@@ -2813,6 +2936,91 @@ def resolve_smoke_emergency_if_clear(home_id: str) -> None:
     )
 
 
+def latest_without_resolved_smoke_alert(home_id: str, latest: dict[str, Any]) -> dict[str, Any]:
+    if not latest_smoke_is_clear_for(home_id):
+        return latest
+    timestamp_ms = now_ms()
+    sanitized = dict(latest)
+    sanitized["alerts"] = [
+        alert
+        for alert in sanitized.get("alerts", [])
+        if isinstance(alert, dict) and alert_dedupe_key(alert) != SMOKE_ALERT_ID
+    ]
+    safety = as_dict(sanitized.get("safety"))
+    emergency_mode = as_dict(safety.get("emergency_mode"))
+    if emergency_mode.get("active") is True and item_mentions_smoke_or_gas(emergency_mode):
+        safety["emergency_mode"] = {
+            **emergency_mode,
+            "active": False,
+            "ended_at_ms": timestamp_ms,
+            "ended_at_iso": iso_from_ms(timestamp_ms),
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        }
+    smoke_state = as_dict(safety.get("smoke_state"))
+    if smoke_state:
+        safety["smoke_state"] = {
+            **smoke_state,
+            "status": "clear",
+            "consecutive_detections": 0,
+            "updated_at_ms": timestamp_ms,
+            "updated_at_iso": iso_from_ms(timestamp_ms),
+        }
+    sanitized["safety"] = safety
+    return sanitized
+
+
+def minutes_from_hhmm(value: str) -> int | None:
+    if not isinstance(value, str) or not HHMM_RE.match(value):
+        return None
+    hour, minute = value.split(":", 1)
+    return int(hour) * 60 + int(minute)
+
+
+def is_quiet_hours_now(settings: dict[str, Any]) -> bool:
+    if settings.get("quiet_hours_enabled") is not True:
+        return False
+    start = minutes_from_hhmm(str(settings.get("quiet_hours_start", "23:00")))
+    end = minutes_from_hhmm(str(settings.get("quiet_hours_end", "06:00")))
+    if start is None or end is None or start == end:
+        return False
+    now_dt = datetime.now(BAHRAIN_TZ)
+    current = now_dt.hour * 60 + now_dt.minute
+    if start < end:
+        return start <= current < end
+    return current >= start or current < end
+
+
+def notification_allowed_by_settings(
+    settings: dict[str, Any],
+    category: str,
+    severity: str,
+    *,
+    urgent: bool = False,
+) -> tuple[bool, str | None]:
+    normalized = str(category or "").lower()
+    severity_value = str(severity or "").lower()
+    if urgent or severity_value == "critical" or "safety" in normalized or "smoke" in normalized or "gas" in normalized:
+        return (settings.get("safety_notifications_enabled") is not False, None)
+    if settings.get("notifications_enabled") is False:
+        return False, "notifications_disabled"
+    category_flags = {
+        "cost": "cost_notifications_enabled",
+        "budget": "cost_notifications_enabled",
+        "energy": "energy_notifications_enabled",
+        "device": "device_status_notifications_enabled",
+        "sensor": "device_status_notifications_enabled",
+        "hub": "device_status_notifications_enabled",
+        "ai": "ai_notifications_enabled",
+        "anomaly": "ai_notifications_enabled",
+        "recommendation": "ai_notifications_enabled",
+    }
+    for token, flag in category_flags.items():
+        if token in normalized and settings.get(flag) is False:
+            return False, f"{flag}_disabled"
+    return True, None
+
+
 def create_notification_record(
     home_id: str,
     title: str,
@@ -2822,12 +3030,27 @@ def create_notification_record(
     alert_type: str | None = None,
     severity: str = "critical",
     alert_id: str | None = None,
+    category: str | None = None,
+    dedupe_key: str | None = None,
+    urgent: bool = False,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    settings = ensure_settings(home_id)
+    category = category or alert_type or notification_type
+    allowed, muted_reason = notification_allowed_by_settings(settings, category, severity, urgent=urgent)
+    if not allowed:
+        return {}
+    if dedupe_key:
+        existing = as_dict(safe_get(f"/homes/{home_id}/notification_dedupe/{dedupe_key}", {}))
+        if existing:
+            return {**existing, "deduped": True}
     timestamp_ms = now_ms()
     notification_id = f"notif_{timestamp_ms}"
+    quiet_muted = is_quiet_hours_now(settings) and not urgent and str(severity).lower() not in {"critical"}
     notification = {
         "notification_id": notification_id,
         "type": notification_type,
+        "category": category,
         "alert_type": alert_type,
         "severity": severity,
         "title": title,
@@ -2837,11 +3060,18 @@ def create_notification_record(
         "room_id": "room1",
         "read": False,
         "delivered": False,
+        "muted": quiet_muted,
+        "deferred": quiet_muted,
+        "muted_reason": "quiet_hours" if quiet_muted else muted_reason,
+        "dedupe_key": dedupe_key,
+        "context": context or {},
         "created_at_ms": timestamp_ms,
         "created_at_iso": iso_from_ms(timestamp_ms),
         "timezone": TIMEZONE,
     }
     safe_set(f"/homes/{home_id}/notifications/{notification_id}", notification)
+    if dedupe_key:
+        safe_set(f"/homes/{home_id}/notification_dedupe/{dedupe_key}", notification)
     for user_id in member_user_ids(home_id):
         safe_set(
             f"/users/{user_id}/notifications/{notification_id}",
@@ -2850,7 +3080,8 @@ def create_notification_record(
                 "user_id": user_id,
             },
         )
-    send_push_notifications(home_id, notification_id, title, body)
+    if not quiet_muted:
+        send_push_notifications(home_id, notification_id, title, body)
     return notification
 
 
@@ -3011,8 +3242,16 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="currency currently only supports BHD.")
     if settings.get("temperature_unit") not in {"C", "F"}:
         raise HTTPException(status_code=400, detail="temperature_unit must be C or F.")
-    if as_number(settings.get("cost_per_kwh"), -1) < 0:
-        raise HTTPException(status_code=400, detail="cost_per_kwh must be >= 0.")
+
+    for field, bounds in SETTINGS_OPTIONS.items():
+        if not isinstance(bounds, dict) or "min" not in bounds or "max" not in bounds:
+            continue
+        value = as_number(settings.get(field), None)
+        if value is None or value < as_number(bounds.get("min")) or value > as_number(bounds.get("max")):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} must be between {bounds.get('min')} and {bounds.get('max')}.",
+            )
 
     comfort_min = as_number(settings.get("comfort_temperature_min"))
     comfort_max = as_number(settings.get("comfort_temperature_max"))
@@ -3025,13 +3264,21 @@ def validate_settings(settings: dict[str, Any]) -> None:
             status_code=400,
             detail="comfort_temperature_min must be less than comfort_temperature_max.",
         )
-    if high_threshold <= comfort_max:
+    if high_threshold < comfort_max:
         raise HTTPException(
             status_code=400,
-            detail="high_temperature_threshold must be greater than comfort_temperature_max.",
+            detail="high_temperature_threshold must be greater than or equal to comfort_temperature_max.",
         )
     if humidity_min >= humidity_max:
         raise HTTPException(status_code=400, detail="humidity_min must be less than humidity_max.")
+    monthly_cost = as_number(settings.get("monthly_cost_limit_bhd"))
+    daily_cost = as_number(settings.get("daily_cost_limit_bhd"))
+    monthly_energy = as_number(settings.get("monthly_energy_limit_kwh"))
+    daily_energy = as_number(settings.get("daily_energy_limit_kwh"))
+    if monthly_cost < daily_cost:
+        raise HTTPException(status_code=400, detail="monthly_cost_limit_bhd must be greater than or equal to daily_cost_limit_bhd.")
+    if monthly_energy < daily_energy:
+        raise HTTPException(status_code=400, detail="monthly_energy_limit_kwh must be greater than or equal to daily_energy_limit_kwh.")
 
     for field in [
         "light_waste_minutes",
@@ -3040,25 +3287,27 @@ def validate_settings(settings: dict[str, Any]) -> None:
         "occupancy_empty_minutes",
         "occupancy_history_interval_minutes",
         "device_offline_minutes",
+        "sensor_stale_minutes",
+        "breaker_stale_minutes",
+        "hub_offline_minutes",
         "chat_history_retention_days",
     ]:
         if as_number(settings.get(field), -1) <= 0:
             raise HTTPException(status_code=400, detail=f"{field} must be positive.")
 
-    if as_number(settings.get("sound_activity_threshold"), -1) < 0:
-        raise HTTPException(status_code=400, detail="sound_activity_threshold must be >= 0.")
-    confidence_threshold = as_number(settings.get("occupancy_confidence_threshold"), -1)
-    if confidence_threshold < 0 or confidence_threshold > 1:
-        raise HTTPException(
-            status_code=400,
-            detail="occupancy_confidence_threshold must be between 0 and 1.",
-        )
-
     for field in [
+        "air_quality_alert_enabled",
         "quiet_hours_enabled",
         "ai_recommendations_enabled",
+        "ai_anomaly_detection_enabled",
+        "ai_cost_forecast_enabled",
         "auto_control_enabled",
         "notifications_enabled",
+        "cost_notifications_enabled",
+        "energy_notifications_enabled",
+        "safety_notifications_enabled",
+        "device_status_notifications_enabled",
+        "ai_notifications_enabled",
         "schedules_enabled",
     ]:
         if not isinstance(settings.get(field), bool):
@@ -3074,6 +3323,11 @@ def settings_summary(settings: dict[str, Any]) -> dict[str, Any]:
     return {
         "currency": settings.get("currency", "BHD"),
         "cost_per_kwh": settings.get("cost_per_kwh", DEFAULT_SETTINGS["cost_per_kwh"]),
+        "monthly_cost_limit_bhd": settings.get("monthly_cost_limit_bhd"),
+        "monthly_energy_limit_kwh": settings.get("monthly_energy_limit_kwh"),
+        "daily_cost_limit_bhd": settings.get("daily_cost_limit_bhd"),
+        "daily_energy_limit_kwh": settings.get("daily_energy_limit_kwh"),
+        "high_usage_warning_percent": settings.get("high_usage_warning_percent"),
         "comfort_range": (
             f"{settings.get('comfort_temperature_min')}-"
             f"{settings.get('comfort_temperature_max')}{suffix}"
@@ -3082,7 +3336,140 @@ def settings_summary(settings: dict[str, Any]) -> dict[str, Any]:
         "quiet_hours_enabled": settings.get("quiet_hours_enabled"),
         "occupancy_empty_minutes": settings.get("occupancy_empty_minutes"),
         "sound_activity_threshold": settings.get("sound_activity_threshold"),
+        "device_offline_minutes": settings.get("device_offline_minutes"),
+        "sensor_stale_minutes": settings.get("sensor_stale_minutes"),
+        "breaker_stale_minutes": settings.get("breaker_stale_minutes"),
+        "hub_offline_minutes": settings.get("hub_offline_minutes"),
+        "ai_recommendations_enabled": settings.get("ai_recommendations_enabled"),
+        "ai_anomaly_detection_enabled": settings.get("ai_anomaly_detection_enabled"),
+        "ai_cost_forecast_enabled": settings.get("ai_cost_forecast_enabled"),
+        "notifications_enabled": settings.get("notifications_enabled"),
     }
+
+
+def percent_of(value: float, limit: float) -> float | None:
+    if limit <= 0:
+        return None
+    return round((value / limit) * 100, 3)
+
+
+def budget_status_from_energy(energy: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    month_kwh = as_number(energy.get("month_kwh"))
+    month_cost = as_number(energy.get("month_cost_bhd"))
+    today_kwh = as_number(energy.get("today_kwh"))
+    today_cost = as_number(energy.get("today_cost_bhd"))
+    monthly_cost_limit = as_number(settings.get("monthly_cost_limit_bhd"))
+    monthly_energy_limit = as_number(settings.get("monthly_energy_limit_kwh"))
+    daily_cost_limit = as_number(settings.get("daily_cost_limit_bhd"))
+    daily_energy_limit = as_number(settings.get("daily_energy_limit_kwh"))
+    warning_percent = as_number(settings.get("high_usage_warning_percent"), 80)
+    monthly_cost_percent = percent_of(month_cost, monthly_cost_limit)
+    monthly_energy_percent = percent_of(month_kwh, monthly_energy_limit)
+    daily_cost_percent = percent_of(today_cost, daily_cost_limit)
+    daily_energy_percent = percent_of(today_kwh, daily_energy_limit)
+    return {
+        "monthly_cost_limit_bhd": monthly_cost_limit,
+        "monthly_energy_limit_kwh": monthly_energy_limit,
+        "daily_cost_limit_bhd": daily_cost_limit,
+        "daily_energy_limit_kwh": daily_energy_limit,
+        "high_usage_warning_percent": warning_percent,
+        "monthly_cost_usage_percent": monthly_cost_percent,
+        "monthly_energy_usage_percent": monthly_energy_percent,
+        "daily_cost_usage_percent": daily_cost_percent,
+        "daily_energy_usage_percent": daily_energy_percent,
+        "monthly_cost_limit_exceeded": month_cost > monthly_cost_limit > 0,
+        "monthly_energy_limit_exceeded": month_kwh > monthly_energy_limit > 0,
+        "daily_cost_limit_exceeded": today_cost > daily_cost_limit > 0,
+        "daily_energy_limit_exceeded": today_kwh > daily_energy_limit > 0,
+        "monthly_cost_warning_reached": monthly_cost_percent is not None and monthly_cost_percent >= warning_percent,
+        "monthly_energy_warning_reached": monthly_energy_percent is not None and monthly_energy_percent >= warning_percent,
+        "daily_cost_warning_reached": daily_cost_percent is not None and daily_cost_percent >= warning_percent,
+        "daily_energy_warning_reached": daily_energy_percent is not None and daily_energy_percent >= warning_percent,
+    }
+
+
+def apply_budget_status(home_id: str, energy: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    budget = budget_status_from_energy(energy, settings)
+    month_period = datetime.now(BAHRAIN_TZ).strftime("%Y-%m")
+    day_period = datetime.now(BAHRAIN_TZ).strftime("%Y-%m-%d")
+    month_cost = as_number(energy.get("month_cost_bhd"))
+    month_kwh = as_number(energy.get("month_kwh"))
+    today_cost = as_number(energy.get("today_cost_bhd"))
+    today_kwh = as_number(energy.get("today_kwh"))
+    warning_percent = int(as_number(settings.get("high_usage_warning_percent"), 80))
+    if budget["monthly_cost_limit_exceeded"]:
+        limit = as_number(settings.get("monthly_cost_limit_bhd"))
+        create_notification_record(
+            home_id,
+            "Monthly cost limit exceeded",
+            f"This home has used {month_cost:.3f} BHD this month, exceeding the limit of {limit:.3f} BHD.",
+            notification_type="cost_limit",
+            category="cost_limit",
+            severity="high",
+            dedupe_key=f"COST_LIMIT#{month_period}#{home_id}",
+            context={"period": month_period, "actual_bhd": month_cost, "limit_bhd": limit},
+        )
+    elif budget["monthly_cost_warning_reached"]:
+        create_notification_record(
+            home_id,
+            "Monthly cost warning",
+            f"This home has used {warning_percent}% or more of the monthly cost limit.",
+            notification_type="budget_warning",
+            category="cost_warning",
+            severity="warning",
+            dedupe_key=f"COST_WARNING#{month_period}#{warning_percent}#{home_id}",
+            context={"period": month_period, "usage_percent": budget["monthly_cost_usage_percent"]},
+        )
+    if budget["monthly_energy_limit_exceeded"]:
+        limit = as_number(settings.get("monthly_energy_limit_kwh"))
+        create_notification_record(
+            home_id,
+            "Monthly energy limit exceeded",
+            f"This home has used {month_kwh:.3f} kWh this month, exceeding the limit of {limit:.3f} kWh.",
+            notification_type="energy_limit",
+            category="energy_limit",
+            severity="high",
+            dedupe_key=f"ENERGY_LIMIT#{month_period}#{home_id}",
+            context={"period": month_period, "actual_kwh": month_kwh, "limit_kwh": limit},
+        )
+    elif budget["monthly_energy_warning_reached"]:
+        create_notification_record(
+            home_id,
+            "Monthly energy warning",
+            f"This home has used {warning_percent}% or more of the monthly energy limit.",
+            notification_type="budget_warning",
+            category="energy_warning",
+            severity="warning",
+            dedupe_key=f"ENERGY_WARNING#{month_period}#{warning_percent}#{home_id}",
+            context={"period": month_period, "usage_percent": budget["monthly_energy_usage_percent"]},
+        )
+    if budget["daily_cost_limit_exceeded"]:
+        limit = as_number(settings.get("daily_cost_limit_bhd"))
+        create_notification_record(
+            home_id,
+            "Daily cost limit exceeded",
+            f"This home has used {today_cost:.3f} BHD today, exceeding the daily limit of {limit:.3f} BHD.",
+            notification_type="daily_cost_limit",
+            category="cost_limit",
+            severity="warning",
+            dedupe_key=f"DAILY_COST_LIMIT#{day_period}#{home_id}",
+            context={"period": day_period, "actual_bhd": today_cost, "limit_bhd": limit},
+        )
+    if budget["daily_energy_limit_exceeded"]:
+        limit = as_number(settings.get("daily_energy_limit_kwh"))
+        create_notification_record(
+            home_id,
+            "Daily energy limit exceeded",
+            f"This home has used {today_kwh:.3f} kWh today, exceeding the daily limit of {limit:.3f} kWh.",
+            notification_type="daily_energy_limit",
+            category="energy_limit",
+            severity="warning",
+            dedupe_key=f"DAILY_ENERGY_LIMIT#{day_period}#{home_id}",
+            context={"period": day_period, "actual_kwh": today_kwh, "limit_kwh": limit},
+        )
+    energy["budget_status"] = budget
+    energy.update(budget)
+    return energy
 
 
 def control_response(home_id: str, control: dict[str, Any]) -> dict[str, Any]:
@@ -3236,7 +3623,7 @@ def nested(raw: dict[str, Any], *keys: str) -> Any:
     return current
 
 
-def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
+def format_device(device_id: str, raw_device: Any, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     raw = as_dict(raw_device)
     status = as_dict(raw.get("status"))
     metering = as_dict(raw.get("metering"))
@@ -3294,13 +3681,21 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         online = normalize_bool(raw.get("local_online"))
         if online is None:
             online = normalize_bool(raw.get("online"))
-    is_stale = not isinstance(last_seen_ms, (int, float)) or (
-        now_ms() - int(last_seen_ms) > DEVICE_STALE_AFTER_MS
-    )
     is_breaker = str(raw.get("type") or DEFAULT_DEVICE_TYPES.get(device_id, "")).lower() in {
         "smart_breaker",
         "breaker",
     } or device_id.startswith("breaker_")
+    if device_id == "esp32_01":
+        stale_after_ms = int(as_number((settings or {}).get("sensor_stale_minutes"), 3) * 60000)
+    elif is_breaker:
+        stale_after_ms = int(as_number((settings or {}).get("breaker_stale_minutes"), 3) * 60000)
+    else:
+        stale_after_ms = int(as_number((settings or {}).get("device_offline_minutes"), 2) * 60000)
+    if stale_after_ms <= 0:
+        stale_after_ms = DEVICE_STALE_AFTER_MS
+    is_stale = not isinstance(last_seen_ms, (int, float)) or (
+        now_ms() - int(last_seen_ms) > stale_after_ms
+    )
     if online is None:
         online = not is_stale
     elif is_stale and not is_breaker and not is_home_assistant_device:
@@ -3349,6 +3744,7 @@ def format_device(device_id: str, raw_device: Any) -> dict[str, Any]:
         "cloud_online": bool(normalize_bool(raw.get("cloud_online")) if raw.get("cloud_online") is not None else not is_home_assistant_device),
         "stale": is_stale,
         "status_label": status_label,
+        "offline_after_minutes": round(stale_after_ms / 60000, 3),
         "controllable": is_controllable_device(device_id, raw),
         "state": state,
         "display_state": display_state,
@@ -3498,7 +3894,7 @@ def read_home_bundle(home_id: str) -> dict[str, Any]:
     }
 
 
-def build_hub_status(bundle: dict[str, Any]) -> dict[str, Any]:
+def build_hub_status(bundle: dict[str, Any], settings: dict[str, Any] | None = None) -> dict[str, Any]:
     home = as_dict(bundle.get("home"))
     latest_state = as_dict(bundle.get("latest_state"))
     pi_id = str(first_present(home.get("pi_id"), latest_state.get("pi_id"), default="") or "")
@@ -3515,12 +3911,16 @@ def build_hub_status(bundle: dict[str, Any]) -> dict[str, Any]:
         if isinstance(last_seen_ms, (int, float)) and int(last_seen_ms) > 0
         else None
     )
-    online = age_seconds is not None and age_seconds * 1000 <= PI_OFFLINE_AFTER_MS
+    offline_after_ms = int(as_number((settings or {}).get("hub_offline_minutes"), 5) * 60000)
+    if offline_after_ms <= 0:
+        offline_after_ms = PI_OFFLINE_AFTER_MS
+    online = age_seconds is not None and age_seconds * 1000 <= offline_after_ms
     return {
         "pi_id": pi_id or None,
         "online": online,
         "stale": not online,
         "status_label": "online" if online else "offline",
+        "offline_after_minutes": round(offline_after_ms / 60000, 3),
         "last_seen_ms": last_seen_ms,
         "last_seen_iso": iso_from_ms(last_seen_ms),
         "last_seen_age_seconds": age_seconds,
@@ -3610,7 +4010,11 @@ def build_room(bundle: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_devices(bundle: dict[str, Any], home_id: str | None = None) -> dict[str, dict[str, Any]]:
+def build_devices(
+    bundle: dict[str, Any],
+    home_id: str | None = None,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
     raw_devices = dict(bundle["devices"])
     for device_id, device in as_dict(bundle["latest_state"].get("devices")).items():
         if isinstance(device, dict):
@@ -3628,7 +4032,7 @@ def build_devices(bundle: dict[str, Any], home_id: str | None = None) -> dict[st
         health = as_dict(health_devices.get(device_id))
         if health:
             raw["status"] = {**as_dict(raw.get("status")), **health}
-        formatted_device = format_device(device_id, raw)
+        formatted_device = format_device(device_id, raw, settings=settings)
         if home_id and formatted_device.get("controllable") is True:
             formatted_device["automation"] = ensure_device_automation(home_id, device_id)
         formatted[device_id] = formatted_device
@@ -4738,17 +5142,19 @@ def get_home_recommendations(home_id: str) -> dict[str, Any]:
 def get_dashboard(home_id: str) -> dict[str, Any]:
     resolve_smoke_emergency_if_clear(home_id)
     bundle = read_home_bundle(home_id)
-    devices = build_devices(bundle, home_id)
-    room = build_room(bundle)
-    hub_status = build_hub_status(bundle)
     timestamp_ms = now_ms()
     control = ensure_control(home_id)
     settings = ensure_settings(home_id)
+    devices = build_devices(bundle, home_id, settings=settings)
+    room = build_room(bundle)
+    hub_status = build_hub_status(bundle, settings=settings)
     control_mode = str(control.get("mode", "assist")).lower()
     canonical_ai_latest = as_dict(bundle["canonical_ai_latest"])
     smoke_ctx = dashboard_smoke_context(room, as_dict(bundle["safety"]))
     ai_ctx = ai_latest_context(canonical_ai_latest)
     ai_latest_suggestions = object_to_list(canonical_ai_latest.get("suggestions"))
+    if settings.get("ai_recommendations_enabled") is False:
+        ai_latest_suggestions = []
     if smoke_ctx.get("active") is not True:
         ai_latest_suggestions = [item for item in ai_latest_suggestions if not item_mentions_smoke_or_gas(item)]
     current_ai_notifications = [
@@ -4757,6 +5163,8 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         if isinstance(item, dict)
         and str(item.get("status", "active")).lower() in {"active", "open", "pending"}
         and item.get("acknowledged") is not True
+        and (settings.get("ai_notifications_enabled") is not False or str(item.get("category")).lower() == "safety")
+        and (settings.get("ai_anomaly_detection_enabled") is not False or str(item.get("category")).lower() in {"safety", "recommendation"})
         and (smoke_ctx.get("active") is True or not item_mentions_smoke_or_gas(item))
     ]
     energy = build_energy(bundle, devices, settings)
@@ -4768,6 +5176,7 @@ def get_dashboard(home_id: str) -> dict[str, Any]:
         bundle["dashboard_latest"],
     )
     energy.update(monthly_energy)
+    energy = apply_budget_status(home_id, energy, settings)
 
     alerts = dedupe_alerts(active_only(
         object_to_list(bundle["alerts_active"])
@@ -6795,13 +7204,15 @@ def default_context_chat_session(
 
 
 def call_ai_chat_service(home_id: str, request: ChatProxyRequest, history: list[dict[str, str]]) -> dict[str, Any]:
+    settings = ensure_settings(home_id) if not request.scenario_id else DEFAULT_SETTINGS.copy()
+    context = {**as_dict(request.context), "home_settings": settings_summary(settings)}
     ai_request = ai_engine.ChatRequest(
         message=request.message,
         home_id=home_id,
         home_name=request.home_name,
         scenario_id=request.scenario_id,
         scenario_name=request.scenario_name,
-        context=request.context,
+        context=context,
         conversation_history=history,
     )
     try:
@@ -7255,6 +7666,49 @@ def enrich_ai_payload_with_history(home_id: str, payload: dict[str, Any]) -> dic
     return enriched
 
 
+def enrich_ai_payload_with_settings(
+    home_id: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    latest_dashboard = as_dict(safe_get(f"/homes/{home_id}/dashboard/latest", {}))
+    latest_energy = as_dict(safe_get(f"/homes/{home_id}/latest_state/energy", {}))
+    energy = {
+        "month_kwh": as_number(first_present(latest_dashboard.get("month_kwh"), latest_energy.get("month_kwh"))),
+        "month_cost_bhd": as_number(first_present(latest_dashboard.get("month_cost_bhd"), latest_energy.get("month_cost_bhd"))),
+        "today_kwh": as_number(first_present(latest_dashboard.get("today_kwh"), latest_energy.get("today_kwh"), payload.get("total_energy_kWh"))),
+        "today_cost_bhd": as_number(first_present(latest_dashboard.get("today_cost_bhd"), latest_energy.get("today_cost_bhd"))),
+    }
+    if energy["today_cost_bhd"] <= 0:
+        energy["today_cost_bhd"] = energy["today_kwh"] * as_number(settings.get("cost_per_kwh"), 0.029)
+    budget_status = budget_status_from_energy(energy, settings)
+    return {
+        **payload,
+        "tariff_BHD_per_kWh": as_number(settings.get("cost_per_kwh"), 0.029),
+        "settings_used": settings_summary(settings),
+        "settings": settings_summary(settings),
+        "budget_status": budget_status,
+        "monthly_cost_usage_percent": budget_status.get("monthly_cost_usage_percent"),
+        "monthly_energy_usage_percent": budget_status.get("monthly_energy_usage_percent"),
+        "comfort_temperature_min": settings.get("comfort_temperature_min"),
+        "comfort_temperature_max": settings.get("comfort_temperature_max"),
+        "high_temperature_threshold": settings.get("high_temperature_threshold"),
+        "occupancy_empty_minutes": settings.get("occupancy_empty_minutes"),
+        "motion_recent_seconds": settings.get("motion_recent_seconds"),
+        "sound_recent_seconds": settings.get("sound_recent_seconds"),
+        "sound_activity_threshold": settings.get("sound_activity_threshold"),
+        "occupancy_confidence_threshold": settings.get("occupancy_confidence_threshold"),
+        "sensor_stale_seconds_threshold": as_number(settings.get("sensor_stale_minutes"), 3) * 60,
+        "breaker_stale_seconds_threshold": as_number(settings.get("breaker_stale_minutes"), 3) * 60,
+        "hub_offline_seconds_threshold": as_number(settings.get("hub_offline_minutes"), 5) * 60,
+        "ai_recommendations_enabled": settings.get("ai_recommendations_enabled"),
+        "ai_anomaly_detection_enabled": settings.get("ai_anomaly_detection_enabled"),
+        "ai_cost_forecast_enabled": settings.get("ai_cost_forecast_enabled"),
+        "notifications_enabled": settings.get("notifications_enabled"),
+        "quiet_hours_active": is_quiet_hours_now(settings),
+    }
+
+
 def apply_ec2_ai_routine_rules(result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     predictions = result["predictions"]
     total_energy = as_number(payload.get("total_energy_kWh"))
@@ -7282,7 +7736,9 @@ def apply_ec2_ai_routine_rules(result: dict[str, Any], payload: dict[str, Any]) 
         predictions["explanation"] = result["explanation"]
         result.setdefault("post_processing_rules", []).append("ec2_statistical_usage_anomaly")
 
-    if occupancy_state in {"empty", "probably_empty"} and total_power > 50:
+    empty_minutes = as_number(payload.get("no_occupancy_power_minutes"), 0)
+    required_empty_minutes = as_number(payload.get("occupancy_empty_minutes"), 10)
+    if occupancy_state in {"empty", "probably_empty"} and total_power > 50 and empty_minutes >= required_empty_minutes:
         result["energy_waste"] = True
         result["abnormal_usage"] = "high_power_while_empty"
         result["recommendation_type"] = "turn_off_unused_devices"
@@ -7332,22 +7788,40 @@ def ai_notification(
     }
 
 
-def run_immediate_safety_checks(home_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def run_immediate_safety_checks(
+    home_id: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    settings = settings or DEFAULT_SETTINGS
     notifications: list[dict[str, Any]] = []
-    if as_number(payload.get("smoke_count")) > 0:
+    if settings.get("safety_notifications_enabled") is not False and as_number(payload.get("smoke_count")) > 0:
         notifications.append(ai_notification(home_id, "critical", "safety", "Gas or smoke detected", "Check the room immediately. Energy saving is secondary to safety.", confidence=1.0, notification_id="smoke_gas_detected"))
-    if as_number(payload.get("sensor_staleness_seconds")) > 180 or payload.get("sensor_data_fresh") is False:
+    sensor_threshold = as_number(settings.get("sensor_stale_minutes"), 3) * 60
+    breaker_threshold = as_number(settings.get("breaker_stale_minutes"), 3) * 60
+    if settings.get("device_status_notifications_enabled") is not False and (
+        as_number(payload.get("sensor_staleness_seconds")) > sensor_threshold or payload.get("sensor_data_fresh") is False
+    ):
         notifications.append(ai_notification(home_id, "medium", "system", "Room sensor data is stale", "The AI confidence is lower because the latest room sensor reading is old.", target_type="sensor", confidence=0.8, notification_id="sensor_data_stale"))
-    if as_number(payload.get("breaker_staleness_seconds")) > 180 or payload.get("breaker_data_fresh") is False:
+    if settings.get("device_status_notifications_enabled") is not False and (
+        as_number(payload.get("breaker_staleness_seconds")) > breaker_threshold or payload.get("breaker_data_fresh") is False
+    ):
         notifications.append(ai_notification(home_id, "medium", "device", "Breaker data is stale", "The AI is waiting for fresh breaker readings before making strong energy decisions.", target_type="breaker", confidence=0.8, notification_id="breaker_data_stale"))
-    if as_number(payload.get("failed_command_count_last_hour")) >= 2:
+    if settings.get("device_status_notifications_enabled") is not False and as_number(payload.get("failed_command_count_last_hour")) >= 2:
         notifications.append(ai_notification(home_id, "high", "device", "Repeated command failures", "Device commands failed repeatedly in the last hour. Check Pi connectivity and local controller status.", confidence=0.95, notification_id="repeated_command_failures"))
-    if str(payload.get("occupancy_state")) in {"empty", "probably_empty"} and as_number(payload.get("total_power_for_guardrails_W")) > 150:
+    if settings.get("ai_recommendations_enabled") is not False and str(payload.get("occupancy_state")) in {"empty", "probably_empty"} and as_number(payload.get("total_power_for_guardrails_W")) > 150:
         notifications.append(ai_notification(home_id, "high", "energy", "High power while empty", "Power is high while occupancy appears low. Review AC, socket, and breaker state.", recommendation_type="turn_off_unused_devices", confidence=0.9, notification_id="high_power_empty_room"))
     return notifications
 
 
-def run_lightweight_anomaly_checks(home_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def run_lightweight_anomaly_checks(
+    home_id: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    settings = settings or DEFAULT_SETTINGS
+    if settings.get("ai_anomaly_detection_enabled") is False:
+        return []
     notifications: list[dict[str, Any]] = []
     total_energy = as_number(payload.get("total_energy_kWh"))
     total_power = as_number(payload.get("total_power_for_guardrails_W"))
@@ -7364,7 +7838,7 @@ def run_lightweight_anomaly_checks(home_id: str, payload: dict[str, Any]) -> lis
         notifications.append(ai_notification(home_id, "medium", "anomaly", "Power above recent normal range", "Current power is higher than the recent rolling average.", confidence=0.85, explanation=f"Current {total_power:.1f} W vs recent average {recent_power_mean:.1f} W.", notification_id="rolling_power_spike"))
     if ac_active and outside_routine_score >= 0.8 and as_number(payload.get("hour_of_day")) <= 5:
         notifications.append(ai_notification(home_id, "medium", "routine", "AC running outside routine", "The AC appears active during an unusual time compared with recent routine.", device_id="breaker_02", recommendation_type="review_ac_schedule", confidence=0.75, notification_id="ac_outside_routine"))
-    if as_number(payload.get("device_left_on_without_motion_minutes")) >= 30:
+    if settings.get("ai_recommendations_enabled") is not False and as_number(payload.get("device_left_on_without_motion_minutes")) >= as_number(settings.get("occupancy_empty_minutes"), 10):
         notifications.append(ai_notification(home_id, "low", "recommendation", "Device may be left on", "A device has been active without recent motion. Consider turning unused devices off.", recommendation_type="turn_off_unused_devices", confidence=0.8, notification_id="device_left_on_without_motion"))
     return notifications
 
@@ -7394,6 +7868,56 @@ def dedupe_ai_notifications(notifications: list[dict[str, Any]]) -> list[dict[st
     return list(deduped.values())
 
 
+def apply_ai_settings_to_result(
+    ai_result: dict[str, Any],
+    notifications: list[dict[str, Any]],
+    settings: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    disabled: list[str] = []
+    filtered: list[dict[str, Any]] = []
+    for notification in notifications:
+        category = str(notification.get("category") or "").lower()
+        severity = str(notification.get("severity") or "").lower()
+        if severity == "critical" or category == "safety":
+            filtered.append(notification)
+            continue
+        if settings.get("notifications_enabled") is False:
+            disabled.append("notifications")
+            continue
+        if settings.get("ai_notifications_enabled") is False and category in {"ai", "anomaly", "recommendation"}:
+            disabled.append("ai_notifications")
+            continue
+        if settings.get("ai_anomaly_detection_enabled") is False and category in {"anomaly", "routine"}:
+            disabled.append("ai_anomaly_detection")
+            continue
+        if settings.get("ai_recommendations_enabled") is False and category == "recommendation":
+            disabled.append("ai_recommendations")
+            continue
+        filtered.append(notification)
+
+    if settings.get("ai_recommendations_enabled") is False:
+        ai_result["recommendation_type"] = "disabled_by_settings"
+        ai_result["suggestions"] = []
+        disabled.append("ai_recommendations")
+    if settings.get("ai_cost_forecast_enabled") is False:
+        ai_result["next_hour_cost"] = None
+        ai_result["next_hour_total_cost_BHD"] = None
+        disabled.append("ai_cost_forecast")
+    ai_result["settings_used"] = payload.get("settings_used") or settings_summary(settings)
+    ai_result["budget_status"] = payload.get("budget_status") or {}
+    ai_result["limit_alerts"] = [
+        key
+        for key, value in as_dict(ai_result.get("budget_status")).items()
+        if key.endswith("_exceeded") and value is True
+    ]
+    ai_result["disabled_by_settings"] = sorted(set(disabled))
+    ai_result.setdefault("guardrails_applied", [])
+    if disabled:
+        ai_result["guardrails_applied"] = sorted(set(object_to_list(ai_result.get("guardrails_applied")) + ["home_settings"]))
+    return ai_result, filtered
+
+
 def normalized_ai_api_response(home_id: str, result: dict[str, Any]) -> dict[str, Any]:
     notifications = object_to_list(result.get("notifications"))
     alerts = object_to_list(result.get("alerts")) or [
@@ -7415,6 +7939,9 @@ def normalized_ai_api_response(home_id: str, result: dict[str, Any]) -> dict[str
             "model_version": result.get("model_version"),
             "ml_ran": result.get("ml_ran"),
             "levels_ran": result.get("levels_ran", []),
+            "ai_mode": result.get("ai_mode"),
+            "confidence": result.get("confidence"),
+            "data_source": result.get("data_source"),
         },
         "created_at": result.get("created_at"),
         "created_at_ms": result.get("created_at_ms"),
@@ -7429,6 +7956,43 @@ def should_run_full_ml(home_id: str, *, force: bool = False, input_source: str =
         return False
     last_run = _ai_last_full_prediction_ms_by_home.get(home_id, 0)
     return now_ms() - last_run >= AI_FULL_PREDICTION_INTERVAL_SECONDS * 1000
+
+
+def load_ai_metrics_summary() -> dict[str, Any]:
+    metrics_path = Path(__file__).resolve().parent / "devices" / "models" / "smart_energy_ai_metrics.json"
+    if not metrics_path.exists():
+        return {"available": False, "reason": "metrics_file_missing"}
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        return {"available": False, "reason": f"metrics_file_unreadable: {error}"}
+    targets = as_dict(metrics.get("targets"))
+    summarized_targets: dict[str, Any] = {}
+    for target, payload in targets.items():
+        test = as_dict(as_dict(payload).get("test"))
+        summarized_targets[target] = {
+            key: test.get(key)
+            for key in ["accuracy", "precision_macro", "recall_macro", "f1_macro", "f1_weighted", "mae", "rmse", "r2", "mean_actual", "mean_predicted"]
+            if key in test
+        }
+    return {
+        "available": True,
+        "model_name": metrics.get("model_name"),
+        "model_version": metrics.get("model_version"),
+        "trained_at": metrics.get("trained_at"),
+        "dataset_rows": metrics.get("dataset_rows"),
+        "train_rows": metrics.get("train_rows"),
+        "validation_rows": metrics.get("validation_rows"),
+        "test_rows": metrics.get("test_rows"),
+        "selected_models": metrics.get("selected_models"),
+        "data_origin_counts": metrics.get("data_origin_counts") or as_dict(metrics.get("dataset_metadata")).get("data_origin_counts"),
+        "scenario_family_counts": metrics.get("scenario_family_counts") or as_dict(metrics.get("dataset_metadata")).get("scenario_family_counts"),
+        "targets": summarized_targets,
+        "limitations": metrics.get("limitations", [
+            "Because real collected data is limited, the current model is trained using real prototype data plus synthetic scenario data. Metrics on synthetic data show behavior coverage, not guaranteed real-world accuracy.",
+        ]),
+        "warnings": metrics.get("warnings", []),
+    }
 
 
 def scenario_device(devices: dict[str, Any], device_id: str) -> dict[str, Any]:
@@ -7686,9 +8250,11 @@ def apply_scenario_ai_overrides(ai_result: dict[str, Any], request: AiScenarioPr
 
 
 def run_scenario_ai_prediction(home_id: str, request: AiScenarioPredictRequest) -> dict[str, Any]:
+    settings = DEFAULT_SETTINGS.copy()
     payload, input_source = build_ai_payload_from_scenario(home_id, request)
-    safety_notifications = run_immediate_safety_checks(home_id, payload)
-    routine_notifications = run_lightweight_anomaly_checks(home_id, payload)
+    payload = enrich_ai_payload_with_settings(home_id, payload, settings)
+    safety_notifications = run_immediate_safety_checks(home_id, payload, settings)
+    routine_notifications = run_lightweight_anomaly_checks(home_id, payload, settings)
     ml_ran = True
     try:
         prediction = ai_engine.run_model(payload)
@@ -7702,7 +8268,7 @@ def run_scenario_ai_prediction(home_id: str, request: AiScenarioPredictRequest) 
             "anomaly_label": {"value": "scenario_rule_based_alert" if safety_notifications or routine_notifications else "normal", "confidence": 0.75, "source": "scenario_rules"},
             "recommendation_type": {"value": "review_ai_notifications" if safety_notifications or routine_notifications else "none", "confidence": 0.75, "source": "scenario_rules"},
             "next_hour_total_energy_kWh": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg")))},
-            "next_hour_total_cost_BHD": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg"))) * as_number(payload.get("tariff_BHD_per_kWh"), 0.032)},
+            "next_hour_total_cost_BHD": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg"))) * as_number(settings.get("cost_per_kwh"), 0.029)},
             "energy_efficiency_score": 70 if safety_notifications or routine_notifications else 95,
             "explanation": "Scenario rule checks ran because the ML model could not be used for this simulated input.",
             "post_processing_rules": ["scenario_rule_checks_without_full_ml"],
@@ -7730,6 +8296,7 @@ def run_scenario_ai_prediction(home_id: str, request: AiScenarioPredictRequest) 
         + routine_notifications
         + build_ai_notifications(home_id, ai_result, payload)
     )
+    ai_result, notifications = apply_ai_settings_to_result(ai_result, notifications, settings, payload)
     notifications = [dict(item, source="scenario_ai", simulation=True) for item in notifications]
     alerts = [item for item in notifications if item["severity"] in {"high", "critical"}]
     suggestions = [item for item in notifications if item["category"] == "recommendation"]
@@ -7772,10 +8339,12 @@ def start_ai_prediction_scheduler() -> None:
 
 
 def run_ec2_ai_prediction(home_id: str, *, force_full_ml: bool = False) -> dict[str, Any]:
+    settings = ensure_settings(home_id)
     payload, input_source = ai_engine.build_ai_payload(home_id)
     payload = enrich_ai_payload_with_history(home_id, payload)
-    safety_notifications = run_immediate_safety_checks(home_id, payload)
-    routine_notifications = run_lightweight_anomaly_checks(home_id, payload)
+    payload = enrich_ai_payload_with_settings(home_id, payload, settings)
+    safety_notifications = run_immediate_safety_checks(home_id, payload, settings)
+    routine_notifications = run_lightweight_anomaly_checks(home_id, payload, settings)
     ml_ran = should_run_full_ml(home_id, force=force_full_ml, input_source=input_source)
     if ml_ran:
         prediction = ai_engine.run_model(payload)
@@ -7783,21 +8352,29 @@ def run_ec2_ai_prediction(home_id: str, *, force_full_ml: bool = False) -> dict[
         ai_result = apply_ec2_ai_routine_rules(ai_result, payload)
         _ai_last_full_prediction_ms_by_home[home_id] = now_ms()
     else:
+        confidence = {"value": 0.75 if safety_notifications or routine_notifications else 0.65, "label": "medium"}
         prediction = {
             "model_name": "smart_energy_ai",
             "model_version": "rule_only",
             "prediction_status": "rule_checks_only",
+            "ai_mode": "rule_only",
+            "confidence": confidence,
+            "data_freshness": ai_engine.data_freshness_from_payload(payload),
+            "anomaly_scores": ai_engine.anomaly_scores_from_payload(payload),
+            "top_factors": ai_engine.top_factors_from_payload(payload),
+            "guardrails_applied": ["rule_checks_without_full_ml"],
             "waste_event": {"value": any(item.get("category") == "energy" for item in safety_notifications + routine_notifications), "confidence": 0.75, "source": "rule_checks"},
             "anomaly_label": {"value": "rule_based_alert" if safety_notifications or routine_notifications else "normal", "confidence": 0.75, "source": "rule_checks"},
             "recommendation_type": {"value": "review_ai_notifications" if safety_notifications or routine_notifications else "none", "confidence": 0.75, "source": "rule_checks"},
             "next_hour_total_energy_kWh": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg")))},
-            "next_hour_total_cost_BHD": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg"))) * as_number(payload.get("tariff_BHD_per_kWh"), 0.032)},
+            "next_hour_total_cost_BHD": {"value": as_number(payload.get("same_hour_energy_avg"), as_number(payload.get("recent_energy_avg"))) * as_number(settings.get("cost_per_kwh"), 0.029)},
             "energy_efficiency_score": 70 if safety_notifications or routine_notifications else 95,
             "explanation": "Rule-based AI checks ran. Full ML is scheduled hourly after hourly summaries, not on every live update.",
             "post_processing_rules": ["rule_checks_without_full_ml"],
         }
         ai_result = ai_engine.build_ai_result(home_id, payload, prediction, input_source)
     ai_result["source"] = "ec2_ai_inference"
+    ai_result["ai_mode"] = "hybrid_ml_rules" if ml_ran and ai_result.get("post_processing_rules") else ("full_ml" if ml_ran else "rule_only")
     ai_result["ml_ran"] = ml_ran
     ai_result["levels_ran"] = ["immediate_safety", "lightweight_routine"] + (["full_ml"] if ml_ran else [])
     ai_result["anomaly_score"] = 1.0 - as_number(ai_result.get("efficiency_score"), 100) / 100
@@ -7806,8 +8383,9 @@ def run_ec2_ai_prediction(home_id: str, *, force_full_ml: bool = False) -> dict[
     ai_result["next_hour_total_energy_kWh"] = ai_result.get("next_hour_energy")
     ai_result["next_hour_total_cost_BHD"] = ai_result.get("next_hour_cost")
     notifications = dedupe_ai_notifications(safety_notifications + routine_notifications + build_ai_notifications(home_id, ai_result, payload))
+    ai_result, notifications = apply_ai_settings_to_result(ai_result, notifications, settings, payload)
     alerts = [item for item in notifications if item["severity"] in {"high", "critical"}]
-    suggestions = [item for item in notifications if item["category"] == "recommendation"]
+    suggestions = [item for item in notifications if item["category"] == "recommendation"] if settings.get("ai_recommendations_enabled") is not False else []
     ai_result["notifications"] = notifications
     ai_result["alerts"] = alerts
     ai_result["suggestions"] = suggestions
@@ -7858,6 +8436,34 @@ def get_ai_notification_results(
     if acknowledged is not None:
         notifications = [item for item in notifications if bool(item.get("acknowledged")) is acknowledged]
     return {"success": True, "home_id": home_id, "count": len(notifications), "notifications": notifications}
+
+
+@app.get("/api/homes/{home_id}/ai/model-info", dependencies=[Depends(require_home_permission("can_view"))])
+def get_ai_model_info(home_id: str) -> dict[str, Any]:
+    metrics = load_ai_metrics_summary()
+    model_path = Path(__file__).resolve().parent / "devices" / "models" / "smart_energy_ai.joblib"
+    return {
+        "success": True,
+        "home_id": home_id,
+        "model_file_available": model_path.exists(),
+        "model_path": "devices/models/smart_energy_ai.joblib",
+        "runtime_schedule": {
+            "routine_check_interval_seconds": AI_ROUTINE_CHECK_INTERVAL_SECONDS,
+            "full_ml_interval_seconds": AI_FULL_PREDICTION_INTERVAL_SECONDS,
+            "auto_predict_enabled": AI_AUTO_PREDICT_ENABLED,
+        },
+        "runtime_modes": ["full_ml", "hybrid_ml_rules", "rule_only", "insufficient_data"],
+        "metrics_summary": metrics,
+        "limitations": [
+            "Labels are weakly supervised from transparent domain rules unless manual labels are supplied.",
+            "Full ML is scheduled hourly or triggered on demand; lightweight rules run more often.",
+        ],
+    }
+
+
+@app.get("/api/homes/{home_id}/ai/metrics-summary", dependencies=[Depends(require_home_permission("can_view"))])
+def get_ai_metrics_summary(home_id: str) -> dict[str, Any]:
+    return {"success": True, "home_id": home_id, "metrics_summary": load_ai_metrics_summary()}
 
 
 @app.post(

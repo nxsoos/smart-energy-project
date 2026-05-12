@@ -196,10 +196,15 @@ bool connectWiFi() {
   }
 
   Serial.print("Connecting to Wi-Fi");
+  Serial.print(" SSID=");
+  Serial.println(wifiSsid);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(false);
+  WiFi.persistent(false);
+  WiFi.disconnect(false, false);
+  delay(250);
   WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
   WiFi.setAutoReconnect(true);
-  WiFi.persistent(true);
 
   int retries = 0;
   while (WiFi.status() != WL_CONNECTED && retries < 40) {
@@ -364,6 +369,22 @@ void initSensors() {
 
   Wire.begin(I2C_SDA, I2C_SCL);
   delay(300);
+
+  Serial.println("Scanning I2C bus...");
+  int i2cCount = 0;
+  for (uint8_t address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("I2C device found at 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+      i2cCount++;
+      delay(5);
+    }
+  }
+  if (i2cCount == 0) {
+    Serial.println("No I2C devices found. Check SDA/SCL wiring, power, and GND.");
+  }
 
   ahtAvailable = aht.begin();
   if (ahtAvailable) {
@@ -707,6 +728,10 @@ void setup() {
   Serial.println("Starting setup...");
 
   loadConfig();
+  Serial.print("Saved Wi-Fi SSID: ");
+  Serial.println(wifiSsid.length() ? wifiSsid : "<missing>");
+  Serial.print("Saved Pi sensor URL: ");
+  Serial.println(piSensorUrl.length() ? piSensorUrl : "<missing>");
   if (!hasSavedConfig()) {
     startSetupPortal();
   } else {

@@ -937,6 +937,91 @@ def build_explanation(result: dict[str, Any], payload: dict[str, Any]) -> str:
     return "Current usage looks normal compared with the training pattern."
 
 
+def confidence_label(confidence: float | None) -> str:
+    if confidence is None:
+        return "unknown"
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.55:
+        return "medium"
+    return "low"
+
+
+def aggregate_model_confidence(result: dict[str, Any]) -> dict[str, Any]:
+    confidences = []
+    for key in ["waste_event", "anomaly_label", "recommendation_type"]:
+        value = ensure_dict(result.get(key)).get("confidence")
+        if isinstance(value, (int, float)):
+            confidences.append(float(value))
+    confidence = round(sum(confidences) / len(confidences), 4) if confidences else None
+    return {"value": confidence, "label": confidence_label(confidence)}
+
+
+def anomaly_scores_from_payload(payload: dict[str, Any]) -> dict[str, float]:
+    energy_z = abs(as_number(first_present(payload.get("energy_z_score_24h"), payload.get("same_hour_energy_z_score"))))
+    power_z = abs(as_number(first_present(payload.get("power_z_score_24h"), payload.get("same_hour_power_z_score"))))
+    same_hour = max(abs(as_number(payload.get("same_hour_energy_z_score"))), abs(as_number(payload.get("same_hour_power_z_score"))))
+    routine = as_number(payload.get("routine_deviation_score"), as_number(payload.get("outside_routine_score")))
+    mismatch = as_number(payload.get("occupancy_power_mismatch_score"))
+    return {
+        "energy_z_score": round(energy_z, 4),
+        "power_z_score": round(power_z, 4),
+        "same_hour_deviation_score": round(same_hour, 4),
+        "routine_deviation_score": round(routine, 4),
+        "occupancy_power_mismatch_score": round(mismatch, 4),
+    }
+
+
+def top_factors_from_payload(payload: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
+    factor_specs = [
+        ("total_power_for_guardrails_W", "Current total power used for safety checks."),
+        ("total_avg_power_W", "Average power in the current AI window."),
+        ("total_energy_kWh", "Energy in the current AI window."),
+        ("occupancy_score", "Occupancy evidence from motion/noise samples."),
+        ("same_hour_energy_z_score", "Deviation from recent same-hour energy routine."),
+        ("same_hour_power_z_score", "Deviation from recent same-hour power routine."),
+        ("energy_z_score_24h", "Deviation from rolling 24-hour energy pattern."),
+        ("power_z_score_24h", "Deviation from rolling 24-hour power pattern."),
+        ("breaker_staleness_seconds", "Age of latest breaker data."),
+        ("sensor_staleness_seconds", "Age of latest room sensor data."),
+        ("command_frequency_last_hour", "Recent command activity."),
+        ("failed_command_count_last_hour", "Recent command failures."),
+        ("hour_of_day", "Current hour affects routine comparison."),
+        ("day_part", "Current time-of-day bucket affects routine comparison."),
+    ]
+    factors: list[dict[str, Any]] = []
+    for feature, reason in factor_specs:
+        if feature not in payload:
+            continue
+        value = payload.get(feature)
+        if value is None:
+            continue
+        if isinstance(value, (int, float)) and abs(float(value)) <= 0:
+            continue
+        factors.append({"feature": feature, "value": value, "reason": reason})
+    return factors[:limit]
+
+
+def data_freshness_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sensor_age = first_present(
+        payload.get("sensor_staleness_seconds"),
+        as_number(payload.get("sensor_data_age_ms")) / 1000 if payload.get("sensor_data_age_ms") is not None else None,
+    )
+    breaker_age = first_present(
+        payload.get("breaker_staleness_seconds"),
+        as_number(payload.get("energy_data_age_ms")) / 1000 if payload.get("energy_data_age_ms") is not None else None,
+    )
+    hub_age = payload.get("hub_freshness_age_seconds")
+    return {
+        "sensor_age_seconds": sensor_age,
+        "breaker_age_seconds": breaker_age,
+        "hub_age_seconds": hub_age,
+        "sensor_stale": payload.get("sensor_data_fresh") is False or as_number(sensor_age) > 180,
+        "breaker_stale": payload.get("breaker_data_fresh") is False or as_number(breaker_age) > 180,
+        "hub_offline": as_number(hub_age) > 300 if hub_age is not None else False,
+    }
+
+
 def has_missing_required_sensor_data(payload: dict[str, Any]) -> bool:
     required_fields = [
         "avg_temperature",
@@ -1153,6 +1238,12 @@ def run_model(payload: dict[str, Any]) -> dict[str, Any]:
         result["energy_efficiency_score"] = calculate_efficiency_score(result, payload)
         result["explanation"] = build_explanation(result, payload)
         result = apply_post_processing_rules(result, payload)
+        result["ai_mode"] = "hybrid_ml_rules" if result.get("post_processing_rules") else "full_ml"
+        result["confidence"] = aggregate_model_confidence(result)
+        result["data_freshness"] = data_freshness_from_payload(payload)
+        result["anomaly_scores"] = anomaly_scores_from_payload(payload)
+        result["top_factors"] = top_factors_from_payload(payload)
+        result["guardrails_applied"] = list(result.get("post_processing_rules", []))
         return result
     except FileNotFoundError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
@@ -1276,8 +1367,21 @@ def build_ai_result(
         "created_at_iso": created_at_iso,
         "model_name": prediction["model_name"],
         "model_version": prediction["model_version"],
+        "ai_mode": prediction.get("ai_mode", "full_ml"),
         "input_source": input_source,
+        "data_source": (
+            "scenario_simulation"
+            if "demo_scenario" in input_source
+            else "hourly_summary"
+            if "latest_hourly_summary" in input_source
+            else "live_dashboard_fallback"
+        ),
         "prediction_status": prediction.get("prediction_status", "ok"),
+        "confidence": prediction.get("confidence"),
+        "data_freshness": prediction.get("data_freshness", data_freshness_from_payload(payload)),
+        "anomaly_scores": prediction.get("anomaly_scores", anomaly_scores_from_payload(payload)),
+        "top_factors": prediction.get("top_factors", top_factors_from_payload(payload)),
+        "guardrails_applied": prediction.get("guardrails_applied", prediction.get("post_processing_rules", [])),
         "ai_status": ai_status,
         "ai_status_code": ai_status["code"],
         "ai_status_label": ai_status["label"],
@@ -1304,6 +1408,12 @@ def build_ai_result(
             "energy_efficiency_score": prediction["energy_efficiency_score"],
             "explanation": prediction["explanation"],
             "prediction_status": prediction.get("prediction_status", "ok"),
+            "ai_mode": prediction.get("ai_mode", "full_ml"),
+            "confidence": prediction.get("confidence"),
+            "data_freshness": prediction.get("data_freshness", data_freshness_from_payload(payload)),
+            "anomaly_scores": prediction.get("anomaly_scores", anomaly_scores_from_payload(payload)),
+            "top_factors": prediction.get("top_factors", top_factors_from_payload(payload)),
+            "guardrails_applied": prediction.get("guardrails_applied", prediction.get("post_processing_rules", [])),
             "ai_status": ai_status,
             "post_processing_rules": prediction.get("post_processing_rules", []),
         },

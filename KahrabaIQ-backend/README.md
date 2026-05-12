@@ -91,6 +91,8 @@ POST /api/homes/{home_id}/ai/scenario-predict
 GET  /api/homes/{home_id}/ai/latest
 GET  /api/homes/{home_id}/ai/history
 GET  /api/homes/{home_id}/ai/notifications
+GET  /api/homes/{home_id}/ai/model-info
+GET  /api/homes/{home_id}/ai/metrics-summary
 ```
 
 The older singular `POST /api/home/{home_id}/ai/predict` remains as a compatibility alias.
@@ -128,11 +130,35 @@ Chat sessions and messages are stored in DynamoDB through the app path store und
 
 ```bash
 pip install -r requirements.txt
+python devices/build_ai_dataset.py
 python devices/train_ai_model.py
 python devices/evaluate_ai_model.py
+python devices/test_ai_pipeline.py
 python devices/predict_ai.py
 python devices/test_ai_guardrails.py
 ```
+
+The current ML pipeline combines real DynamoDB hourly summaries with synthetic scenario
+hourly summaries because the collected prototype data is still limited. It writes a grouped
+train/validation/test split under `devices/datasets/`, compares multiple scikit-learn model
+families when enough data is available, saves metrics/confusion matrices/feature
+importances under `devices/models/`, and exposes runtime metadata such as `ai_mode`,
+confidence, data freshness, anomaly scores, top factors, and guardrails.
+
+KahrabaIQ currently uses weakly supervised labels generated from transparent domain rules.
+This is suitable for a prototype and allows the system to train on collected smart-home
+data, but future work should include manually labeled events from real users to improve
+accuracy and reduce bias.
+
+Because real collected data is limited, the current model is trained using real prototype
+data plus synthetic scenario data. Metrics on synthetic data show behavior coverage, not
+guaranteed real-world accuracy.
+
+More detail: [docs/ai/ai-ml-pipeline.md](docs/ai/ai-ml-pipeline.md).
+
+Home settings are per-home and affect cost calculation, budget notifications, AI
+behavior, occupancy thresholds, stale/offline thresholds, automation, schedules, and
+quiet hours. More detail: [docs/home-settings.md](docs/home-settings.md).
 
 Scenario AI endpoint verification:
 

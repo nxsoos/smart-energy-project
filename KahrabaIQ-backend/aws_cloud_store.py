@@ -248,6 +248,39 @@ def latest_summary(home_id: str, period: str = "hourly") -> dict[str, Any]:
     return items[0] if items else {}
 
 
+def store_summary_item(
+    home_id: str,
+    summary_id: str,
+    summary: dict[str, Any],
+    *,
+    local_created_at_ms: int | None = None,
+    local_updated_at_ms: int | None = None,
+) -> dict[str, Any]:
+    normalized_home = str(home_id or "").strip()
+    normalized_summary_id = str(summary_id or "").strip()
+    if not normalized_home:
+        raise ValueError("home_id is required")
+    if not normalized_summary_id.startswith("SUMMARY#"):
+        raise ValueError("summary_id must start with SUMMARY#")
+    if not isinstance(summary, dict):
+        raise ValueError("summary must be an object")
+
+    item = {
+        "PK": home_pk(normalized_home),
+        "SK": normalized_summary_id,
+        **summary,
+        "homeId": summary.get("homeId") or normalized_home,
+        "home_id": summary.get("home_id") or normalized_home,
+        "summaryId": normalized_summary_id,
+    }
+    if local_created_at_ms is not None:
+        item["localCreatedAtMs"] = int(local_created_at_ms)
+    if local_updated_at_ms is not None:
+        item["localUpdatedAtMs"] = int(local_updated_at_ms)
+    _table().put_item(Item=_to_dynamodb(item))
+    return _from_dynamodb(item)
+
+
 def normalize_command_status(status: str | None, *, default: str = COMMAND_STATUS_PENDING) -> str:
     normalized = str(status or "").strip().upper()
     aliases = {

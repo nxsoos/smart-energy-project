@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import requests
+
 from local_state_store import (
     history_between,
     home_ref,
@@ -36,6 +38,10 @@ SUMMARY_LOOKBACK_HOURS = int(os.environ.get("SUMMARY_LOOKBACK_HOURS", "48"))
 SUMMARY_LOOKBACK_DAYS = int(os.environ.get("SUMMARY_LOOKBACK_DAYS", "7"))
 SUMMARY_SYNC_BATCH_SIZE = int(os.environ.get("SUMMARY_SYNC_BATCH_SIZE", "25"))
 AWS_SUMMARY_SYNC_INTERVAL_SECONDS = int(os.environ.get("AWS_SUMMARY_SYNC_INTERVAL_SECONDS", "300"))
+SUMMARY_SYNC_DESTINATION = os.environ.get("SUMMARY_SYNC_DESTINATION", "ec2").strip().lower()
+KAHRABAIQ_API_URL = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
+PI_ID = os.environ.get("PI_ID", "pi_home_001")
+PI_DEVICE_TOKEN = os.environ.get("PI_DEVICE_TOKEN", "")
 
 
 def log(message: str) -> None:
@@ -129,6 +135,27 @@ def object_values_from_state(path: str) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def pi_headers() -> dict[str, str]:
+    return {"X-Pi-Id": PI_ID, "X-Device-Token": PI_DEVICE_TOKEN}
+
+
+def api_request(method: str, path: str, **kwargs: Any) -> requests.Response:
+    if not KAHRABAIQ_API_URL:
+        raise RuntimeError("KAHRABAIQ_API_URL is required when SUMMARY_SYNC_DESTINATION=ec2.")
+    return requests.request(method, f"{KAHRABAIQ_API_URL}{path}", timeout=30, **kwargs)
+
+
+def response_json(response: requests.Response) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as error:
+        text = (response.text or "").strip()
+        raise RuntimeError(f"Non-JSON response from EC2 ({response.status_code}): {text[:240]}") from error
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected EC2 response ({response.status_code}): {data!r}")
+    return data
 
 
 def summarize_sensors(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -453,6 +480,52 @@ def dynamodb_table():
 
 
 def sync_pending_summaries() -> int:
+    if SUMMARY_SYNC_DESTINATION == "ec2":
+        return sync_pending_summaries_to_ec2()
+    if SUMMARY_SYNC_DESTINATION != "dynamodb":
+        raise RuntimeError("SUMMARY_SYNC_DESTINATION must be ec2 or dynamodb")
+    return sync_pending_summaries_to_dynamodb()
+
+
+def sync_pending_summaries_to_ec2() -> int:
+    summaries = pending_summaries(SUMMARY_SYNC_BATCH_SIZE)
+    if not summaries:
+        return 0
+    payload = {
+        "home_id": HOME_ID,
+        "summaries": [
+            {
+                "summary_id": summary["summary_id"],
+                "period": summary["period"],
+                "start_at_ms": summary["start_at_ms"],
+                "end_at_ms": summary["end_at_ms"],
+                "value": summary["value"],
+                "local_created_at_ms": summary["created_at_ms"],
+                "local_updated_at_ms": summary["updated_at_ms"],
+            }
+            for summary in summaries
+        ],
+    }
+    response = api_request(
+        "POST",
+        f"/api/pi/{PI_ID}/summaries",
+        headers=pi_headers(),
+        json=payload,
+    )
+    data = response_json(response)
+    if not response.ok or data.get("success") is False:
+        raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+    synced_ids = data.get("summary_ids")
+    if not isinstance(synced_ids, list):
+        synced_ids = [summary["summary_id"] for summary in summaries]
+    synced_id_set = {str(item) for item in synced_ids}
+    for summary in summaries:
+        if summary["summary_id"] in synced_id_set:
+            mark_summary_synced(summary["summary_id"])
+    return len(synced_id_set)
+
+
+def sync_pending_summaries_to_dynamodb() -> int:
     table = dynamodb_table()
     synced = 0
     for summary in pending_summaries(SUMMARY_SYNC_BATCH_SIZE):
@@ -482,8 +555,8 @@ def run_once() -> int:
 
 def main() -> int:
     log(
-        f"Started for {HOME_ID}; table={AWS_DYNAMODB_SUMMARIES_TABLE}; "
-        f"region={AWS_REGION}"
+        f"Started for {HOME_ID}; destination={SUMMARY_SYNC_DESTINATION}; "
+        f"table={AWS_DYNAMODB_SUMMARIES_TABLE}; region={AWS_REGION}"
     )
     while True:
         started = time.time()

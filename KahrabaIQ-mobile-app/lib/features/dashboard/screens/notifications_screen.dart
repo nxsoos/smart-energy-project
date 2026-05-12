@@ -335,6 +335,18 @@ Color _severityColor(String severity) {
 
 IconData _iconFor(String type) {
   final normalized = type.toLowerCase();
+  if (normalized.contains('cost') || normalized.contains('budget')) {
+    return Icons.account_balance_wallet_outlined;
+  }
+  if (normalized.contains('energy')) {
+    return Icons.bolt_outlined;
+  }
+  if (normalized.contains('device') || normalized.contains('sensor') || normalized.contains('offline') || normalized.contains('stale')) {
+    return Icons.devices_other_outlined;
+  }
+  if (normalized.contains('ai')) {
+    return Icons.auto_awesome_outlined;
+  }
   if (normalized.contains('critical') || normalized.contains('alert')) {
     return Icons.notification_important_outlined;
   }

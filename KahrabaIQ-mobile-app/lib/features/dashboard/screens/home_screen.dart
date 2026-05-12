@@ -25,6 +25,7 @@ import '../../sensors/screens/sensors_status_screen.dart';
 import 'breakers_screen.dart';
 import 'global_admin_screen.dart';
 import 'home_admin_panel_screen.dart';
+import 'home_settings_screen.dart';
 import 'notifications_screen.dart';
 import '../widgets/ai_insights_banner.dart';
 import '../widgets/dashboard_header.dart';
@@ -656,6 +657,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final canOpenAdminPanel =
         _currentHomeAccess?.permissions.canGenerateInvites == true ||
         _currentHomeAccess?.role == 'home_admin';
+    final canEditSettings =
+        _currentHomeAccess?.permissions.canChangeSettings == true ||
+        _currentHomeAccess?.role == 'home_admin' ||
+        _isPlatformAdmin;
     return Scaffold(
       body: SafeArea(
         child: _isLoading
@@ -772,6 +777,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 22),
                     _DashboardActions(
                       onSensors: _openSensors,
+                      onSettings: () => _openSettings(canEditSettings),
                       onPair: _openQrScanner,
                       onAdmin: canOpenAdminPanel ? _openAdminPanel : null,
                       onGlobalAdmin: _isPlatformAdmin ? _openGlobalAdmin : null,
@@ -1183,6 +1189,25 @@ class _HomeScreenState extends State<HomeScreen> {
     await _loadDashboard();
   }
 
+  Future<void> _openSettings(bool canEdit) async {
+    final homeId = _homeId;
+    if (homeId == null || homeId.isEmpty) {
+      return;
+    }
+    final changed = await Navigator.of(context).push<bool>(
+      fadeSlideRoute(
+        HomeSettingsScreen(
+          homeId: homeId,
+          canEdit: canEdit,
+          scenarioMode: _dashboard?.scenarioId != null,
+        ),
+      ),
+    );
+    if (changed == true) {
+      await _loadDashboard();
+    }
+  }
+
   Future<void> _openGlobalAdmin() async {
     await Navigator.of(context).push(fadeSlideRoute(const GlobalAdminScreen()));
     await _loadDashboard();
@@ -1591,6 +1616,7 @@ class _AiMetricChip extends StatelessWidget {
 class _DashboardActions extends StatelessWidget {
   const _DashboardActions({
     required this.onSensors,
+    required this.onSettings,
     required this.onPair,
     required this.isPairing,
     this.onAdmin,
@@ -1599,6 +1625,7 @@ class _DashboardActions extends StatelessWidget {
   });
 
   final VoidCallback onSensors;
+  final VoidCallback onSettings;
   final VoidCallback onPair;
   final VoidCallback? onAdmin;
   final VoidCallback? onGlobalAdmin;
@@ -1607,52 +1634,61 @@ class _DashboardActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: onSensors,
-            icon: const Icon(Icons.sensors),
-            label: const Text('Sensors'),
-          ),
-        ),
-        if (onAdmin != null) ...[
-          const SizedBox(width: 12),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: onAdmin,
-              icon: const Icon(Icons.admin_panel_settings),
-              label: const Text('Admin Panel'),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final itemWidth = (constraints.maxWidth - 12) / 2;
+        Widget action(Widget child) => SizedBox(width: itemWidth, child: child);
+        return Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            action(
+              OutlinedButton.icon(
+                onPressed: onSensors,
+                icon: const Icon(Icons.sensors),
+                label: const Text('Sensors'),
+              ),
             ),
-          ),
-        ],
-        if (onGlobalAdmin != null) ...[
-          const SizedBox(width: 12),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: onGlobalAdmin,
-              icon: const Icon(Icons.shield_outlined),
-              label: const Text('Global Admin'),
+            action(
+              OutlinedButton.icon(
+                onPressed: onSettings,
+                icon: const Icon(Icons.settings_outlined),
+                label: const Text('Settings'),
+              ),
             ),
-          ),
-        ],
-        if (showPair) ...[
-          const SizedBox(width: 12),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: isPairing ? null : onPair,
-              icon: isPairing
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.qr_code_scanner),
-              label: Text(isPairing ? 'Pairing' : 'Pair'),
-            ),
-          ),
-        ],
-      ],
+            if (onAdmin != null)
+              action(
+                OutlinedButton.icon(
+                  onPressed: onAdmin,
+                  icon: const Icon(Icons.admin_panel_settings),
+                  label: const Text('Admin Panel'),
+                ),
+              ),
+            if (onGlobalAdmin != null)
+              action(
+                OutlinedButton.icon(
+                  onPressed: onGlobalAdmin,
+                  icon: const Icon(Icons.shield_outlined),
+                  label: const Text('Global Admin'),
+                ),
+              ),
+            if (showPair)
+              action(
+                OutlinedButton.icon(
+                  onPressed: isPairing ? null : onPair,
+                  icon: isPairing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.qr_code_scanner),
+                  label: Text(isPairing ? 'Pairing' : 'Pair'),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

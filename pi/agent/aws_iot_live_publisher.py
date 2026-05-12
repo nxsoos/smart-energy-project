@@ -10,7 +10,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from local_state_store import home_snapshot, latest_history
+from local_state_store import home_snapshot, latest_history, set_path
 from timestamp_utils import BAHRAIN_TZ, TIMEZONE, ms_to_iso, now_ms
 
 
@@ -34,6 +34,8 @@ AWS_IOT_RETAIN_LIVE_STATE = os.environ.get("AWS_IOT_RETAIN_LIVE_STATE", "false")
 AWS_IOT_PUBLISH_LOG_EVERY = max(1, int(os.environ.get("AWS_IOT_PUBLISH_LOG_EVERY", "10")))
 ESP32_DEVICE_ID = os.environ.get("ESP32_DEVICE_ID", "esp32_01")
 SENSOR_STALE_AFTER_SECONDS = float(os.environ.get("SENSOR_STALE_AFTER_SECONDS", "45"))
+SMOKE_ALERT_ID = "smoke_detected_room1"
+SMOKE_CLEAR_CONFIRMATION_MS = int(os.environ.get("SMOKE_CLEAR_CONFIRMATION_MS", "15000"))
 USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKERS", "true").strip().lower() in {
     "1",
     "true",
@@ -135,6 +137,15 @@ def as_bool(value: Any, fallback: bool = False) -> bool:
         if normalized in {"false", "0", "no", "off", "offline"}:
             return False
     return fallback
+
+
+def smoke_text_is_active(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if any(token in text for token in ("no smoke", "no gas", "clear", "normal", "safe", "not detected")):
+        return False
+    return "detect" in text or "smoke" in text or "gas" in text or text in {"1", "true", "yes", "on", "alarm"}
 
 
 def first_present(*values: Any) -> Any:
@@ -427,6 +438,44 @@ def command_summary(home: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def smoke_is_clear_for(home: dict[str, Any], timestamp_ms: int) -> bool:
+    devices = as_dict(home.get("devices"))
+    esp32 = as_dict(devices.get(ESP32_DEVICE_ID))
+    sensors = as_dict(esp32.get("sensors"))
+    smoke_state = as_dict(as_dict(home.get("safety")).get("smoke_state"))
+    if str(smoke_state.get("status", "")).lower() != "clear":
+        return False
+    if as_bool(sensors.get("smoke")) or smoke_text_is_active(sensors.get("smoke_text")) or smoke_text_is_active(sensors.get("smoke_status")):
+        return False
+    clear_started_at_ms = int(as_number(smoke_state.get("last_clear_at_ms"), 0))
+    return clear_started_at_ms > 0 and timestamp_ms - clear_started_at_ms >= SMOKE_CLEAR_CONFIRMATION_MS
+
+
+def clear_stale_smoke_alert_if_needed(home: dict[str, Any], timestamp_ms: int) -> dict[str, Any]:
+    if not smoke_is_clear_for(home, timestamp_ms):
+        return home
+    safety = dict(as_dict(home.get("safety")))
+    emergency_mode = dict(as_dict(safety.get("emergency_mode")))
+    if emergency_mode.get("active") is True:
+        emergency_mode.update(
+            {
+                "active": False,
+                "ended_at_ms": timestamp_ms,
+                "ended_at_iso": ms_to_iso(timestamp_ms),
+                "updated_at_ms": timestamp_ms,
+                "updated_at_iso": ms_to_iso(timestamp_ms),
+            }
+        )
+        safety["emergency_mode"] = emergency_mode
+        set_path(f"homes/{HOME_ID}/safety/emergency_mode", emergency_mode)
+    set_path(f"homes/{HOME_ID}/alerts/active/{SMOKE_ALERT_ID}", None)
+    alerts = dict(as_dict(home.get("alerts")))
+    active = dict(as_dict(alerts.get("active")))
+    active.pop(SMOKE_ALERT_ID, None)
+    alerts["active"] = active
+    return {**home, "alerts": alerts, "safety": safety}
+
+
 def compact_alerts(home: dict[str, Any]) -> list[dict[str, Any]]:
     active = as_dict(as_dict(home.get("alerts")).get("active"))
     alerts: list[dict[str, Any]] = []
@@ -462,11 +511,23 @@ def compact_safety(home: dict[str, Any]) -> dict[str, Any]:
     return {
         "smoke_state": compact_dict(
             as_dict(safety.get("smoke_state")),
-            ("active", "smoke_detected", "gas_detected", "updated_at_ms", "updated_at_iso"),
+            (
+                "status",
+                "active",
+                "smoke_detected",
+                "gas_detected",
+                "consecutive_detections",
+                "last_detected_at_ms",
+                "last_detected_at_iso",
+                "last_clear_at_ms",
+                "last_clear_at_iso",
+                "updated_at_ms",
+                "updated_at_iso",
+            ),
         ),
         "emergency_mode": compact_dict(
             as_dict(safety.get("emergency_mode")),
-            ("active", "reason", "updated_at_ms", "updated_at_iso"),
+            ("active", "reason", "started_at_ms", "started_at_iso", "ended_at_ms", "ended_at_iso", "updated_at_ms", "updated_at_iso"),
         ),
     }
 
@@ -500,7 +561,7 @@ def compact_occupancy(home: dict[str, Any]) -> dict[str, Any]:
 
 def build_live_payload() -> dict[str, Any]:
     timestamp_ms = now_ms()
-    home = home_snapshot(HOME_ID)
+    home = clear_stale_smoke_alert_if_needed(home_snapshot(HOME_ID), timestamp_ms)
     devices = collect_devices(home)
     room = latest_sensor_payload(home)
     occupancy = compact_occupancy(home)
