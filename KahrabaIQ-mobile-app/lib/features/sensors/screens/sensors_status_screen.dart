@@ -42,6 +42,10 @@ class SensorsStatusScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 18),
                   SafetyStatusBar(isSafe: _isSafe, isOffline: offline),
+                  if (isDemoMode) ...[
+                    const SizedBox(height: 18),
+                    _LastSensorRecord(sensorData: sensorData),
+                  ],
                   const SizedBox(height: 18),
                   GridView.builder(
                     shrinkWrap: true,
@@ -220,6 +224,130 @@ class SensorsStatusScreen extends StatelessWidget {
       return const [0, 0, 0, 0, 0];
     }
     return [value * 0.92, value * 0.96, value, value * 0.98, value];
+  }
+}
+
+class _LastSensorRecord extends StatelessWidget {
+  const _LastSensorRecord({required this.sensorData});
+
+  final SensorData sensorData;
+
+  @override
+  Widget build(BuildContext context) {
+    final local = sensorData.timestamp.toLocal();
+    final time =
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}:'
+        '${local.second.toString().padLeft(2, '0')}';
+    final rows = <({String label, String value})>[
+      (label: 'Recorded at', value: time),
+      (
+        label: 'Temperature',
+        value: '${sensorData.temperature.toStringAsFixed(1)} C',
+      ),
+      (label: 'Humidity', value: '${sensorData.humidity.toStringAsFixed(0)}%'),
+      (
+        label: 'Motion',
+        value: sensorData.isOccupied ? 'Motion detected' : 'No motion',
+      ),
+      (label: 'Smoke/Gas', value: sensorData.smokeStatus),
+      (
+        label: 'Light',
+        value: '${sensorData.lightStatus} (${sensorData.lightRaw})',
+      ),
+      (
+        label: 'Sound',
+        value: '${sensorData.noiseStatus} (${sensorData.soundRaw})',
+      ),
+      (
+        label: 'AQI / TVOC / eCO2',
+        value:
+            '${sensorData.aqi} / ${sensorData.tvoc.toStringAsFixed(0)} / ${sensorData.eco2.toStringAsFixed(0)}',
+      ),
+      (
+        label: 'Sensor health',
+        value:
+            'AHT ${sensorData.ahtOk ? 'OK' : 'issue'} | ENS160 ${sensorData.ens160Ok ? 'OK' : 'issue'}',
+      ),
+    ];
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: ColorTokens.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: ColorTokens.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.receipt_long, color: ColorTokens.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text('Last Sensor Record', style: AppTextStyles.h3),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: ColorTokens.primary.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text('Scenario', style: AppTextStyles.caption),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              for (final row in rows)
+                _SensorRecordChip(label: row.label, value: row.value),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SensorRecordChip extends StatelessWidget {
+  const _SensorRecordChip({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 138, maxWidth: 260),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: ColorTokens.surfaceElevated,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: ColorTokens.border),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: AppTextStyles.caption),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              style: AppTextStyles.body.copyWith(fontWeight: FontWeight.w800),
+              overflow: TextOverflow.visible,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

@@ -15,63 +15,45 @@ if [ -z "$KIOSK_DASHBOARD_URL" ]; then
 fi
 
 FINAL_DASHBOARD_URL="$KIOSK_DASHBOARD_URL"
-case "$KIOSK_DASHBOARD_URL" in
-  http://127.0.0.1*|http://localhost*)
-    ;;
-  *)
-    FINAL_DASHBOARD_URL="$(python3 - <<'PY'
-import json
-import os
-import sys
-import urllib.parse
-import urllib.request
-
-api_url = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
-dashboard_url = os.environ.get("KIOSK_DASHBOARD_URL", "")
-pi_id = os.environ.get("PI_ID", "")
-device_token = os.environ.get("PI_DEVICE_TOKEN", "")
-
-if not api_url or not dashboard_url or not pi_id or not device_token:
-    sys.exit("KAHRABAIQ_API_URL, KIOSK_DASHBOARD_URL, PI_ID, and PI_DEVICE_TOKEN are required.")
-
-request = urllib.request.Request(
-    f"{api_url}/api/pi/kiosk-session",
-    method="POST",
-    headers={"X-Pi-Id": pi_id, "X-Device-Token": device_token},
-)
-with urllib.request.urlopen(request, timeout=12) as response:
-    data = json.load(response)
-
-kiosk_token = data.get("kiosk_token")
-if not data.get("success") or not kiosk_token:
-    sys.exit(data.get("detail") or data.get("message") or "Failed to create kiosk session.")
-
-parsed = urllib.parse.urlparse(dashboard_url)
-if not parsed.scheme or not parsed.netloc:
-    sys.exit("KIOSK_DASHBOARD_URL must be an absolute URL.")
-
-origin = f"{parsed.scheme}://{parsed.netloc}"
-print(f"{origin}/dashboard/session/start?token={urllib.parse.quote(kiosk_token, safe='')}")
-PY
-)"
-    ;;
-esac
 
 export DISPLAY="${DISPLAY:-:0}"
+export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "/run/user/$(id -u)/bus" ]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+fi
+KIOSK_USER_DATA_DIR="${KIOSK_USER_DATA_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kahrabaiq-kiosk-chromium}"
+mkdir -p "$KIOSK_USER_DATA_DIR"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/harden-kiosk-x11.sh" || true
-xset s off || true
-xset -dpms || true
-xset s noblank || true
+timeout 3s xset s off || true
+timeout 3s xset -dpms || true
+timeout 3s xset s noblank || true
 
-exec chromium \
+CHROMIUM_CMD=(chromium
   --kiosk \
   --noerrdialogs \
   --disable-infobars \
+  --disable-gpu \
+  --disable-gpu-compositing \
+  --disable-accelerated-2d-canvas \
+  --disable-background-networking \
+  --disable-sync \
+  --disable-extensions \
+  --disable-features=MediaRouter,OptimizationHints,Translate,BackForwardCache \
+  --ozone-platform=x11 \
   --no-first-run \
   --disable-session-crashed-bubble \
   --disable-restore-session-state \
   --disable-pinch \
+  --user-data-dir="$KIOSK_USER_DATA_DIR" \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
   --overscroll-history-navigation=0 \
   --check-for-update-interval=31536000 \
-  --app="$FINAL_DASHBOARD_URL"
+  --app="$FINAL_DASHBOARD_URL")
+
+if command -v dbus-run-session >/dev/null 2>&1 && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+  exec dbus-run-session -- "${CHROMIUM_CMD[@]}"
+fi
+
+exec "${CHROMIUM_CMD[@]}"

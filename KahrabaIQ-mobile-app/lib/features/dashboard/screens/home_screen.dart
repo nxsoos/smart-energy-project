@@ -309,53 +309,56 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    return _applyOptimisticCommandState(DashboardData(
-      reading: reading,
-      sensors: degradedOperationalSnapshot
-          ? previous.sensors
-          : incoming.sensors,
-      devices: degradedOperationalSnapshot
-          ? previous.devices
-          : incoming.devices.isNotEmpty
-          ? incoming.devices
-          : previous.devices,
-      alerts: incoming.alerts,
-      tariffBhdPerKwh: incoming.tariffBhdPerKwh,
-      pendingDeviceCommands: incoming.pendingDeviceCommands,
-      deviceCommandErrors: incoming.deviceCommandErrors,
-      aiDashboard: incoming.aiDashboard ?? previous.aiDashboard,
-      aiDailySummary: incoming.aiDailySummary ?? previous.aiDailySummary,
-      aiRecommendation: incoming.aiRecommendation ?? previous.aiRecommendation,
-      aiAlert: incoming.aiAlert ?? previous.aiAlert,
-      aiNotifications: incoming.aiNotifications.isNotEmpty
-          ? incoming.aiNotifications
-          : previous.aiNotifications,
-      control: incoming.control,
-      actionSuggestions: incoming.actionSuggestions.isNotEmpty
-          ? incoming.actionSuggestions
-          : previous.actionSuggestions,
-      automationLogs: incoming.automationLogs.isNotEmpty
-          ? incoming.automationLogs
-          : previous.automationLogs,
-      settingsSummary: incoming.settingsSummary.isNotEmpty
-          ? incoming.settingsSummary
-          : previous.settingsSummary,
-      occupancy: incoming.occupancy.isNotEmpty
-          ? incoming.occupancy
-          : previous.occupancy,
-      safety: incoming.safety.isNotEmpty ? incoming.safety : previous.safety,
-      hubStatus: incoming.hubStatus.isNotEmpty
-          ? incoming.hubStatus
-          : previous.hubStatus,
-      criticalAlerts: incoming.criticalAlerts.isNotEmpty
-          ? incoming.criticalAlerts
-          : previous.criticalAlerts,
-      nextSchedule: previous.nextSchedule,
-      scenarioId: previous.scenarioId,
-      scenarioName: previous.scenarioName,
-      scenarioDescription: previous.scenarioDescription,
-      deviceControlEnabled: incoming.deviceControlEnabled,
-    ));
+    return _applyOptimisticCommandState(
+      DashboardData(
+        reading: reading,
+        sensors: degradedOperationalSnapshot
+            ? previous.sensors
+            : incoming.sensors,
+        devices: degradedOperationalSnapshot
+            ? previous.devices
+            : incoming.devices.isNotEmpty
+            ? incoming.devices
+            : previous.devices,
+        alerts: incoming.alerts,
+        tariffBhdPerKwh: incoming.tariffBhdPerKwh,
+        pendingDeviceCommands: incoming.pendingDeviceCommands,
+        deviceCommandErrors: incoming.deviceCommandErrors,
+        aiDashboard: incoming.aiDashboard ?? previous.aiDashboard,
+        aiDailySummary: incoming.aiDailySummary ?? previous.aiDailySummary,
+        aiRecommendation:
+            incoming.aiRecommendation ?? previous.aiRecommendation,
+        aiAlert: incoming.aiAlert ?? previous.aiAlert,
+        aiNotifications: incoming.aiNotifications.isNotEmpty
+            ? incoming.aiNotifications
+            : previous.aiNotifications,
+        control: incoming.control,
+        actionSuggestions: incoming.actionSuggestions.isNotEmpty
+            ? incoming.actionSuggestions
+            : previous.actionSuggestions,
+        automationLogs: incoming.automationLogs.isNotEmpty
+            ? incoming.automationLogs
+            : previous.automationLogs,
+        settingsSummary: incoming.settingsSummary.isNotEmpty
+            ? incoming.settingsSummary
+            : previous.settingsSummary,
+        occupancy: incoming.occupancy.isNotEmpty
+            ? incoming.occupancy
+            : previous.occupancy,
+        safety: incoming.safety.isNotEmpty ? incoming.safety : previous.safety,
+        hubStatus: incoming.hubStatus.isNotEmpty
+            ? incoming.hubStatus
+            : previous.hubStatus,
+        criticalAlerts: incoming.criticalAlerts.isNotEmpty
+            ? incoming.criticalAlerts
+            : previous.criticalAlerts,
+        nextSchedule: previous.nextSchedule,
+        scenarioId: previous.scenarioId,
+        scenarioName: previous.scenarioName,
+        scenarioDescription: previous.scenarioDescription,
+        deviceControlEnabled: incoming.deviceControlEnabled,
+      ),
+    );
   }
 
   DashboardData _applyOptimisticCommandState(DashboardData dashboard) {
@@ -374,7 +377,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
       final expired = now.difference(startedAt) > _optimisticCommandHold;
       final message = (device.lastCommandMessage ?? '').toLowerCase();
-      final failed = message.contains('failed') ||
+      final failed =
+          message.contains('failed') ||
           message.contains('could not') ||
           message.contains('unavailable');
       final confirmed = device.isOn == targetIsOn && !device.commandInProgress;
@@ -1032,9 +1036,14 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _openSensors() => Navigator.of(
-    context,
-  ).push(fadeSlideRoute(SensorsStatusScreen(sensorData: _dashboard!.sensors)));
+  void _openSensors() => Navigator.of(context).push(
+    fadeSlideRoute(
+      SensorsStatusScreen(
+        sensorData: _dashboard!.sensors,
+        isDemoMode: _dashboard?.scenarioId != null,
+      ),
+    ),
+  );
 
   Future<void> _logout() async {
     if (!NetworkConfig.useCognitoAuth) {

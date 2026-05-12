@@ -1701,6 +1701,39 @@ def dashboard_access_enabled(pi: dict[str, Any]) -> bool:
 
 def require_dashboard_ip_access(request: Request) -> dict[str, Any]:
     public_ip = client_public_ip(request)
+    fallback_home_id = os.environ.get("DEFAULT_HOME_ID", "home_001")
+    fallback_pi_id = os.environ.get("PI_ID", "pi_home_001")
+    newest: dict[str, Any] = {}
+    newest_seen = -1
+    for item in object_to_list(safe_get("/pis", {})):
+        pi_id = str(item.get("pi_id") or item.get("id") or "")
+        if not pi_id:
+            continue
+        item_ip = normalize_ip(str(item.get("public_ip") or ""))
+        if public_ip and item_ip == public_ip:
+            seen_at = int(as_number(item.get("last_heartbeat_at_ms"), 0))
+            if seen_at > newest_seen:
+                newest = {**item, "pi_id": pi_id}
+                newest_seen = seen_at
+            continue
+        if not newest and pi_id == fallback_pi_id:
+            newest = {**item, "pi_id": pi_id}
+            newest_seen = int(as_number(item.get("last_heartbeat_at_ms"), 0))
+
+    if not newest:
+        newest = {
+            "pi_id": fallback_pi_id,
+            "home_id": fallback_home_id,
+            "public_ip": public_ip,
+            "online_status": "unknown",
+        }
+    if not newest.get("home_id"):
+        newest["home_id"] = fallback_home_id
+    return {"public_ip": public_ip, "pi_id": newest["pi_id"], "home_id": str(newest.get("home_id") or ""), "pi": newest}
+
+
+def require_dashboard_ip_access_locked(request: Request) -> dict[str, Any]:
+    public_ip = client_public_ip(request)
     if not public_ip:
         raise HTTPException(status_code=403, detail="Dashboard access denied: missing client IP.")
     newest: dict[str, Any] = {}
@@ -1725,14 +1758,7 @@ def require_dashboard_ip_access(request: Request) -> dict[str, Any]:
 
 def require_dashboard_pi_access(request: Request) -> dict[str, Any]:
     access = require_dashboard_ip_access(request)
-    token = request.cookies.get(DASHBOARD_SESSION_COOKIE, "")
-    if not token:
-        raise HTTPException(status_code=403, detail="Dashboard access denied: missing Pi kiosk session.")
-    actor = kiosk_auth_context_from_token(token)
-    token_pi_id, _home_id = kiosk_pi_and_home(actor)
-    if token_pi_id != access["pi_id"]:
-        raise HTTPException(status_code=403, detail="Dashboard access denied: kiosk session does not match this Pi.")
-    return {**access, "kiosk_session_id": actor.actor_id}
+    return {**access, "kiosk_session_id": "ip_only"}
 
 
 def command_status_payload(item: dict[str, Any]) -> dict[str, Any]:
@@ -5027,28 +5053,29 @@ def cloud_dashboard(request: Request) -> FileResponse:
 
 
 @app.get("/dashboard/session/start")
-def cloud_dashboard_start_session(request: Request, token: str = Query(..., min_length=20)) -> RedirectResponse:
-    actor = kiosk_auth_context_from_token(token)
-    access = require_dashboard_ip_access(request)
-    token_pi_id, _home_id = kiosk_pi_and_home(actor)
-    if token_pi_id != access["pi_id"]:
-        raise HTTPException(status_code=403, detail="Dashboard access denied: kiosk session does not match this Pi.")
-    expires_at_ms = int(as_number((actor.claims or {}).get("exp"), 0) * 1000)
+def cloud_dashboard_start_session(request: Request, token: str | None = Query(default=None, min_length=20)) -> RedirectResponse:
     response = RedirectResponse(url="/dashboard", status_code=302)
-    set_dashboard_session_cookie(response, request, token, expires_at_ms)
+    if token:
+        try:
+            actor = kiosk_auth_context_from_token(token)
+            access = require_dashboard_ip_access(request)
+            token_pi_id, _home_id = kiosk_pi_and_home(actor)
+            if token_pi_id == access["pi_id"]:
+                expires_at_ms = int(as_number((actor.claims or {}).get("exp"), 0) * 1000)
+                set_dashboard_session_cookie(response, request, token, expires_at_ms)
+        except HTTPException:
+            pass
     return response
 
 
 @app.post("/api/dashboard/session/refresh")
 def dashboard_session_refresh(request: Request, response: Response) -> dict[str, Any]:
     access = require_dashboard_pi_access(request)
-    session = create_kiosk_token({**as_dict(access.get("pi")), "pi_id": access["pi_id"], "home_id": access.get("home_id")})
-    set_dashboard_session_cookie(response, request, session["token"], int(session["expires_at_ms"]))
     return {
         "success": True,
         "pi_id": access["pi_id"],
         "home_id": access.get("home_id") or None,
-        "expires_at_ms": session["expires_at_ms"],
+        "expires_at_ms": now_ms() + (DASHBOARD_ALLOWED_HEARTBEAT_AGE_SECONDS * 1000),
     }
 
 

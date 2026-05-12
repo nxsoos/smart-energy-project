@@ -57,8 +57,8 @@ for key in sorted(blocked_keys):
 tree.write(path, encoding="UTF-8", xml_declaration=True)
 PY
 
-if command -v openbox --reconfigure >/dev/null 2>&1; then
-  DISPLAY="${DISPLAY:-:0}" openbox --reconfigure || true
+if command -v openbox >/dev/null 2>&1; then
+  timeout 5s env DISPLAY="${DISPLAY:-:0}" openbox --reconfigure || true
 fi
 
 printf 'KahrabaIQ kiosk X11 shortcut hardening applied to %s\n' "$OPENBOX_RC"
