@@ -82,6 +82,10 @@ class AuthService {
     _restoreCachedUser();
   }
 
+  static const bool _printCognitoToken = bool.fromEnvironment(
+    'PRINT_COGNITO_TOKEN',
+    defaultValue: false,
+  );
   static final AuthService _instance = AuthService._internal();
 
   final StreamController<AppUser?> _authStateController =
@@ -95,6 +99,7 @@ class AuthService {
   CognitoCredentials? _credentials;
   AppUser? _currentUser;
   String? _attachedPolicyIdentityId;
+  String? _lastPrintedIdToken;
   bool _restoreStarted = false;
 
   Stream<AppUser?> get authStateChanges async* {
@@ -254,7 +259,34 @@ class AuthService {
     }
     final session = await _validSession();
     final token = session?.getIdToken().getJwtToken();
+    _printIdTokenForDebug(token);
     return token;
+  }
+
+  void _printIdTokenForDebug(String? token) {
+    if (!_printCognitoToken || token == null || token.isEmpty) {
+      return;
+    }
+    if (_lastPrintedIdToken == token) {
+      return;
+    }
+    _lastPrintedIdToken = token;
+    const chunkSize = 900;
+    final chunkCount = (token.length / chunkSize).ceil();
+    debugPrint(
+      '[KahrabaIQ AUTH TOKEN] Cognito ID token follows; '
+      'use only for local debugging and do not share it.',
+    );
+    for (var index = 0; index < chunkCount; index += 1) {
+      final start = index * chunkSize;
+      final end = (start + chunkSize < token.length)
+          ? start + chunkSize
+          : token.length;
+      debugPrint(
+        '[KahrabaIQ AUTH TOKEN ${index + 1}/$chunkCount] '
+        '${token.substring(start, end)}',
+      );
+    }
   }
 
   Future<UserPermissions> loadPermissions({

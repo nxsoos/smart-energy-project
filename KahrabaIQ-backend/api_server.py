@@ -4476,7 +4476,12 @@ def summary_energy_raw_value(summary: dict[str, Any]) -> float | None:
         summary.get("totalEnergyKwh"),
     )
     if raw is None:
-        return None
+        breaker_values = [
+            as_number(as_dict(breaker).get("energyDeltaKwh"))
+            for breaker in as_dict(summary.get("breakerSummaries")).values()
+        ]
+        usable_values = [value for value in breaker_values if value is not None]
+        return round(sum(usable_values), 6) if usable_values else None
     return as_number(raw)
 
 

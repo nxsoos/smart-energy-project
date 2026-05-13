@@ -18,6 +18,15 @@ from flask import Flask, Response, jsonify, request
 
 from local_state_store import get_path, home_snapshot, set_path
 try:
+    from local_command_controller import (
+        execute_local_command,
+        sync_home_assistant_device_states,
+    )
+except Exception:
+    execute_local_command = None
+    sync_home_assistant_device_states = None
+
+try:
     from aws_iot_live_publisher import build_live_payload
 except Exception:
     build_live_payload = None
@@ -592,6 +601,8 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .hero { grid-column: span 7; }
     .room { grid-column: span 5; }
+    .sensors { grid-column: span 6; }
+    .notes { grid-column: span 6; }
     .wide { grid-column: span 12; }
 
     .metric-row {
@@ -634,6 +645,39 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       font-weight: 800;
     }
 
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      color: var(--cyan);
+      font-size: 15px;
+      font-weight: 900;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .reading-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+      gap: 12px;
+    }
+
+    .reading {
+      min-height: 92px;
+      border-radius: 14px;
+      background: rgba(4, 6, 27, 0.5);
+      padding: 14px;
+    }
+
     .devices {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -644,7 +688,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       border-radius: 14px;
       background: rgba(4, 6, 27, 0.5);
       padding: 18px;
-      min-height: 160px;
+      min-height: 138px;
     }
 
     .device-head {
@@ -675,6 +719,51 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       color: var(--red);
     }
 
+    .state.stale {
+      background: rgba(255, 176, 32, 0.14);
+      color: var(--yellow);
+    }
+
+    .command-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .command-actions button {
+      border: 1px solid rgba(17, 217, 255, 0.26);
+      border-radius: 999px;
+      min-height: 40px;
+      padding: 0 16px;
+      background: rgba(17, 217, 255, 0.12);
+      color: var(--text);
+      font-weight: 900;
+    }
+
+    .command-actions button.primary {
+      background: var(--cyan);
+      color: #001018;
+    }
+
+    .command-actions button.danger {
+      background: rgba(255, 92, 122, 0.16);
+      color: #fecaca;
+      border-color: rgba(255, 92, 122, 0.35);
+    }
+
+    .command-actions button:disabled {
+      opacity: .45;
+    }
+
+    .command-status {
+      margin-top: 10px;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
     .two-col {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -687,6 +776,18 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .error {
       color: var(--red);
+    }
+
+    .notes-list {
+      display: grid;
+      gap: 10px;
+      line-height: 1.45;
+    }
+
+    .note {
+      border-radius: 12px;
+      background: rgba(4, 6, 27, 0.48);
+      padding: 12px 14px;
     }
 
     .overlay {
@@ -788,7 +889,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     @media (max-width: 820px) {
       header { align-items: flex-start; flex-direction: column; }
       .brand-mark { width: 52px; height: 52px; }
-      .hero, .room { grid-column: span 12; }
+      .hero, .room, .sensors, .notes { grid-column: span 12; }
       .metric-row { grid-template-columns: 1fr; }
     }
   </style>
@@ -849,7 +950,10 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     <section class="grid">
       <article class="card hero">
-        <div class="label">Live Power</div>
+        <div class="section-head">
+          <div class="section-title">Live Energy</div>
+          <div class="muted" id="energyTimestamp">Waiting for update</div>
+        </div>
         <div><span class="value" id="power">--</span><span class="unit">W</span></div>
         <div class="metric-row">
           <div class="metric">
@@ -868,7 +972,10 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       </article>
 
       <article class="card room">
-        <div class="label">Room Sensors</div>
+        <div class="section-head">
+          <div class="section-title">Room Status</div>
+          <div class="state" id="roomStatus">Unknown</div>
+        </div>
         <div class="two-col">
           <div class="metric">
             <div class="label">Temperature</div>
@@ -890,12 +997,51 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       </article>
 
       <article class="card wide">
-        <div class="label">Devices</div>
+        <div class="section-head">
+          <div class="section-title">Breakers & Controls</div>
+          <div class="muted">Meter readings are shown only for metered breakers.</div>
+        </div>
         <div class="devices" id="devices"></div>
       </article>
 
-      <article class="card wide">
-        <div class="label">Alerts & Notes</div>
+      <article class="card sensors">
+        <div class="section-head">
+          <div class="section-title">Sensor Data</div>
+          <div class="muted" id="sensorUpdated">No timestamp</div>
+        </div>
+        <div class="reading-grid">
+          <div class="reading">
+            <div class="label">AQI</div>
+            <div class="small-value" id="aqi">--</div>
+          </div>
+          <div class="reading">
+            <div class="label">eCO2</div>
+            <div class="small-value" id="eco2">--</div>
+          </div>
+          <div class="reading">
+            <div class="label">TVOC</div>
+            <div class="small-value" id="tvoc">--</div>
+          </div>
+          <div class="reading">
+            <div class="label">Light</div>
+            <div class="small-value" id="light">--</div>
+          </div>
+          <div class="reading">
+            <div class="label">Sound</div>
+            <div class="small-value" id="sound">--</div>
+          </div>
+          <div class="reading">
+            <div class="label">Feed</div>
+            <div class="small-value" id="sensorFeed">--</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card notes">
+        <div class="section-head">
+          <div class="section-title">Alerts & Notes</div>
+          <div class="muted">Active items only</div>
+        </div>
         <div id="alerts">No active alerts.</div>
       </article>
     </section>
@@ -916,9 +1062,49 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       return Number.isFinite(parsed) ? parsed : fallback;
     }
 
+    function valueOrDash(value, suffix = "") {
+      if (value === null || value === undefined || value === "") return "--";
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) return String(value);
+      return `${fmt.format(parsed)}${suffix}`;
+    }
+
+    function currentSensorValue(online, value, suffix = "") {
+      return online ? valueOrDash(value, suffix) : "Unavailable";
+    }
+
+    function timestampText(value) {
+      const ms = number(value, 0);
+      if (!ms) return "No timestamp";
+      return new Date(ms).toLocaleString();
+    }
+
     function deviceState(device) {
       if (!device.online) return "offline";
       return device.display_state || device.state || "unknown";
+    }
+
+    function deviceStatusClass(device, state) {
+      if (state === "offline") return "offline";
+      if (device.stale) return "stale";
+      return "";
+    }
+
+    function hasMeterReadings(device) {
+      const type = String(device.type || "");
+      return type === "smart_breaker" && device.energy_supported !== false;
+    }
+
+    function canControl(device) {
+      return device.controllable === true;
+    }
+
+    function sensorDevice(devices) {
+      return Object.values(devices).find((device) => {
+        const type = String(device.type || "");
+        const id = String(device.id || device.device_id || "");
+        return type === "sensor_hub" || type === "esp32_sensor" || id.startsWith("esp32");
+      }) || {};
     }
 
     function render(data) {
@@ -926,23 +1112,39 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       const energy = dashboard.energy || {};
       const room = dashboard.room || {};
       const devices = dashboard.devices || {};
+      const sensorHub = sensorDevice(devices);
+      const sensorPayload = sensorHub.sensors || {};
+      const sensorStatus = sensorHub.status || {};
+      const sensorTimestamp = sensorPayload.timestamp_ms || sensorPayload.timestampMs || sensorStatus.last_seen_ms || sensorStatus.lastSeenMs || room.timestamp_ms || room.timestampMs;
+      const sensorOnline = Boolean(sensorHub.online) && room.stale !== true;
       const deviceList = Object.values(devices).filter((device) => {
         const type = String(device.type || "");
-        return type !== "esp32_sensor" && !String(device.id || "").startsWith("esp32");
+        const id = String(device.id || device.device_id || "");
+        return type !== "sensor_hub" && type !== "esp32_sensor" && !id.startsWith("esp32");
       });
       const breakers = deviceList.filter((device) => String(device.type || "").includes("breaker"));
       const activeBreakers = breakers.filter((device) => deviceState(device) === "on").length;
 
       text("subtitle", `${data.home_id || "home"} - ${dashboard.updated_at_iso || "waiting for live state"}`);
       text("statusText", data.paired ? "Live" : "Unpaired");
+      text("energyTimestamp", timestampText(energy.timestampMs || energy.timestamp_ms || dashboard.updated_at_ms));
       text("power", fmt.format(number(energy.currentPowerW ?? energy.powerW)));
       text("energyToday", `${fmt.format(number(energy.energyTodayKwh ?? energy.totalEnergyKwh))} kWh`);
       text("costToday", `${number(energy.costToday).toFixed(3)} BD`);
       text("breakerCount", `${activeBreakers}/${breakers.length || 0}`);
-      text("temperature", room.online === false ? "Offline" : `${fmt.format(number(room.temperature))} C`);
-      text("humidity", room.online === false ? "Offline" : `${fmt.format(number(room.humidity))} %`);
-      text("motion", room.motion_text || (number(room.motion) ? "Motion" : "Clear"));
-      text("smoke", room.smoke_text || (number(room.smoke) ? "Detected" : "Clear"));
+      text("roomStatus", sensorOnline ? "Online" : room.stale ? "Stale" : "Offline");
+      document.getElementById("roomStatus").className = `state ${sensorOnline ? "" : room.stale ? "stale" : "offline"}`;
+      text("temperature", currentSensorValue(sensorOnline, sensorPayload.temperature ?? room.temperature, " C"));
+      text("humidity", currentSensorValue(sensorOnline, sensorPayload.humidity ?? room.humidity, " %"));
+      text("motion", sensorOnline ? (room.motion_text || (number(room.motion) ? "Motion" : "Clear")) : "Unavailable");
+      text("smoke", sensorOnline ? (room.smoke_text || (number(room.smoke) ? "Detected" : "Clear")) : "Unavailable");
+      text("sensorUpdated", timestampText(sensorTimestamp));
+      text("aqi", currentSensorValue(sensorOnline, sensorPayload.aqi ?? room.aqi));
+      text("eco2", currentSensorValue(sensorOnline, sensorPayload.eco2 ?? room.eco2, " ppm"));
+      text("tvoc", currentSensorValue(sensorOnline, sensorPayload.tvoc ?? room.tvoc, " ppb"));
+      text("light", currentSensorValue(sensorOnline, sensorPayload.light_raw ?? room.light_raw));
+      text("sound", currentSensorValue(sensorOnline, sensorPayload.sound_raw ?? sensorPayload.sound_level ?? room.sound_level));
+      text("sensorFeed", sensorOnline ? "Online" : room.stale ? "Stale" : "Offline");
 
       const devicesNode = document.getElementById("devices");
       devicesNode.innerHTML = "";
@@ -953,20 +1155,37 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
           const state = deviceState(device);
           const card = document.createElement("div");
           card.className = "device";
+          const readings = hasMeterReadings(device)
+            ? `
+              <div class="two-col">
+                <div><div class="label">Power</div><div class="small-value">${valueOrDash(device.power_W, " W")}</div></div>
+                <div><div class="label">Energy</div><div class="small-value">${valueOrDash(device.energy_kWh, " kWh")}</div></div>
+                <div><div class="label">Voltage</div><div class="small-value">${valueOrDash(device.voltage_V, " V")}</div></div>
+                <div><div class="label">Current</div><div class="small-value">${valueOrDash(device.current_A, " A")}</div></div>
+              </div>
+            `
+            : `
+              <div class="muted">Control state only. This device does not report power, energy, voltage, or current readings.</div>
+            `;
+          const commandActions = canControl(device)
+            ? `
+              <div class="command-actions" data-device-id="${device.device_id || device.id}">
+                <button class="primary" type="button" data-command="turn_on">Turn On</button>
+                <button class="danger" type="button" data-command="turn_off">Turn Off</button>
+              </div>
+              <div class="command-status" id="commandStatus-${device.device_id || device.id}"></div>
+            `
+            : "";
           card.innerHTML = `
             <div class="device-head">
               <div>
                 <div class="device-name">${device.name || device.id || "Device"}</div>
                 <div class="label">${device.branch || device.control_method || ""}</div>
               </div>
-              <div class="state ${state === "offline" ? "offline" : ""}">${state}</div>
+              <div class="state ${deviceStatusClass(device, state)}">${state}</div>
             </div>
-            <div class="two-col">
-              <div><div class="label">Power</div><div class="small-value">${fmt.format(number(device.power_W))} W</div></div>
-              <div><div class="label">Energy</div><div class="small-value">${fmt.format(number(device.energy_kWh))} kWh</div></div>
-              <div><div class="label">Voltage</div><div class="small-value">${fmt.format(number(device.voltage_V))} V</div></div>
-              <div><div class="label">Current</div><div class="small-value">${fmt.format(number(device.current_A))} A</div></div>
-            </div>
+            ${readings}
+            ${commandActions}
           `;
           devicesNode.appendChild(card);
         }
@@ -982,20 +1201,18 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       if (room.stale || room.online === false) {
         notes.push('<span class="warn">Room sensors are offline or stale.</span>');
       }
-      for (const device of deviceList) {
-        if (device.last_command_status === "failed" || device.last_command_message) {
-          notes.push(`<span class="warn">${device.name || device.id}: ${device.last_command_message || "Last command failed."}</span>`);
-        }
-      }
       for (const alert of alerts) {
         notes.push(`<span class="error">${alert.title || alert.message || "Active alert"}</span>`);
       }
-      for (const notification of aiNotifications.slice(0, 3)) {
+      for (const notification of aiNotifications.filter((item) => {
+        const severity = String(item.severity || "info").toLowerCase();
+        return severity === "critical" || severity === "high";
+      }).slice(0, 3)) {
         const severity = String(notification.severity || "info").toLowerCase();
         const klass = severity === "critical" || severity === "high" ? "error" : "warn";
         notes.push(`<span class="${klass}">AI: ${notification.title || notification.message || "Notification"}</span>`);
       }
-      document.getElementById("alerts").innerHTML = notes.length ? notes.join("<br>") : "No active alerts.";
+      document.getElementById("alerts").innerHTML = notes.length ? `<div class="notes-list">${notes.map((note) => `<div class="note">${note}</div>`).join("")}</div>` : "No active alerts.";
 
       const overlay = document.getElementById("alertOverlay");
       const overlayMessage = document.getElementById("alertOverlayMessage");
@@ -1032,6 +1249,30 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         text("statusText", "Offline");
         document.getElementById("alerts").innerHTML = `<span class="error">${error.message}</span>`;
+      }
+    }
+
+    async function executeDeviceCommand(deviceId, command, container) {
+      const buttons = Array.from(container.querySelectorAll("button"));
+      const status = document.getElementById(`commandStatus-${deviceId}`);
+      buttons.forEach((button) => button.disabled = true);
+      if (status) status.textContent = `${command === "turn_on" ? "Turning on" : "Turning off"}...`;
+      try {
+        const response = await fetch("/api/kiosk/device-command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_id: deviceId, command }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.success === false) {
+          throw new Error(data.message || data.detail || "Command failed");
+        }
+        if (status) status.textContent = data.message || "Command completed.";
+        setTimeout(refresh, 600);
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      } finally {
+        buttons.forEach((button) => button.disabled = false);
       }
     }
 
@@ -1095,6 +1336,14 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
         document.getElementById("adminCopy").textContent = error.message;
       }
     };
+
+    document.getElementById("devices").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-command]");
+      if (!button) return;
+      const container = button.closest(".command-actions");
+      if (!container) return;
+      executeDeviceCommand(container.dataset.deviceId, button.dataset.command, container);
+    });
 
     document.getElementById("lockDashboardButton").onclick = async () => {
       try {
@@ -1298,9 +1547,34 @@ def kiosk_session() -> Any:
 @app.get("/api/kiosk/dashboard-data")
 def local_kiosk_dashboard_data() -> Any:
     try:
+        if sync_home_assistant_device_states is not None:
+            sync_home_assistant_device_states(force=True)
         return jsonify(kiosk_dashboard_data())
     except Exception as error:
         return jsonify({"success": False, "message": str(error)}), 503
+
+
+@app.post("/api/kiosk/device-command")
+def local_kiosk_device_command() -> Any:
+    if execute_local_command is None:
+        return jsonify({"success": False, "message": "Local command controller is not available."}), 503
+    payload = request.get_json(silent=True) or {}
+    device_id = str(payload.get("device_id") or "").strip()
+    command = str(payload.get("command") or "").strip()
+    if not device_id:
+        return jsonify({"success": False, "message": "device_id is required."}), 400
+    if command not in {"turn_on", "turn_off"}:
+        return jsonify({"success": False, "message": "Unsupported command."}), 400
+    if sync_home_assistant_device_states is not None:
+        sync_home_assistant_device_states(force=True)
+    result = execute_local_command(
+        device_id,
+        command,
+        requested_by="pi_dashboard",
+        source="pi_dashboard",
+    )
+    status_code = 200 if result.get("success") else 409
+    return jsonify(result), status_code
 
 
 @app.get("/dashboard")

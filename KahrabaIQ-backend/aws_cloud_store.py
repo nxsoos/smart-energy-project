@@ -248,6 +248,51 @@ def latest_summary(home_id: str, period: str = "hourly") -> dict[str, Any]:
     return items[0] if items else {}
 
 
+def _as_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _summary_energy_value(summary: dict[str, Any]) -> float | None:
+    energy = summary.get("energy") if isinstance(summary.get("energy"), dict) else {}
+    raw = next(
+        (
+            value
+            for value in (
+                energy.get("total_estimated_energy_kWh"),
+                energy.get("total_energy_kWh"),
+                energy.get("total_energy_kwh"),
+                summary.get("total_estimated_energy_kWh"),
+                summary.get("total_energy_kWh"),
+                summary.get("total_energy_kwh"),
+                summary.get("totalEnergyKwh"),
+            )
+            if value is not None
+        ),
+        None,
+    )
+    if raw is not None:
+        return _as_number(raw)
+    breaker_summaries = summary.get("breakerSummaries")
+    if not isinstance(breaker_summaries, dict):
+        return None
+    values = [
+        _as_number(breaker.get("energyDeltaKwh"))
+        for breaker in breaker_summaries.values()
+        if isinstance(breaker, dict)
+    ]
+    usable_values = [value for value in values if value is not None]
+    return round(sum(usable_values), 6) if usable_values else None
+
+
 def store_summary_item(
     home_id: str,
     summary_id: str,
@@ -277,6 +322,37 @@ def store_summary_item(
         item["localCreatedAtMs"] = int(local_created_at_ms)
     if local_updated_at_ms is not None:
         item["localUpdatedAtMs"] = int(local_updated_at_ms)
+    existing_response = _table().get_item(
+        Key={"PK": home_pk(normalized_home), "SK": normalized_summary_id}
+    )
+    existing = _from_dynamodb(existing_response.get("Item", {}))
+    existing_energy = _summary_energy_value(existing) if existing else None
+    incoming_energy = _summary_energy_value(item)
+    if (
+        existing_energy is not None
+        and existing_energy > 0
+        and (incoming_energy is None or incoming_energy <= 0)
+    ):
+        merged = {
+            **item,
+            "energy": existing.get("energy", item.get("energy")),
+            "breakerSummaries": existing.get(
+                "breakerSummaries", item.get("breakerSummaries")
+            ),
+            "total_estimated_energy_kWh": existing.get(
+                "total_estimated_energy_kWh", item.get("total_estimated_energy_kWh")
+            ),
+            "total_energy_kWh": existing.get(
+                "total_energy_kWh", item.get("total_energy_kWh")
+            ),
+            "total_energy_kwh": existing.get(
+                "total_energy_kwh", item.get("total_energy_kwh")
+            ),
+            "totalEnergyKwh": existing.get("totalEnergyKwh", item.get("totalEnergyKwh")),
+            "preservedEnergyFromPreviousSummary": True,
+        }
+        _table().put_item(Item=_to_dynamodb(merged))
+        return _from_dynamodb(merged)
     _table().put_item(Item=_to_dynamodb(item))
     return _from_dynamodb(item)
 
