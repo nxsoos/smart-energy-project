@@ -1,68 +1,203 @@
 # KahrabaIQ
 
-KahrabaIQ is a smart energy and home-safety platform built around an AWS cloud backend, a Flutter mobile app, a Raspberry Pi local hub, and ESP32 room sensors. It supports secure Pi kiosk access, local device control through Tuya and Home Assistant/Matter, local SQLite buffering, and cloud synchronization through AWS.
+KahrabaIQ is an AI-powered smart energy and electrical safety platform that turns a home into a live, intelligent, and locally resilient energy system. It combines a Flutter mobile app, an AWS cloud backend, a Raspberry Pi home hub, ESP32 room sensing, a locked kiosk dashboard, and local device control through Home Assistant, Matter, and Tuya.
 
-## System Overview
+The project is designed for real-world smart-home behavior: monitor energy, detect unsafe conditions, understand occupancy, control connected breakers and switches, sync local hardware state to the cloud, and generate AI-driven recommendations from live and historical usage data.
+
+## Why It Exists
+
+Most smart-home systems either focus on comfort or basic remote control. KahrabaIQ goes further: it treats energy, safety, occupancy, automation, and intelligence as one connected system.
+
+KahrabaIQ can:
+
+- Monitor room conditions, breaker readings, device state, power, voltage, current, energy, and cost.
+- Detect safety-critical states such as smoke/gas, stale sensors, stale breaker data, and abnormal consumption.
+- Understand occupancy and flag energy waste when devices are running in empty spaces.
+- Queue commands from the cloud and execute them locally through the Raspberry Pi.
+- Keep the dashboard fast through local SQLite state while still syncing compact state to AWS.
+- Produce AI predictions, alerts, recommendations, chat responses, and demo scenarios.
+- Secure the kiosk dashboard without exposing long-lived Pi credentials to the browser.
+
+## System Architecture
 
 ```text
 Mobile user
-  -> Flutter app
+  -> Flutter mobile app
   -> Cognito authentication
-  -> KahrabaIQ API
-  -> DynamoDB app state
+  -> KahrabaIQ FastAPI backend
+  -> DynamoDB app state, summaries, AI records, command queue
 
-Raspberry Pi touchscreen
-  -> Deployed AWS-hosted kiosk dashboard
-  -> Local Pi agent at 127.0.0.1
-  -> Short-lived kiosk session token
+Public website / dashboard
+  -> Next.js bilingual web experience
+  -> Cloud-hosted dashboard and kiosk surface
+  -> Short-lived Pi-issued kiosk session
+
+Raspberry Pi home hub
+  -> First-boot provisioning
+  -> Local SQLite state buffer
+  -> ESP32 sensor receiver
+  -> AWS live-state sync
+  -> Remote command runner
+  -> Home Assistant / Matter / Tuya device execution
+  -> Locked Chromium kiosk dashboard
 
 ESP32 room sensor
-  -> Pi sensor receiver
-  -> Local SQLite state buffer
-  -> Pi agent live-state sync
-  -> KahrabaIQ API
+  -> Temperature, humidity, light, motion, sound, smoke/gas readings
+  -> Pi-led Wi-Fi provisioning
+  -> Local posts to the Pi sensor receiver
 
-Device command
-  -> AWS command queue
-  -> Pi command runner
-  -> Tuya Cloud or Home Assistant/Matter
-  -> Local device state update
+AI engine
+  -> Immediate safety/rule alerts
+  -> Routine and anomaly checks
+  -> ML-backed predictions from summaries and latest state
+  -> Chatbot and scenario simulation support
 ```
 
-The browser never receives the long-lived `PI_DEVICE_TOKEN`. That token stays on the Raspberry Pi. The local Pi agent exchanges it for short-lived kiosk tokens that are scoped to one Pi/home.
+## Platform Components
 
-## Pi and ESP32 First-Boot Provisioning
+| Component | Path | Purpose |
+| --- | --- | --- |
+| Mobile app | `KahrabaIQ-mobile-app/` | Flutter app for authentication, dashboards, device control, AI insights, QR pairing, roles, and demo scenarios. |
+| Backend | `KahrabaIQ-backend/` | FastAPI service for homes, users, Pi sync, kiosk sessions, AI inference, chatbot APIs, command queues, Cognito auth, and DynamoDB persistence. |
+| Website/dashboard | `KahrabaIQ-website/` | Professional bilingual Next.js website and cloud dashboard surface for presentation and kiosk access. |
+| Raspberry Pi runtime | `pi/` | Local hub services for provisioning, sensor receiving, SQLite buffering, command execution, live sync, summaries, Home Assistant/Matter, and kiosk launch. |
+| ESP32 firmware | `esp32/` | Room sensor firmware with setup hotspot, provisioning API, saved Wi-Fi/Pi config, and periodic sensor uploads. |
 
-The Raspberry Pi must provision itself and the ESP32 before the locked dashboard starts. The recommended hardware setup uses the built-in Pi Wi-Fi plus a TL-WN725N USB Wi-Fi adapter:
+## Repository Structure
 
 ```text
-wlan0 = built-in Pi Wi-Fi
-  -> permanent home Wi-Fi connection
-  -> dashboard, backend/cloud, local receiver, and normal ESP32 communication
+smart-energy-project/
+  KahrabaIQ-mobile-app/
+    lib/                         Flutter app source
+    test/                        Flutter tests
+    pubspec.yaml                 Flutter dependencies
 
-wlan1 = TL-WN725N USB Wi-Fi adapter
-  -> temporary setup/provisioning only
-  -> turned off after successful provisioning
+  KahrabaIQ-backend/
+    api_server.py                Main FastAPI cloud API
+    main.py                      AI model, rules, guardrails, and chat logic
+    aws_cloud_store.py           DynamoDB helpers
+    devices/                     AI dataset, model, validation, and inference scripts
+    docs/                        Backend, deployment, AI, and settings documentation
+    requirements.txt             Python dependencies
+
+  KahrabaIQ-website/
+    app/                         Next.js App Router source
+    data/                        English and Arabic localized content
+    public/                      Brand, mockup, and team assets
+    package.json                 Website scripts and dependencies
+
+  pi/
+    agent/                       Pi services and local integrations
+    docs/                        Provisioning, kiosk, Home Assistant, Matter, and Tuya docs
+    scripts/                     Pi install, kiosk, and setup scripts
+    systemd/                     Production service units
+    home-assistant/              Home Assistant and Matter container setup
+
+  esp32/
+    firmware/ESP32_code.c        ESP32 firmware
+    docs/                        Flashing, wiring, and provisioning contract
+    libraries.txt                Arduino library requirements
+
+  .github/workflows/ci.yml       CI checks
+  .env.sample                    Safe root environment template
+  README.md                      Project overview
 ```
 
-First boot flow:
+## Core Capabilities
 
-1. `kahrabaiq-provisioning.service` starts before the dashboard and checks `/var/lib/kahrabaiq/provisioned.json`.
-2. If the marker does not exist, the Pi starts `KahrabaIQ-Pi-Setup` on `wlan1`.
-3. `kahrabaiq-setup-screen.service` opens a locked setup screen on the Pi display with hotspot instructions, QR pairing, and sensor setup progress.
-4. The installer connects a phone/laptop to the Pi setup hotspot and opens the setup page on port `8080`.
-5. The setup page collects the home Wi-Fi SSID/password and optional ESP32 device values. It does not ask for `home_id`.
-6. The Pi connects `wlan0` to the home Wi-Fi and verifies backend access.
-7. The Pi requests a short-lived QR pairing token from the backend and displays it on the setup screen.
-8. The user scans the QR code in the KahrabaIQ mobile app. The scanning user becomes `home_admin`.
-9. After backend pairing returns the real `home_id`, the setup screen shows `Home paired successfully. Waiting for sensors to connect to the Pi...`.
-10. The Pi uses `wlan1` to connect to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
-11. The Pi detects the ESP32 setup gateway from `wlan1` and posts the same home Wi-Fi credentials, real `home_id`, Pi sensor URL, Pi ID, device ID, and device key to `http://<detected-gateway>/provision`.
-12. The ESP32 saves the config, reboots, joins the home Wi-Fi, and starts posting to the Pi sensor receiver.
-13. The Pi disconnects and turns off `wlan1`.
-14. The Pi writes `/var/lib/kahrabaiq/provisioned.json` and only then allows normal services and the locked kiosk dashboard to start.
+### Real-Time Energy Intelligence
 
-Normal boot flow:
+KahrabaIQ tracks live and historical electrical behavior across connected breakers and smart devices. It stores compact current state for dashboards, hourly and daily summaries for trends, and command history for deeper context.
+
+The system can surface:
+
+- Current power, voltage, current, energy, and estimated cost.
+- Daily and monthly usage summaries.
+- Device-level state for AC, socket, light, and breaker entities.
+- Waste patterns such as high power while the room appears empty.
+- Stale or missing data from sensors and breaker sources.
+
+### Safety And Awareness
+
+The ESP32 room sensor gives the platform environmental awareness. Smoke/gas, temperature, humidity, motion, light, sound, and freshness signals help KahrabaIQ distinguish normal usage from unsafe or wasteful behavior.
+
+Critical conditions are handled through immediate rules instead of waiting for a slower ML cycle. That keeps safety alerts responsive and explainable.
+
+### Local-First Hardware Control
+
+The Raspberry Pi is the local authority for hardware. Cloud commands are queued remotely, then pulled and executed by the Pi through Home Assistant, Matter, or Tuya depending on configuration.
+
+This design keeps device control close to the home while still enabling cloud dashboards, mobile access, AI, and remote administration.
+
+### AI Insights
+
+The backend includes a lightweight AI layer built for the project data model. It combines rule-based guardrails, routine checks, historical summaries, and scikit-learn model artifacts.
+
+Prediction and insight targets include:
+
+- `waste_event`
+- `anomaly_label`
+- `recommendation_type`
+- `next_hour_total_energy_kWh`
+- `next_hour_total_cost_BHD`
+
+The AI system is intentionally layered:
+
+- Level 1: immediate safety and obvious system alerts.
+- Level 2: periodic routine/anomaly checks using recent history and thresholds.
+- Level 3: full ML prediction after hourly summaries are available.
+
+The Flutter app also includes Demo Scenario Mode, which can simulate normal usage, AC left on, socket waste, unusual routine, high energy, smoke/gas, and stale data without controlling real hardware.
+
+### Secure Kiosk Experience
+
+The Pi launches a locked Chromium dashboard after provisioning completes. The browser never receives the long-lived `PI_DEVICE_TOKEN`. Instead, the local Pi agent exchanges that token for a short-lived kiosk session scoped to that Pi and home.
+
+Admin unlock is intentionally limited. Cloud admin credentials or an offline recovery PIN can unlock the browser maintenance overlay, but this does not grant Raspberry Pi OS access, SSH access, root access, or arbitrary sudo permissions.
+
+## Security Model
+
+- `PI_DEVICE_TOKEN` stays on the Raspberry Pi in `/etc/kahrabaiq/pi.env`.
+- The browser receives only short-lived kiosk sessions.
+- Cognito handles mobile authentication.
+- The first user who scans a new Pi pairing QR becomes `home_admin`.
+- Home admins can invite or remove members/viewers within configured limits.
+- Platform admins are configured through backend environment values and can perform global maintenance actions.
+- Secrets must live in environment variables, AWS Secrets Manager, SSM Parameter Store, or Pi-local env files.
+- Real API keys, Pi tokens, Tuya secrets, Home Assistant tokens, kiosk secrets, and `.env` files must not be committed.
+
+## First-Boot Provisioning
+
+KahrabaIQ supports a guided Pi-led provisioning flow for both the Raspberry Pi and ESP32 sensor.
+
+Recommended network setup:
+
+```text
+wlan0 = built-in Raspberry Pi Wi-Fi
+  -> permanent home Wi-Fi connection
+  -> backend access, dashboard, Pi services, normal ESP32 communication
+
+wlan1 = TL-WN725N USB Wi-Fi adapter
+  -> temporary setup and ESP32 provisioning
+  -> disabled after successful provisioning
+```
+
+Provisioning sequence:
+
+1. The Pi boots and checks `/var/lib/kahrabaiq/provisioned.json`.
+2. If the marker is missing, the Pi starts the `KahrabaIQ-Pi-Setup` hotspot on `wlan1`.
+3. The locked setup screen opens on the Pi display with hotspot instructions and pairing progress.
+4. An installer connects to the setup portal and enters home Wi-Fi credentials.
+5. The Pi connects `wlan0` to the home network and verifies backend access.
+6. The Pi requests a short-lived QR pairing token from the backend.
+7. The user scans the QR code in the Flutter app and becomes the home admin.
+8. The backend returns the real `home_id` after pairing succeeds.
+9. The Pi connects `wlan1` to the ESP32 setup hotspot `KahrabaIQ-ESP32-Setup`.
+10. The Pi provisions the ESP32 with home Wi-Fi, `home_id`, Pi sensor URL, Pi ID, device ID, and device key.
+11. The ESP32 reboots, joins home Wi-Fi, and starts posting sensor data to the Pi.
+12. The Pi turns off `wlan1`, writes the provisioned marker, and starts normal services and the kiosk dashboard.
+
+Normal boot is much simpler:
 
 ```text
 provisioned marker exists
@@ -72,207 +207,44 @@ provisioned marker exists
   -> locked dashboard starts
 ```
 
-Admin unlock flow:
+Detailed provisioning documentation lives in `pi/docs/first-boot-provisioning.md` and `esp32/docs/provisioning-contract.md`.
 
-```text
-Long press the dashboard top-right corner for 5 seconds
-or press Ctrl+Alt+A
-  -> enter platform admin credentials or recovery PIN
-  -> backend confirms platform_admin for cloud unlock
-  -> view status, restart dashboard, exit kiosk to desktop, return to kiosk, or enter maintenance provisioning
-  -> press Lock Dashboard to return to locked kiosk mode without rebooting
-```
+## AWS Resources
 
-Cloud Pi unlock only unlocks the browser maintenance overlay. It does not unlock Raspberry Pi OS, SSH, root, or arbitrary sudo access.
-
-See `pi/README.md`, `pi/docs/first-boot-provisioning.md`, and `esp32/README.md` for device-specific details.
-
-## Repository Structure
-
-```text
-smart-energy-project/
-  .github/
-    workflows/
-      ci.yml                         GitHub Actions checks for PRs and pushes
-
-  smart_energy_app/
-    lib/
-      core/                          App-wide config, theme, constants, utilities
-      features/                      Feature screens and flows
-      shared/                        Shared models and KahrabaIQ API services
-    test/                            Flutter widget/unit tests
-    pubspec.yaml                     Flutter dependencies and SDK constraints
-
-  seniorproject-backend/
-    api_server.py                    Main AWS API: auth, homes, pairing, Pi sync, kiosk, commands
-    aws_cloud_store.py               DynamoDB path-store and summary/command helpers
-    main.py                          AI service entry point
-    home_assistant_controller.py     Shared Home Assistant API helper used by backend paths
-    occupancy_utils.py               Occupancy logic shared with Pi modules
-    timestamp_utils.py               Timezone/timestamp helpers
-    requirements.txt                 Backend/API Python dependencies
-    docs/
-      deployment/                    AWS deployment notes
-      ai/                            AI scenario notes
-    devices/
-      models/                        AI model artifacts
-      predict_ai.py                  Local AI prediction helper
-      train_ai_model.py              AI training helper
-      test_ai_guardrails.py          AI validation tests
-      test_occupancy_scenarios.py    Occupancy scenario tests
-      requirements-ai.txt            AI-specific Python dependencies
-
-  pi/
-    .env.sample                      Safe Pi runtime environment template
-    README.md                        Pi-specific deployment guide
-    agent/
-      pi_agent.py                    Local token bridge, heartbeat, live sync, command polling, admin unlock
-      pi_provisioning.py             First-boot Pi Wi-Fi and ESP32 provisioning portal
-      esp32_receiver.py              Local ESP32 sensor receiver
-      summary_sync.py                Hourly/daily local summary sync
-      aws_remote_command_runner.py   Polls AWS queued commands and executes locally
-      local_command_controller.py    Tuya and Home Assistant/Matter command execution
-      home_assistant_controller.py   Local Home Assistant API client
-      local_state_store.py           SQLite-backed local path store
-      occupancy_utils.py             Pi-local occupancy helper copy
-      timestamp_utils.py             Pi-local timestamp helper copy
-    docs/
-      first-boot-provisioning.md     Pi/ESP32 first-boot setup and admin maintenance flow
-      kiosk-setup.md                 Pi kiosk browser setup and troubleshooting
-      home-assistant-matter.md       Local Home Assistant and Matter stack setup
-      tuya-setup.md                  Tuya credential and breaker setup
-    home-assistant/
-      docker-compose.yml             Home Assistant and Matter containers
-    scripts/
-      install-pi.sh                  Pi dependency and service install script
-      launch-kiosk.sh                Chromium kiosk launcher
-      setup-home-stack.sh            Home Assistant/Matter container setup
-    systemd/
-      kahrabaiq-provisioning.service
-      kahrabaiq-setup-screen.service
-      kahrabaiq-agent.service
-      kahrabaiq-sensor-receiver.service
-      kahrabaiq-summary-sync.service
-      kahrabaiq-command-runner.service
-      kahrabaiq-home-stack.service
-      kahrabaiq-kiosk-browser.service
-
-  esp32/
-    README.md                        ESP32 firmware overview
-    libraries.txt                    Arduino library requirements
-    firmware/
-      ESP32_code.c                   ESP32 sensor/provisioning firmware
-    docs/
-      provisioning-contract.md       ESP32 HTTP provisioning contract
-      flashing.md                    Firmware flashing instructions
-      wiring.md                      Sensor wiring and pins
-
-  .env.sample                        Safe root environment template
-  .gitignore                         Ignore rules for local secrets/build artifacts
-  README.md                          This file
-```
-
-## AWS Resources Required
+KahrabaIQ expects an AWS-backed production environment.
 
 | AWS Resource | Required | Purpose |
 | --- | --- | --- |
-| DynamoDB table `KahrabaIQApp` | Yes | App path-store state: users, homes, devices, Pi records, pairing tokens, kiosk state. |
-| DynamoDB table `SmartEnergySummaries` | Yes | Hourly/daily summaries and remote command queue records. |
-| Cognito User Pool | Yes | Phone app user authentication. |
-| Cognito App Client | Yes | Flutter app sign-in client. |
-| Cognito Identity Pool | Optional | Only needed if the app directly signs AWS requests. |
-| API hosting | Yes | Runs `seniorproject-backend/api_server.py`. App Runner, ECS/Fargate, EC2, or Elastic Beanstalk are valid. |
-| IAM role for API runtime | Yes | Grants DynamoDB read/write/query permissions. |
-| ACM certificate | Recommended | HTTPS certificate for `api.your-domain.com`. |
-| Route 53 or external DNS | Recommended | Points your API domain to the deployed backend. |
-| CloudWatch Logs | Recommended | Runtime logs for API hosting. |
-| Secrets Manager or SSM Parameter Store | Recommended | Store production secrets instead of plain env values. |
+| DynamoDB table `KahrabaIQApp` | Yes | Users, homes, devices, Pi records, kiosk state, pairing tokens, AI records, and app path-store state. |
+| DynamoDB table `SmartEnergySummaries` | Yes | Hourly summaries, daily summaries, and remote command queue records. |
+| Cognito User Pool | Yes | Mobile user authentication. |
+| Cognito App Client | Yes | Flutter sign-in client. |
+| API hosting | Yes | Runs `KahrabaIQ-backend/api_server.py`. EC2, App Runner, ECS/Fargate, or Elastic Beanstalk are valid. |
+| IAM runtime role | Yes | Grants backend access to DynamoDB. |
+| ACM certificate | Recommended | HTTPS for the API and dashboard domains. |
+| Route 53 or external DNS | Recommended | Points production domains to the deployed services. |
+| CloudWatch Logs | Recommended | Runtime observability. |
+| Secrets Manager or SSM Parameter Store | Recommended | Safer production secret storage. |
 
-## AWS DynamoDB Configuration
-
-Create two tables in the same region as the backend runtime.
-
-`KahrabaIQApp`:
+Required DynamoDB table shape:
 
 ```text
-Partition key: PK  (String)
-Sort key:      SK  (String)
-Billing mode:  On-demand is simplest for development
+KahrabaIQApp
+  Partition key: PK (String)
+  Sort key:      SK (String)
+
+SmartEnergySummaries
+  Partition key: PK (String)
+  Sort key:      SK (String)
 ```
 
-`SmartEnergySummaries`:
+On-demand billing is the simplest option for development and demos.
 
-```text
-Partition key: PK  (String)
-Sort key:      SK  (String)
-Billing mode:  On-demand is simplest for development
-```
+## Environment Configuration
 
-The backend uses generic path-store records in `KahrabaIQApp` and summary/remote-command records in `SmartEnergySummaries`.
+Use `.env.sample` files as safe templates. Never commit real production values.
 
-## AWS Cognito Configuration
-
-Create a Cognito User Pool for phone app users.
-
-Required values:
-
-```env
-COGNITO_USER_POOL_ID=eu-west-1_xxxxxxxxx
-COGNITO_APP_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
-COGNITO_ADMIN_GROUP=SmartEnergyAdmins
-COGNITO_MEMBER_GROUP=SmartEnergyMembers
-```
-
-Recommended setup:
-
-- Enable email sign-in.
-- Create the app client without a client secret for Flutter mobile use.
-- Create groups `SmartEnergyAdmins` and `SmartEnergyMembers` if you use group-based policy mapping.
-- Add your platform admin email to `PLATFORM_ADMIN_EMAILS` in the backend environment.
-- Use the same Cognito app client values on the Pi for platform-admin kiosk unlock.
-
-If the Flutter app uses direct AWS request signing, also configure:
-
-```env
-COGNITO_IDENTITY_POOL_ID=eu-west-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-```
-
-## AWS IAM Permissions
-
-The backend runtime role needs access to both DynamoDB tables.
-
-Minimum policy shape:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:DeleteItem",
-        "dynamodb:Query",
-        "dynamodb:Scan"
-      ],
-      "Resource": [
-        "arn:aws:dynamodb:eu-west-1:ACCOUNT_ID:table/KahrabaIQApp",
-        "arn:aws:dynamodb:eu-west-1:ACCOUNT_ID:table/SmartEnergySummaries"
-      ]
-    }
-  ]
-}
-```
-
-Replace `eu-west-1` and `ACCOUNT_ID` with your real AWS region/account.
-
-## Backend Environment Variables
-
-Use these on the deployed API service.
-
-Core AWS/backend values:
+Backend essentials:
 
 ```env
 STORAGE_BACKEND=aws
@@ -281,112 +253,70 @@ AWS_DEFAULT_REGION=eu-west-1
 AWS_DYNAMODB_APP_TABLE=KahrabaIQApp
 AWS_DYNAMODB_SUMMARIES_TABLE=SmartEnergySummaries
 PLATFORM_ADMIN_EMAILS=admin@kahrabaiq.com
-AI_SERVICE_URL=https://YOUR_AI_SERVICE_URL
 INTERNAL_SERVICE_TOKEN=change_me_to_a_long_random_secret
 HOME_MEMBER_LIMIT=3
 PAIRING_TOKEN_TTL_SECONDS=900
 HOME_INVITE_TTL_SECONDS=604800
+KIOSK_SESSION_SECRET=change_me_to_a_long_random_secret
+KIOSK_SESSION_TTL_SECONDS=600
 ```
 
-Cognito values:
+Cognito essentials:
 
 ```env
-COGNITO_USER_POOL_ID=
-COGNITO_APP_CLIENT_ID=
-COGNITO_IDENTITY_POOL_ID=
+COGNITO_USER_POOL_ID=eu-west-1_xxxxxxxxx
+COGNITO_APP_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
+COGNITO_IDENTITY_POOL_ID=eu-west-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 COGNITO_ADMIN_GROUP=SmartEnergyAdmins
 COGNITO_MEMBER_GROUP=SmartEnergyMembers
 ```
 
-Kiosk/Pi security values:
-
-```env
-KIOSK_SESSION_SECRET=change_me_to_a_long_random_secret
-KIOSK_SESSION_TTL_SECONDS=600
-KIOSK_COMMAND_TTL_SECONDS=300
-```
-
-Home Assistant/Matter values used by backend command decisions:
-
-```env
-HOME_ASSISTANT_URL=http://homeassistant.local:8123
-HOME_ASSISTANT_TOKEN=change_me
-HOME_ASSISTANT_COMMAND_MODE=auto
-HOME_ASSISTANT_TIMEOUT_SECONDS=5
-HA_SYNC_INTERVAL_SECONDS=30
-MATTER_SOCKET_SWITCH_ENTITY_ID=switch.socket_switch
-MATTER_AC_SWITCH_ENTITY_ID=switch.ac_switch
-```
-
-Tuya values for local command execution on Pi:
-
-```env
-TUYA_ACCESS_ID=your_tuya_cloud_access_id
-TUYA_ACCESS_SECRET=your_tuya_cloud_access_secret
-TUYA_API_ENDPOINT=https://openapi.tuyaeu.com
-TUYA_BREAKER_01_DEVICE_ID=your_switch_breaker_device_id
-TUYA_BREAKER_02_DEVICE_ID=your_ac_breaker_device_id
-TUYA_VERIFY_ATTEMPTS=7
-```
-
-Do not commit real values for secrets. Use AWS service environment variables, Secrets Manager, SSM Parameter Store, or `/etc/kahrabaiq/pi.env` on the Pi.
-
-## Domain And HTTPS Setup
-
-Recommended public API domain:
+Pi runtime values normally live in:
 
 ```text
-https://api.your-domain.com
+/etc/kahrabaiq/pi.env
 ```
 
-Required steps:
-
-1. Deploy `seniorproject-backend/api_server.py` to AWS App Runner, ECS/Fargate, EC2, or Elastic Beanstalk.
-2. Request an ACM certificate for `api.your-domain.com` in the correct region for the hosting choice.
-3. Attach the custom domain/certificate to the backend service or load balancer.
-4. Add DNS record `api.your-domain.com` pointing to the AWS target.
-5. Verify the API responds over HTTPS.
-
-Verification:
-
-```bash
-curl https://api.your-domain.com/api/health
-```
-
-The Pi kiosk URL should normally be:
+Pi essentials:
 
 ```env
-KIOSK_DASHBOARD_URL=https://dashboard.your-domain.com
-```
-
-For the EC2-hosted production dashboard, use the dashboard domain instead:
-
-```env
+HOME_ID=
+PI_ID=pi_unique_id
+PI_DEVICE_TOKEN=change_me
+KAHRABAIQ_API_URL=https://api.kahrabaiq.com
 KIOSK_DASHBOARD_URL=https://dashboard.kahrabaiq.com
+PI_AGENT_PORT=5010
+PI_SENSOR_PORT=5000
+ESP32_DEVICE_KEY=change_me
+HOME_ASSISTANT_URL=http://127.0.0.1:8123
+HOME_ASSISTANT_TOKEN=change_me_after_creating_a_long_lived_access_token
+REMOTE_COMMAND_SOURCE=ec2
 ```
 
-## Cloud Backend Local Run
+Home Assistant, Matter, Tuya, AI, and kiosk options are documented in the component READMEs and sample env files.
+
+## Local Development
+
+### Backend
 
 ```bash
-cd seniorproject-backend
+cd KahrabaIQ-backend
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 uvicorn api_server:app --reload
 ```
 
-Local health check:
+Health check:
 
 ```bash
 curl http://127.0.0.1:8000/api/health
 ```
 
-## Flutter App
-
-Run locally:
+### Mobile App
 
 ```bash
-cd smart_energy_app
+cd KahrabaIQ-mobile-app
 flutter pub get
 flutter run
 ```
@@ -402,63 +332,38 @@ flutter run \
   --dart-define=COGNITO_IDENTITY_POOL_ID=your_identity_pool_id
 ```
 
-## Raspberry Pi Runtime
+Enable presentation scenarios:
 
-The Pi acts as the local hub. It runs:
+```bash
+flutter run \
+  --dart-define=ENABLE_DEMO_SCENARIOS=true \
+  --dart-define=USE_BACKEND_SCENARIO_AI=true
+```
 
-- `kahrabaiq-agent`: kiosk token bridge, heartbeat, live state sync, command polling, ESP32 provisioning.
-- `kahrabaiq-sensor-receiver`: receives ESP32 sensor posts and writes local SQLite state.
-- `kahrabaiq-summary-sync`: builds and uploads hourly/daily summaries.
-- `kahrabaiq-command-runner`: executes AWS-queued Tuya and Home Assistant/Matter commands locally.
-- `kahrabaiq-home-stack`: starts Home Assistant and Matter containers.
-- `kahrabaiq-kiosk-browser`: hardens common X11/Openbox escape shortcuts, launches Chromium against the deployed kiosk dashboard, and restarts quickly if the browser exits.
+### Website
 
-Pi runtime env file:
+```bash
+cd KahrabaIQ-website
+npm install
+npm run dev
+```
+
+Open:
 
 ```text
-/etc/kahrabaiq/pi.env
+http://localhost:3000/en
+http://localhost:3000/ar
 ```
 
-Required Pi values:
+### Raspberry Pi
 
-```env
-HOME_ID=
-PI_ID=pi_unique_id
-PI_DEVICE_TOKEN=change_me
-KAHRABAIQ_API_URL=https://api.kahrabaiq.com
-KIOSK_DASHBOARD_URL=https://dashboard.kahrabaiq.com
-PI_AGENT_PORT=5010
-PI_SENSOR_PORT=5000
-PI_LOCAL_BASE_URL=
-PI_SENSOR_BASE_URL=
-ESP32_DEVICE_KEY=change_me
-HOME_ASSISTANT_URL=http://127.0.0.1:8123
-HOME_ASSISTANT_TOKEN=change_me_after_creating_a_long_lived_access_token
-HOME_ASSISTANT_COMMAND_MODE=queue
-MATTER_SOCKET_SWITCH_ENTITY_ID=switch.socket_switch
-MATTER_AC_SWITCH_ENTITY_ID=switch.ac_switch
-```
-
-Leave `PI_LOCAL_BASE_URL` and `PI_SENSOR_BASE_URL` empty for normal installs. The Pi sends its current Wi-Fi IP-derived URLs to ESP32 during provisioning and to the backend on heartbeat. Use `HOME_ASSISTANT_URL=http://127.0.0.1:8123` when Home Assistant runs on the same Pi, including Docker host-network mode.
-
-The production dashboard is served by EC2 at `https://dashboard.kahrabaiq.com`. The backend learns each Pi public IP from heartbeat and only serves the dashboard when the request IP matches a fresh Pi record with dashboard access enabled and the browser has a valid Pi-issued kiosk session cookie. The Pi launcher gets that cookie through `/dashboard/session/start`; laptops on the same Wi-Fi public IP are blocked unless they have that Pi kiosk session. Unpaired Pis get a waiting-for-pairing screen; paired Pis get live sensor data with AWS IoT realtime updates and polling fallback.
-
-Install flow on the Pi:
+Copy the repository to `/opt/kahrabaiq` on the Pi, then run:
 
 ```bash
 KAHRABAIQ_REPO_DIR=/opt/kahrabaiq /opt/kahrabaiq/pi/scripts/install-pi.sh
 ```
 
-After configuring `/etc/kahrabaiq/pi.env`:
-
-```bash
-sudo systemctl enable --now \
-  kahrabaiq-agent \
-  kahrabaiq-sensor-receiver \
-  kahrabaiq-summary-sync \
-  kahrabaiq-command-runner \
-  kahrabaiq-kiosk-browser
-```
+After configuring `/etc/kahrabaiq/pi.env`, enable the required services. See `pi/README.md` for the exact production service list and hardware-specific notes.
 
 Home Assistant and Matter setup:
 
@@ -466,14 +371,7 @@ Home Assistant and Matter setup:
 KAHRABAIQ_REPO_DIR=/opt/kahrabaiq /opt/kahrabaiq/pi/scripts/setup-home-stack.sh
 ```
 
-Pi documentation:
-
-- `pi/README.md`
-- `pi/docs/kiosk-setup.md`
-- `pi/docs/home-assistant-matter.md`
-- `pi/docs/tuya-setup.md`
-
-## ESP32 Firmware
+### ESP32
 
 Firmware lives in:
 
@@ -481,33 +379,14 @@ Firmware lives in:
 esp32/firmware/ESP32_code.c
 ```
 
-Provisioning support includes:
+The ESP32 starts in setup mode when no Wi-Fi config is saved:
 
-- Setup hotspot: `KahrabaIQ-ESP32-Setup`
-- Setup URL: auto-detected by the Pi from the `wlan1` gateway after it joins the ESP32 setup hotspot
-- `GET /status`
-- `POST /provision`
-- `POST /reset`
-- mDNS hostname: `kahrabaiq-esp32.local`
+```text
+SSID: KahrabaIQ-ESP32-Setup
+Password: kahrabaiq123
+```
 
-ESP32 documentation:
-
-- `esp32/README.md`
-- `esp32/docs/provisioning-contract.md`
-- `esp32/docs/flashing.md`
-- `esp32/docs/wiring.md`
-
-## Pairing And Roles
-
-- The Pi has a long-lived `PI_ID` and `PI_DEVICE_TOKEN` configured locally.
-- The Pi obtains short-lived kiosk tokens from the AWS API.
-- The kiosk dashboard can display a pairing QR payload.
-- The first phone user who scans the Pi QR becomes `home_admin`.
-- The `home_admin` mobile panel can generate invite QR codes for `viewer` or `member` access and remove existing viewers/members.
-- The fixed global admin account is configured with `PLATFORM_ADMIN_EMAILS=admin@kahrabaiq.com` and can delete homes or remove members across all homes.
-- The same platform admin credentials can unlock Pi browser maintenance controls when `PI_CLOUD_ADMIN_UNLOCK_ENABLED=true`; local recovery PIN remains the offline fallback.
-- Deleting a home marks the linked Pi as `unpaired` and queues a `reset_pairing` command so it returns to pairing mode when online.
-- `HOME_MEMBER_LIMIT` caps the total non-admin users per home: `member + viewer <= 3` by default.
+The normal production path is Pi-led provisioning. Manual flashing, wiring, and HTTP contract details are in `esp32/README.md` and `esp32/docs/`.
 
 ## Verification
 
@@ -515,18 +394,26 @@ Backend and Pi Python checks:
 
 ```bash
 python3 -m py_compile \
-  seniorproject-backend/api_server.py \
-  seniorproject-backend/aws_cloud_store.py \
-  seniorproject-backend/main.py \
+  KahrabaIQ-backend/api_server.py \
+  KahrabaIQ-backend/aws_cloud_store.py \
+  KahrabaIQ-backend/main.py \
   pi/agent/*.py
 ```
 
 Flutter checks:
 
 ```bash
-cd smart_energy_app
+cd KahrabaIQ-mobile-app
 flutter analyze
 flutter test
+```
+
+Website checks:
+
+```bash
+cd KahrabaIQ-website
+npm run lint
+npm run build
 ```
 
 Whitespace check:
@@ -535,28 +422,39 @@ Whitespace check:
 git diff --check
 ```
 
-CI runs these checks on pull requests and branch pushes through `.github/workflows/ci.yml`.
+CI runs project checks through `.github/workflows/ci.yml` on pull requests and branch pushes.
 
-## Security Notes
+## Production Checklist
 
-- Do not commit real API keys, Pi device tokens, Tuya secrets, kiosk secrets, Home Assistant tokens, or local `.env` files.
-- Put Pi runtime secrets in `/etc/kahrabaiq/pi.env` on the Pi.
-- Keep production backend secrets in AWS service environment variables, Secrets Manager, or SSM Parameter Store.
-- The deployed kiosk dashboard must use the local Pi agent session bridge; it must not receive `PI_DEVICE_TOKEN`.
-- Rotate any secret that was ever committed to git history.
-
-## Production Readiness Checklist
-
-- DynamoDB tables exist and use the configured table names.
-- Backend runtime IAM role can read/write/query both DynamoDB tables.
-- Cognito User Pool and App Client are configured.
-- Backend is deployed behind HTTPS at `api.your-domain.com`.
-- Flutter app uses the deployed API URL and Cognito IDs.
-- Pi has `/etc/kahrabaiq/pi.env` with real Pi, API, Tuya, Home Assistant, and ESP32 values.
-- Home Assistant onboarding is complete and Matter devices are paired.
+- DynamoDB tables exist with the expected names and key schema.
+- Backend runtime IAM role can read, write, query, update, delete, and scan required DynamoDB tables.
+- Cognito User Pool and App Client are configured for the Flutter app.
+- Backend is deployed behind HTTPS at the configured API domain.
+- Dashboard/website deployment is reachable over HTTPS.
+- Flutter app uses the production API URL and Cognito IDs.
+- Pi has `/etc/kahrabaiq/pi.env` with real Pi, API, kiosk, Home Assistant, Matter/Tuya, and ESP32 values.
+- Home Assistant onboarding is complete and required entities are configured.
 - ESP32 firmware is flashed and provisioned to the Pi receiver URL.
-- Kiosk opens the deployed dashboard and receives only short-lived kiosk tokens.
+- Kiosk opens the deployed dashboard and receives only short-lived kiosk sessions.
+- Real secrets are stored outside git.
+
+## Documentation Index
+
+- `KahrabaIQ-backend/README.md`: backend, AI pipeline, chatbot, API behavior, and model scripts.
+- `KahrabaIQ-mobile-app/README.md`: Flutter app setup, runtime defines, tests, and Demo Scenario Mode.
+- `KahrabaIQ-website/README.md`: bilingual Next.js website, content editing, assets, localization, and deployment.
+- `pi/README.md`: Raspberry Pi services, installation, provisioning, kiosk security, Home Assistant, Matter, and command execution.
+- `pi/docs/first-boot-provisioning.md`: full Pi and ESP32 first-boot provisioning flow.
+- `pi/docs/kiosk-setup.md`: kiosk setup and troubleshooting.
+- `pi/docs/home-assistant-matter.md`: Home Assistant and Matter integration.
+- `pi/docs/tuya-setup.md`: Tuya setup and fallback control path.
+- `esp32/README.md`: ESP32 firmware behavior and provisioning.
+- `esp32/docs/flashing.md`: firmware flashing instructions.
+- `esp32/docs/wiring.md`: sensor wiring and pins.
+- `esp32/docs/provisioning-contract.md`: ESP32 provisioning HTTP API.
 
 ## Current Direction
 
-KahrabaIQ is AWS-only. App/backend state is stored through AWS services, the phone app authenticates through Cognito, and Pi hardware integrations run locally with secure sync to the cloud API.
+KahrabaIQ is AWS-backed and local-hardware aware. The cloud owns authentication, app state, AI, summaries, pairing, and command queues. The Raspberry Pi owns local sensing, buffering, kiosk sessions, provisioning, and physical device execution. The ESP32 provides room-level awareness. The Flutter app and Next.js dashboard turn that system into a polished user experience.
+
+The result is a complete smart-energy prototype with a serious architecture: cloud intelligence, local resilience, secure kiosk access, real hardware integration, and a presentation-ready product surface.

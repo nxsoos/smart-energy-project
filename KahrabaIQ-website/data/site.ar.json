@@ -36,23 +36,23 @@
   "hero": {
     "kicker": "جامعة البحرين · مشروع التخرج 2026",
     "headline": ["نظام", "ذكي", "للطاقة", "والسلامة", "الكهربائية"],
-    "subheadline": "تحسين ذكي لاستهلاك الطاقة، سلامة تنبؤية، وعي بالإشغال، واستجابة للطوارئ، مدعومة بالذكاء الاصطناعي.",
+    "subheadline": "نظامنا يقلل استهلاك الطاقة، يتنبأ لسلامتكم، واعي لوجودكم، يستجيب للطوارئ، ومدعوم بالذكاء الاصطناعي.",
     "primaryCta": "استكشاف المميزات",
     "secondaryCta": "عرض النموذج",
     "scroll": "مرر"
   },
   "homeStrip": [
-    { "key": "energy", "icon": "stripEnergy", "labelLines": ["تحسين", "الطاقة"] },
-    { "key": "occupancy", "icon": "stripOccupancy", "labelLines": ["الوعي", "بالإشغال"] },
-    { "key": "overload", "icon": "stripOverload", "labelLines": ["حماية", "الحمل"] },
-    { "key": "fire", "icon": "stripFire", "labelLines": ["الحريق", "والطوارئ"] },
-    { "key": "ai", "icon": "stripAi", "labelLines": ["محرك", "القرار"] },
+    { "key": "energy", "icon": "stripEnergy", "labelLines": ["تقليل", "استهلاك الطاقة"] },
+    { "key": "occupancy", "icon": "stripOccupancy", "labelLines": ["وعي", "بالتواجد"] },
+    { "key": "overload", "icon": "stripOverload", "labelLines": ["حماية من", "الحمل الزائد"] },
+    { "key": "fire", "icon": "stripFire", "labelLines": ["نظام", "طوارئ"] },
+    { "key": "ai", "icon": "stripAi", "labelLines": ["قرارات", "تلقائية"] },
     { "key": "monitor", "icon": "stripMonitor", "labelLines": ["مراقبة", "فورية"] },
-    { "key": "predict", "icon": "stripPredict", "labelLines": ["سلامة", "تنبؤية"] },
+    { "key": "predict", "icon": "stripPredict", "labelLines": ["تنبؤ", "بالسلامة"] },
     { "key": "schedule", "icon": "stripSchedule", "labelLines": ["جدولة", "ذكية"] }
   ],
   "sections": {
-    "features": { "label": "القدرات", "title": "مصمم باختلاف.", "subtitle": "سبعة أنظمة ذكية تعمل بانسجام." },
+    "features": { "label": "المميزات", "title": "المميزات في نظامنا", "subtitle": "سبعة أنظمة ذكية تتعاون مع بعضها." },
     "architecture": { "label": "البنية", "title": "كيف يفكر النظام.", "subtitle": "مسار ذكي فوري من الحساس إلى القرار." },
     "technology": { "label": "التقنيات", "title": "التقنيات خلف الذكاء." },
     "demo": { "label": "العرض", "title": "شاهده أثناء العمل." },
@@ -61,9 +61,9 @@
   },
   "features": [
     { "title": "تحسين الطاقة", "icon": "bolt", "description": "يوزان الذكاء الاصطناعي الطلب بين الأحمال المتصلة وينظم تشغيل الأجهزة عالية الاستهلاك بدقة. يتم كشف الهدر مبكرا قبل أن يظهر أثره في الفاتورة." },
-    { "title": "الوعي بالإشغال", "icon": "eye", "description": "تعتمد طبقة الاستشعار على الحضور الفعلي داخل الغرفة بدلا من الجداول الثابتة. تتكيف الإضاءة والأجهزة فقط عندما تكون المساحة مستخدمة." },
+    { "title": "الوعي بالتواجد", "icon": "eye", "description": "تعتمد قراءة الحركة والصوت على اكتشاف وجود الأشخاص داخل الغرفة بذكاء بدلا من الاعتماد على افتراضات ثابتة. تتكيف الإضاءة والأجهزة فقط عندما تكون المساحة مشغولة." },
     { "title": "حماية من الحمل الزائد", "icon": "shield", "description": "تراقب حساسات التيار أنماط الحمل غير الطبيعية لحظة بلحظة. يمكن تفعيل المرحلات الوقائية قبل أن يتحول الضغط إلى تلف في المعدات." },
-    { "title": "الحريق والطوارئ", "icon": "flame", "description": "تتحد إشارات الدخان والحرارة والخطر داخل طبقة منطق طوارئ واحدة. يعطي النظام الأولوية للتنبيهات الحاسمة والاستجابة الوقائية السريعة." },
+    { "title": "الحريق والطوارئ", "icon": "flame", "description": "تتحد إشارات الدخان والغاز والحرارة والخطر داخل طبقة منطق طوارئ واحدة. يعطي النظام الأولوية للتنبيهات الحاسمة والاستجابة الوقائية السريعة." },
     { "title": "محرك القرار الذكي", "icon": "cpu", "description": "تقيم طبقة ذكاء مبنية بلغة بايثون سياق الحساسات وحالة التشغيل المباشرة. تقترح قرارات تحكم آمنة وفعالة باتساق آلي." },
     { "title": "مراقبة فورية", "icon": "activity", "description": "تعرض لوحة التحكم استهلاك الطاقة، حالات الغرف، نشاط المرحلات، وإشارات الخطر فور حدوثها. يرى المشغل البيئة الكهربائية بلا تأخير أو تخمين." },
     { "title": "سلامة تنبؤية", "icon": "radar", "description": "يكشف تحليل الأنماط مؤشرات الخطر المبكرة قبل أن تتحول إلى أعطال. تنتقل السلامة الكهربائية من رد الفعل إلى التحكم الاستباقي." }
@@ -106,28 +106,33 @@
     ]
   },
   "architectureNetwork": {
-    "center": { "title": "نواة KAHRABAIQ الذكية", "label": "طبقة القرار", "icon": "radar" },
+    "center": { "title": "منصة KAHRABAIQ", "label": "ذكاء سحابي ومحلي", "icon": "radar" },
     "nodes": [
-      { "title": "متحكم ESP32", "label": "الحافة", "icon": "cpu", "position": "top-left" },
-      { "title": "حساسات الطاقة", "label": "الحمل", "icon": "bolt", "position": "top" },
-      { "title": "حساس كشف الحريق", "label": "الدخان", "icon": "flame", "position": "top-right" },
-      { "title": "حساس الإشغال", "label": "الحضور", "icon": "eye", "position": "left" },
-      { "title": "اتصال MQTT", "label": "البروتوكول", "icon": "activity", "position": "right" },
-      { "title": "محرك القرار الذكي", "label": "الذكاء", "icon": "radar", "position": "bottom-left" },
-      { "title": "قاعدة البيانات", "label": "DynamoDB", "icon": "cloud", "position": "bottom" },
-      { "title": "لوحة الويب", "label": "الواجهة", "icon": "monitor", "position": "bottom-right" },
-      { "title": "الإيقاف الطارئ", "label": "قتل المرحل", "icon": "shield", "position": "lower" }
+      { "title": "حساس ESP32 للغرفة", "label": "عقدة الاستشعار", "icon": "cpu", "position": "top-left" },
+      { "title": "قراءات الغرفة", "label": "حركة / صوت / غاز", "icon": "activity", "position": "top" },
+      { "title": "محور Raspberry Pi", "label": "الحافة المحلية", "icon": "bolt", "position": "top-right" },
+      { "title": "مخزن SQLite", "label": "حالة محلية", "icon": "cloud", "position": "left" },
+      { "title": "واجهة AWS API", "label": "خلفية FastAPI", "icon": "cloud", "position": "right" },
+      { "title": "محرك القرار الذكي", "label": "طبقة التنبؤ", "icon": "radar", "position": "bottom-left" },
+      { "title": "DynamoDB", "label": "تخزين سحابي", "icon": "cloud", "position": "bottom" },
+      { "title": "تطبيق Flutter ولوحة التحكم", "label": "واجهة المستخدم", "icon": "monitor", "position": "bottom-right" },
+      { "title": "Home Assistant / Matter", "label": "التحكم بالأجهزة", "icon": "shield", "position": "lower" }
     ]
   },
   "technology": [
-    { "group": "الواجهة", "items": ["Next.js", "TypeScript", "Tailwind CSS", "Framer Motion", "Flutter"] },
-    { "group": "الخلفية والذكاء", "items": ["Python", "TensorFlow", "FastAPI", "DynamoDB", "AWS IoT"] },
-    { "group": "العتاد", "items": ["ESP32", "PIR Sensor", "MQ-2 Smoke", "ACS712 Current", "4-Ch Relay", "DHT22"] }
+    { "group": "الواجهة والموقع", "items": ["Next.js", "React", "TypeScript", "GSAP", "CSS مخصص", "ترجمة JSON"] },
+    { "group": "تطبيق الهاتف", "items": ["Flutter", "Dart", "Provider", "Dio", "MQTT", "ماسح QR", "الإشعارات المحلية"] },
+    { "group": "الخلفية والذكاء", "items": ["Python", "FastAPI", "Uvicorn", "scikit-learn", "Pandas", "NumPy", "Joblib", "Gemini API"] },
+    { "group": "السحابة", "items": ["AWS", "EC2", "DynamoDB", "Cognito", "AWS IoT Core"] },
+    { "group": "تشغيل Raspberry Pi", "items": ["Raspberry Pi", "SQLite3", "Flask", "systemd", "Chromium Kiosk", "NetworkManager"] },
+    { "group": "التحكم بالمنزل الذكي", "items": ["Home Assistant", "Matter", "تكامل Tuya", "قواطع ذكية", "وحدات مفاتيح ذكية", "التحكم بالمكيف", "التحكم بالمقبس", "التحكم بالإضاءة"] },
+    { "group": "برمجة ESP32", "items": ["ESP32", "Arduino Framework", "WiFi", "HTTPClient", "WebServer", "Preferences", "ESPmDNS", "I2C"] },
+    { "group": "العتاد والحساسات", "items": ["قواطع ذكية", "مقبس", "مفتاح إضاءة ذكي", "وحدة مفتاح Matter", "حساس حركة PIR", "حساس دخان وغاز MQ-2", "حساس حرارة ورطوبة AHT21", "حساس جودة هواء ENS160", "حساس ضوء", "حساس صوت", "شريط إضاءة LED", "شاشة لوحة التحكم", "محول AC/DC", "مروحة DC 24V"] }
   ],
   "team": [
-    { "name": "علي عبدالحسين عبدالعلي", "id": "202200578", "role": "عضو المشروع", "phone": "+973 37798824", "image": "/ali-abdulhussain-abdali.jpg", "githubUrl": "https://github.com/3xoob", "linkedinUrl": "https://www.linkedin.com/in/aliabdulhussain3" },
+    { "name": "علي عبدالحسين عبدعلي", "id": "202200578", "role": "عضو المشروع", "phone": "+973 37798824", "image": "/ali-abdulhussain-abdali.jpg", "githubUrl": "https://github.com/3xoob", "linkedinUrl": "https://www.linkedin.com/in/aliabdulhussain3" },
     { "name": "ناصر حسين سلمان", "id": "202206918", "role": "عضو المشروع", "phone": "+973 37223372", "image": "/nasser-hussain-salman.jpg", "imagePosition": "center 8%", "githubUrl": "https://github.com/nxsoos", "linkedinUrl": "https://www.linkedin.com/in/nasser-hussain-b94a972a2" },
-    { "name": "س. سلمان عدنان عبدالله", "id": "202201576", "role": "عضو المشروع", "phone": "+973 33300410", "image": "/s-salman-adnan-abdullah.jpg", "githubUrl": "https://github.com/Sayed-Salman", "linkedinUrl": "https://www.linkedin.com/in/sayed-salman-sharaf-0b783b341" }
+    { "name": "سيد سلمان عدنان عبدالله", "id": "202201576", "role": "عضو المشروع", "phone": "+973 33300410", "image": "/s-salman-adnan-abdullah.jpg", "githubUrl": "https://github.com/Sayed-Salman", "linkedinUrl": "https://www.linkedin.com/in/sayed-salman-sharaf-0b783b341" }
   ],
   "teamLabels": {
     "id": "الرقم الجامعي",
@@ -135,14 +140,17 @@
   },
   "contact": {
     "emailLabel": "البريد الإلكتروني",
-    "emailValue": "kahrabaiq@uob.edu.bh",
+    "emailValue": "admin@kahrabaiq.com",
     "nameLabel": "الاسم",
     "namePlaceholder": "اكتب اسمك",
     "emailInputLabel": "البريد الإلكتروني",
     "emailPlaceholder": "you@example.com",
     "messageLabel": "الرسالة",
     "messagePlaceholder": "اكتب رسالتك أو ما ترغب في معرفته",
-    "submit": "إرسال الرسالة"
+    "submit": "إرسال الرسالة",
+    "sending": "جاري الإرسال...",
+    "success": "تم إرسال الرسالة بنجاح.",
+    "error": "حدث خطأ أثناء الإرسال. حاول مرة أخرى."
   },
   "mockup": {
     "live": "كهرباء آي كيو مباشر",
@@ -167,7 +175,8 @@
       { "label": "الإشغال", "value": "مكتشف" }
     ],
     "hardwareLabel": "النموذج العتادي",
-    "hardwareChip": "ESP32"
+    "hardwareChip": "النموذج الفعلي",
+    "hardwareImageAlt": "النموذج العتادي الفعلي لكهرباء آي كيو مع Raspberry Pi وقاطع ذكي ووحدات Matter وشاشة لوحة التحكم ومقبس وشريط إضاءة"
   },
   "social": {
     "linkedin": "LinkedIn",

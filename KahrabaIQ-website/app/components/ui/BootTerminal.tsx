@@ -32,6 +32,10 @@ export function BootTerminal({ terminal, locale, fast = false, onDone }: { termi
       doneRef.current = true;
       setOnline(true);
       setProgress(100);
+      if (fast) {
+        onDoneRef.current();
+        return;
+      }
       await wait(fast ? 220 : 1000);
       if (cancelled) return;
       setClosing(true);

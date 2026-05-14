@@ -52,7 +52,7 @@
     { "key": "schedule", "icon": "stripSchedule", "labelLines": ["Smart", "Scheduling"] }
   ],
   "sections": {
-    "features": { "label": "Capabilities", "title": "Built Different.", "subtitle": "Seven intelligent systems working in unison." },
+    "features": { "label": "Features", "title": "FEATURES IN OUR SYSTEM", "subtitle": "Seven intelligent systems cooperating." },
     "architecture": { "label": "Architecture", "title": "How It Thinks.", "subtitle": "A real-time intelligent pipeline from sensor to decision." },
     "technology": { "label": "Technology", "title": "The Stack Behind the Intelligence." },
     "demo": { "label": "Showcase", "title": "See It In Action." },
@@ -61,9 +61,9 @@
   },
   "features": [
     { "title": "Energy Optimization", "icon": "bolt", "description": "AI balances demand across connected loads and schedules high-consumption devices with precision. Waste is identified early, before it becomes visible on the bill." },
-    { "title": "Occupancy Awareness", "icon": "eye", "description": "PIR-driven intelligence reads actual room presence instead of relying on fixed assumptions. Lighting and appliance behavior adapt only when the space is occupied." },
+    { "title": "Occupancy Awareness", "icon": "eye", "description": "Motion and sound readings intelligently detect room presence instead of relying on fixed assumptions. Lighting and appliance behavior adapt only when the space is occupied." },
     { "title": "Overload Protection", "icon": "shield", "description": "Current sensing watches for abnormal load patterns in real time. Protective relay action can be triggered before stress becomes equipment damage." },
-    { "title": "Fire & Emergency", "icon": "flame", "description": "Smoke, heat, and risk signals converge into one emergency logic layer. The system prioritizes decisive alerts and fast protective response." },
+    { "title": "Fire & Emergency", "icon": "flame", "description": "Smoke, gas, heat, and risk signals converge into one emergency logic layer. The system prioritizes decisive alerts and fast protective response." },
     { "title": "AI Decision Engine", "icon": "cpu", "description": "A Python intelligence layer evaluates live sensor context and operating state. It recommends safe, efficient control actions with machine-level consistency." },
     { "title": "Real-Time Monitoring", "icon": "activity", "description": "Dashboard telemetry exposes energy use, room states, relay activity, and risk signals as they happen. Operators see the electrical environment without delay or guesswork." },
     { "title": "Predictive Safety", "icon": "radar", "description": "Pattern detection identifies early warning behavior before it becomes a fault. Electrical safety shifts from reactive response to anticipatory control." }
@@ -106,23 +106,28 @@
     ]
   },
   "architectureNetwork": {
-    "center": { "title": "KAHRABAIQ AI Core", "label": "Decision Layer", "icon": "radar" },
+    "center": { "title": "KAHRABAIQ Platform", "label": "Cloud + Edge Intelligence", "icon": "radar" },
     "nodes": [
-      { "title": "ESP32 Controller", "label": "Edge", "icon": "cpu", "position": "top-left" },
-      { "title": "Power Sensors", "label": "Load", "icon": "bolt", "position": "top" },
-      { "title": "Fire Detection Sensor", "label": "Smoke", "icon": "flame", "position": "top-right" },
-      { "title": "Occupancy Sensor", "label": "Presence", "icon": "eye", "position": "left" },
-      { "title": "MQTT Communication", "label": "Protocol", "icon": "activity", "position": "right" },
-      { "title": "AI Decision Engine", "label": "Intelligence", "icon": "radar", "position": "bottom-left" },
-      { "title": "Database", "label": "DynamoDB", "icon": "cloud", "position": "bottom" },
-      { "title": "Web Dashboard", "label": "Interface", "icon": "monitor", "position": "bottom-right" },
-      { "title": "Emergency Shutdown", "label": "Relay Kill", "icon": "shield", "position": "lower" }
+      { "title": "ESP32 Room Sensor", "label": "Sensing Node", "icon": "cpu", "position": "top-left" },
+      { "title": "Room Readings", "label": "Motion / Sound / Gas", "icon": "activity", "position": "top" },
+      { "title": "Raspberry Pi Hub", "label": "Local Edge", "icon": "bolt", "position": "top-right" },
+      { "title": "SQLite Buffer", "label": "Local State", "icon": "cloud", "position": "left" },
+      { "title": "AWS API", "label": "FastAPI Backend", "icon": "cloud", "position": "right" },
+      { "title": "AI Decision Engine", "label": "Prediction Layer", "icon": "radar", "position": "bottom-left" },
+      { "title": "DynamoDB", "label": "Cloud Storage", "icon": "cloud", "position": "bottom" },
+      { "title": "Flutter App + Dashboard", "label": "User Interface", "icon": "monitor", "position": "bottom-right" },
+      { "title": "Home Assistant / Matter", "label": "Device Control", "icon": "shield", "position": "lower" }
     ]
   },
   "technology": [
-    { "group": "Frontend", "items": ["Next.js", "TypeScript", "Tailwind CSS", "Framer Motion", "Flutter"] },
-    { "group": "Backend & AI", "items": ["Python", "TensorFlow", "FastAPI", "DynamoDB", "AWS IoT"] },
-    { "group": "Hardware", "items": ["ESP32", "PIR Sensor", "MQ-2 Smoke", "ACS712 Current", "4-Ch Relay", "DHT22"] }
+    { "group": "Frontend & Website", "items": ["Next.js", "React", "TypeScript", "GSAP", "Custom CSS", "JSON Localization"] },
+    { "group": "Mobile App", "items": ["Flutter", "Dart", "Provider", "Dio", "MQTT", "QR Scanner", "Local Notifications"] },
+    { "group": "Backend & AI", "items": ["Python", "FastAPI", "Uvicorn", "scikit-learn", "Pandas", "NumPy", "Joblib", "Gemini API"] },
+    { "group": "Cloud", "items": ["AWS", "EC2", "DynamoDB", "Cognito", "AWS IoT Core"] },
+    { "group": "Raspberry Pi Runtime", "items": ["Raspberry Pi", "SQLite3", "Flask", "systemd", "Chromium Kiosk", "NetworkManager"] },
+    { "group": "Smart Home Control", "items": ["Home Assistant", "Matter", "Tuya Integration", "Smart Breakers", "Smart Switch Modules", "AC Control", "Socket Control", "Light Control"] },
+    { "group": "ESP32 Firmware", "items": ["ESP32", "Arduino Framework", "WiFi", "HTTPClient", "WebServer", "Preferences", "ESPmDNS", "I2C"] },
+    { "group": "Hardware & Sensors", "items": ["Smart Breakers", "Socket", "Smart Light Switch", "Matter Switch Module", "PIR Motion Sensor", "MQ-2 Smoke/Gas Sensor", "AHT21 Temperature/Humidity", "ENS160 Air Quality", "Light Sensor", "Sound Sensor", "LED Strip Light", "Dashboard Screen", "AC/DC Converter", "DC 24V Fan"] }
   ],
   "team": [
     { "name": "Ali Abdulhussain Abdali", "id": "202200578", "role": "Project Member", "phone": "+973 37798824", "image": "/ali-abdulhussain-abdali.jpg", "githubUrl": "https://github.com/3xoob", "linkedinUrl": "https://www.linkedin.com/in/aliabdulhussain3" },
@@ -135,14 +140,17 @@
   },
   "contact": {
     "emailLabel": "Email",
-    "emailValue": "kahrabaiq@uob.edu.bh",
+    "emailValue": "admin@kahrabaiq.com",
     "nameLabel": "Name",
     "namePlaceholder": "Your name",
     "emailInputLabel": "Email",
     "emailPlaceholder": "you@example.com",
     "messageLabel": "Message",
     "messagePlaceholder": "Tell us what you want to explore",
-    "submit": "Send Message"
+    "submit": "Send Message",
+    "sending": "Sending...",
+    "success": "Message sent successfully.",
+    "error": "Something went wrong. Please try again."
   },
   "mockup": {
     "live": "KAHRABAIQ LIVE",
@@ -167,7 +175,8 @@
       { "label": "Occupancy", "value": "Detected" }
     ],
     "hardwareLabel": "Hardware Prototype",
-    "hardwareChip": "ESP32"
+    "hardwareChip": "LIVE BUILD",
+    "hardwareImageAlt": "KahrabaIQ physical prototype with Raspberry Pi, smart breaker, Matter switch modules, dashboard screen, socket, and LED strip"
   },
   "social": {
     "linkedin": "LinkedIn",

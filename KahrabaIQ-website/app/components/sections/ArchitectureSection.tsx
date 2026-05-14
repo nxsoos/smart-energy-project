@@ -5,32 +5,34 @@ import { SectionHeader } from "../ui/SectionHeader";
 function ArchitectureNetwork({ content }: { content: SiteContent["architectureNetwork"] }) {
   return (
     <div className="architecture-network">
-      <svg className="network-lines" viewBox="0 0 1000 560" preserveAspectRatio="none" aria-hidden="true">
-        <ellipse className="network-orbit" cx="500" cy="280" rx="335" ry="210" />
-        <path className="network-path p-top-left" d="M500 280 C430 245 330 170 210 92" />
-        <path className="network-path p-top" d="M500 280 C500 220 500 150 500 82" />
-        <path className="network-path p-top-right" d="M500 280 C570 245 670 170 790 92" />
-        <path className="network-path p-left" d="M500 280 C405 280 300 280 180 280" />
-        <path className="network-path p-right" d="M500 280 C595 280 700 280 820 280" />
-        <path className="network-path p-bottom-left" d="M500 280 C425 328 328 385 220 430" />
-        <path className="network-path p-bottom" d="M500 280 C500 350 500 430 500 505" />
-        <path className="network-path p-bottom-right" d="M500 280 C575 328 672 385 780 430" />
-        <path className="network-path p-lower" d="M500 280 C560 342 650 388 735 430" />
-      </svg>
-      <div className="network-core">
-        <Icon name={content.center.icon as IconName} />
-        <span>{content.center.label}</span>
-        <strong>{content.center.title}</strong>
+      <div className="network-stage">
+        <svg className="network-lines" viewBox="0 0 1000 560" preserveAspectRatio="none" aria-hidden="true">
+          <ellipse className="network-orbit orbit-outer" cx="500" cy="280" rx="340" ry="198" />
+          <path className="network-path p-top-left" d="M200 130 L395 210" />
+          <path className="network-path p-top" d="M500 95 L500 200" />
+          <path className="network-path p-top-right" d="M800 130 L605 210" />
+          <path className="network-path p-left" d="M250 280 L380 280" />
+          <path className="network-path p-right" d="M620 280 L750 280" />
+          <path className="network-path p-bottom-left" d="M405 350 L140 430" />
+          <path className="network-path p-bottom" d="M470 360 L380 430" />
+          <path className="network-path p-lower" d="M530 360 L620 430" />
+          <path className="network-path p-bottom-right" d="M595 350 L860 430" />
+        </svg>
+        <div className="network-core">
+          <Icon name={content.center.icon as IconName} />
+          <span>{content.center.label}</span>
+          <strong>{content.center.title}</strong>
+        </div>
+        {content.nodes.map((node) => (
+          <article className={`network-node ${node.position}`} key={node.title}>
+            <Icon name={node.icon as IconName} />
+            <div>
+              <span>{node.label}</span>
+              <strong>{node.title}</strong>
+            </div>
+          </article>
+        ))}
       </div>
-      {content.nodes.map((node) => (
-        <article className={`network-node ${node.position}`} key={node.title}>
-          <Icon name={node.icon as IconName} />
-          <div>
-            <span>{node.label}</span>
-            <strong>{node.title}</strong>
-          </div>
-        </article>
-      ))}
     </div>
   );
 }

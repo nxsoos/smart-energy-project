@@ -17,19 +17,25 @@ import { BootTerminal } from "./ui/BootTerminal";
 export default function HomePage({ content, allContent, locale }: { content: SiteContent; allContent: Record<Locale, SiteContent>; locale: Locale }) {
   const isArabic = locale === "ar";
   const router = useRouter();
-  const arrivedFromSwitch = typeof window !== "undefined" && window.sessionStorage.getItem("kahrabaiq-transition-locale") === locale;
-  const [boot, setBoot] = useState<{ visible: boolean; locale: Locale; fast: boolean; target?: Locale }>({ visible: !arrivedFromSwitch, locale, fast: false });
+  const [boot, setBoot] = useState<{ visible: boolean; locale: Locale; fast: boolean; target?: Locale }>({ visible: true, locale, fast: false });
   const [active, setActive] = useState("");
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
+    router.prefetch("/en");
+    router.prefetch("/ar");
+  }, [router]);
+
+  useEffect(() => {
+    const arrivedFromSwitch = window.sessionStorage.getItem("kahrabaiq-transition-locale") === locale;
     if (!arrivedFromSwitch) return;
     const y = Number(window.sessionStorage.getItem("kahrabaiq-scroll-y") || "0");
     window.sessionStorage.removeItem("kahrabaiq-transition-locale");
     window.sessionStorage.removeItem("kahrabaiq-scroll-y");
+    setBoot((current) => ({ ...current, visible: false }));
     window.requestAnimationFrame(() => window.scrollTo({ top: y }));
-  }, [arrivedFromSwitch]);
+  }, [locale]);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
@@ -64,7 +70,7 @@ export default function HomePage({ content, allContent, locale }: { content: Sit
             gsap.from(header, { scrollTrigger: { trigger: header, start: "top 85%" }, y: 42, opacity: 0, duration: 0.75, ease: "power3.out" });
           });
           gsap.from(".feature-card", { scrollTrigger: { trigger: ".features-grid", start: "top 80%" }, y: 46, duration: 0.58, stagger: 0.06, ease: "power2.out" });
-          gsap.from(".network-core, .network-node", { scrollTrigger: { trigger: ".architecture-network", start: "top 75%" }, scale: 0.96, opacity: 0, duration: 0.52, stagger: 0.06, ease: "back.out(1.4)" });
+          gsap.from(".network-core, .network-node", { scrollTrigger: { trigger: ".architecture-network", start: "top 75%" }, opacity: 0, duration: 0.52, stagger: 0.06, ease: "power3.out" });
           gsap.from(".tech-pill", { scrollTrigger: { trigger: ".tech-groups", start: "top 78%" }, scale: 0.9, opacity: 0, duration: 0.38, stagger: 0.035, ease: "power2.out" });
           gsap.from(".mockup-frame, .team-card, .contact-card, .contact-form", { scrollTrigger: { trigger: ".showcase-grid", start: "top 80%" }, y: 34, opacity: 0, duration: 0.62, stagger: 0.06, ease: "power3.out" });
         });

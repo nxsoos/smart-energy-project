@@ -1,0 +1,363 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e9]: KAHRABAIQ SYSTEM BOOT
+    - button "SKIP →" [ref=e12] [cursor=pointer]
+  - generic [ref=e13]:
+    - button "Skip to main content" [ref=e14]
+    - navigation "Primary navigation" [ref=e15]:
+      - button "KAHRABAIQ home" [ref=e16] [cursor=pointer]:
+        - img "KAHRABAIQ wordmark" [ref=e17]
+      - generic "Section links" [ref=e18]:
+        - button "Home" [ref=e19] [cursor=pointer]
+        - button "Features" [ref=e20] [cursor=pointer]
+        - button "Architecture" [ref=e21] [cursor=pointer]
+        - button "Technology" [ref=e22] [cursor=pointer]
+        - button "Demo" [ref=e23] [cursor=pointer]
+        - button "Team" [ref=e24] [cursor=pointer]
+        - button "Contact" [ref=e25] [cursor=pointer]
+      - generic "Language selection" [ref=e26]:
+        - button "EN" [ref=e27] [cursor=pointer]
+        - button "AR" [ref=e28] [cursor=pointer]
+    - main [ref=e29]:
+      - region "AI-Driven Smart Energy & Electrical Safety System" [ref=e30]:
+        - generic [ref=e34]:
+          - paragraph [ref=e35]: UNIVERSITY OF BAHRAIN · SENIOR PROJECT 2026
+          - generic "KAHRABAIQ" [ref=e36]:
+            - img "KAHRABAIQ full brand identity" [ref=e39]
+          - heading "AI-Driven Smart Energy & Electrical Safety System" [level=1] [ref=e41]:
+            - generic [ref=e42]: AI-Driven
+            - generic [ref=e43]: Smart
+            - generic [ref=e44]: Energy
+            - generic [ref=e45]: "&"
+            - generic [ref=e46]: Electrical
+            - generic [ref=e47]: Safety
+            - generic [ref=e48]: System
+          - paragraph [ref=e49]: Intelligent energy optimization, predictive safety, occupancy awareness, and emergency response, powered by AI.
+          - generic [ref=e50]:
+            - button "Explore Features" [ref=e51] [cursor=pointer]
+            - button "View Demo" [ref=e52] [cursor=pointer]
+          - list "KAHRABAIQ feature icon strip showing eight system capabilities" [ref=e53]:
+            - listitem [ref=e54]:
+              - img [ref=e56]
+              - generic [ref=e58]:
+                - generic [ref=e59]: Energy
+                - generic [ref=e60]: Optimization
+            - listitem [ref=e61]:
+              - img [ref=e63]
+              - generic [ref=e67]:
+                - generic [ref=e68]: Occupancy
+                - generic [ref=e69]: Awareness
+            - listitem [ref=e70]:
+              - img [ref=e72]
+              - generic [ref=e75]:
+                - generic [ref=e76]: Overload
+                - generic [ref=e77]: Protection
+            - listitem [ref=e78]:
+              - img [ref=e80]
+              - generic [ref=e83]:
+                - generic [ref=e84]: Fire &
+                - generic [ref=e85]: Emergency
+            - listitem [ref=e86]:
+              - img [ref=e88]
+              - generic [ref=e95]:
+                - generic [ref=e96]: AI Decision
+                - generic [ref=e97]: Engine
+            - listitem [ref=e98]:
+              - img [ref=e100]
+              - generic [ref=e103]:
+                - generic [ref=e104]: Real-Time
+                - generic [ref=e105]: Monitoring
+            - listitem [ref=e106]:
+              - img [ref=e108]
+              - generic [ref=e113]:
+                - generic [ref=e114]: Predictive
+                - generic [ref=e115]: Safety
+            - listitem [ref=e116]:
+              - img [ref=e118]
+              - generic [ref=e122]:
+                - generic [ref=e123]: Smart
+                - generic [ref=e124]: Scheduling
+        - button "Scroll to features" [ref=e125] [cursor=pointer]:
+          - generic [ref=e126]: SCROLL
+      - region "Built Different." [ref=e128]:
+        - generic [ref=e129]:
+          - generic [ref=e130]:
+            - paragraph [ref=e131]: Capabilities
+            - heading "Built Different." [level=2] [ref=e132]
+            - paragraph [ref=e133]: Seven intelligent systems working in unison.
+          - generic [ref=e134]:
+            - article [ref=e135]:
+              - img [ref=e137]
+              - heading "Energy Optimization" [level=3] [ref=e139]
+              - paragraph [ref=e140]: AI balances demand across connected loads and schedules high-consumption devices with precision. Waste is identified early, before it becomes visible on the bill.
+            - article [ref=e141]:
+              - img [ref=e143]
+              - heading "Occupancy Awareness" [level=3] [ref=e146]
+              - paragraph [ref=e147]: PIR-driven intelligence reads actual room presence instead of relying on fixed assumptions. Lighting and appliance behavior adapt only when the space is occupied.
+            - article [ref=e148]:
+              - img [ref=e150]
+              - heading "Overload Protection" [level=3] [ref=e153]
+              - paragraph [ref=e154]: Current sensing watches for abnormal load patterns in real time. Protective relay action can be triggered before stress becomes equipment damage.
+            - article [ref=e155]:
+              - img [ref=e157]
+              - heading "Fire & Emergency" [level=3] [ref=e159]
+              - paragraph [ref=e160]: Smoke, heat, and risk signals converge into one emergency logic layer. The system prioritizes decisive alerts and fast protective response.
+            - article [ref=e161]:
+              - img [ref=e163]
+              - heading "AI Decision Engine" [level=3] [ref=e166]
+              - paragraph [ref=e167]: A Python intelligence layer evaluates live sensor context and operating state. It recommends safe, efficient control actions with machine-level consistency.
+            - article [ref=e168]:
+              - img [ref=e170]
+              - heading "Real-Time Monitoring" [level=3] [ref=e172]
+              - paragraph [ref=e173]: Dashboard telemetry exposes energy use, room states, relay activity, and risk signals as they happen. Operators see the electrical environment without delay or guesswork.
+            - article [ref=e174]:
+              - img [ref=e176]
+              - heading "Predictive Safety" [level=3] [ref=e180]
+              - paragraph [ref=e181]: Pattern detection identifies early warning behavior before it becomes a fault. Electrical safety shifts from reactive response to anticipatory control.
+      - region "How It Thinks." [ref=e182]:
+        - generic [ref=e183]:
+          - generic [ref=e184]:
+            - paragraph [ref=e185]: Architecture
+            - heading "How It Thinks." [level=2] [ref=e186]
+            - paragraph [ref=e187]: A real-time intelligent pipeline from sensor to decision.
+          - generic [ref=e189]:
+            - img
+            - generic [ref=e190]:
+              - img [ref=e191]
+              - generic [ref=e195]: Decision Layer
+              - strong [ref=e196]: KAHRABAIQ AI Core
+            - article [ref=e197]:
+              - img [ref=e198]
+              - generic [ref=e201]:
+                - generic [ref=e202]: Edge
+                - strong [ref=e203]: ESP32 Controller
+            - article [ref=e204]:
+              - img [ref=e205]
+              - generic [ref=e207]:
+                - generic [ref=e208]: Load
+                - strong [ref=e209]: Power Sensors
+            - article [ref=e210]:
+              - img [ref=e211]
+              - generic [ref=e213]:
+                - generic [ref=e214]: Smoke
+                - strong [ref=e215]: Fire Detection Sensor
+            - article [ref=e216]:
+              - img [ref=e217]
+              - generic [ref=e220]:
+                - generic [ref=e221]: Presence
+                - strong [ref=e222]: Occupancy Sensor
+            - article [ref=e223]:
+              - img [ref=e224]
+              - generic [ref=e226]:
+                - generic [ref=e227]: Protocol
+                - strong [ref=e228]: MQTT Communication
+            - article [ref=e229]:
+              - img [ref=e230]
+              - generic [ref=e234]:
+                - generic [ref=e235]: Intelligence
+                - strong [ref=e236]: AI Decision Engine
+            - article [ref=e237]:
+              - img [ref=e238]
+              - generic [ref=e240]:
+                - generic [ref=e241]: DynamoDB
+                - strong [ref=e242]: Database
+            - article [ref=e243]:
+              - img [ref=e244]
+              - generic [ref=e247]:
+                - generic [ref=e248]: Interface
+                - strong [ref=e249]: Web Dashboard
+            - article [ref=e250]:
+              - img [ref=e251]
+              - generic [ref=e254]:
+                - generic [ref=e255]: Relay Kill
+                - strong [ref=e256]: Emergency Shutdown
+      - region "The Stack Behind the Intelligence." [ref=e257]:
+        - generic [ref=e258]:
+          - generic [ref=e259]:
+            - paragraph [ref=e260]: Technology
+            - heading "The Stack Behind the Intelligence." [level=2] [ref=e261]
+          - generic [ref=e262]:
+            - article [ref=e263]:
+              - heading "Frontend" [level=3] [ref=e264]
+              - generic [ref=e265]:
+                - generic [ref=e266]: Next.js
+                - generic [ref=e267]: TypeScript
+                - generic [ref=e268]: Tailwind CSS
+                - generic [ref=e269]: Framer Motion
+                - generic [ref=e270]: Flutter
+            - article [ref=e271]:
+              - heading "Backend & AI" [level=3] [ref=e272]
+              - generic [ref=e273]:
+                - generic [ref=e274]: Python
+                - generic [ref=e275]: TensorFlow
+                - generic [ref=e276]: FastAPI
+                - generic [ref=e277]: DynamoDB
+                - generic [ref=e278]: AWS IoT
+            - article [ref=e279]:
+              - heading "Hardware" [level=3] [ref=e280]
+              - generic [ref=e281]:
+                - generic [ref=e282]: ESP32
+                - generic [ref=e283]: PIR Sensor
+                - generic [ref=e284]: MQ-2 Smoke
+                - generic [ref=e285]: ACS712 Current
+                - generic [ref=e286]: 4-Ch Relay
+                - generic [ref=e287]: DHT22
+      - region "See It In Action." [ref=e288]:
+        - generic [ref=e289]:
+          - generic [ref=e290]:
+            - paragraph [ref=e291]: Showcase
+            - heading "See It In Action." [level=2] [ref=e292]
+          - generic [ref=e293]:
+            - article [ref=e294]:
+              - generic [ref=e299]:
+                - generic [ref=e300]:
+                  - generic [ref=e301]: KAHRABAIQ LIVE
+                  - strong [ref=e302]: 98.7% SAFE
+                - generic [ref=e303]:
+                  - generic [ref=e304]:
+                    - generic [ref=e305]: Load
+                    - strong [ref=e306]: 2.4 kW
+                  - generic [ref=e307]:
+                    - generic [ref=e308]: Rooms
+                    - strong [ref=e309]: 06 Active
+                  - generic [ref=e310]:
+                    - generic [ref=e311]: Risk
+                    - strong [ref=e312]: Low
+                - generic [ref=e313]:
+                  - generic "Energy usage bar chart" [ref=e314]
+                  - generic [ref=e323]:
+                    - generic [ref=e324]:
+                      - generic [ref=e325]: Lab A lighting
+                      - generic [ref=e326]: "On"
+                    - generic [ref=e327]:
+                      - generic [ref=e328]: HVAC relay
+                      - generic [ref=e329]: "On"
+                    - generic [ref=e330]:
+                      - generic [ref=e331]: Smoke node
+                      - generic [ref=e332]: Watch
+            - article [ref=e333]:
+              - generic [ref=e339]:
+                - text: Home Safety
+                - strong [ref=e341]: All Systems Armed
+                - generic [ref=e343]: 82%
+                - generic [ref=e344]:
+                  - paragraph [ref=e345]:
+                    - text: Energy Mode
+                    - generic [ref=e346]: Eco AI
+                  - paragraph [ref=e347]:
+                    - text: Emergency
+                    - generic [ref=e348]: Ready
+                  - paragraph [ref=e349]:
+                    - text: Occupancy
+                    - generic [ref=e350]: Detected
+            - article [ref=e351]:
+              - generic [ref=e357]:
+                - generic [ref=e358]: ESP32
+                - strong [ref=e366]: Hardware Prototype
+      - region "Built By." [ref=e367]:
+        - generic [ref=e368]:
+          - generic [ref=e369]:
+            - paragraph [ref=e370]: The Team
+            - heading "Built By." [level=2] [ref=e371]
+          - generic [ref=e372]:
+            - article [ref=e373]:
+              - img "Ali Abdulhussain Abdali" [ref=e375]
+              - generic [ref=e376]:
+                - heading "Ali Abdulhussain Abdali" [level=3] [ref=e377]
+                - paragraph [ref=e378]: Project Member
+                - generic [ref=e379]:
+                  - generic [ref=e380]: University ID
+                  - strong [ref=e381]: "202200578"
+                - generic [ref=e382]:
+                  - generic [ref=e383]: Phone
+                  - strong [ref=e384]:
+                    - link "+973 37798824" [ref=e385] [cursor=pointer]:
+                      - /url: tel:+97337798824
+                - generic [ref=e386]:
+                  - link "Ali Abdulhussain Abdali LinkedIn" [ref=e387] [cursor=pointer]:
+                    - /url: https://www.linkedin.com/in/aliabdulhussain3
+                    - img [ref=e388]
+                  - link "Ali Abdulhussain Abdali GitHub" [ref=e390] [cursor=pointer]:
+                    - /url: https://github.com/3xoob
+                    - img [ref=e391]
+            - article [ref=e393]:
+              - img "Nasser Hussain Salman" [ref=e395]
+              - generic [ref=e396]:
+                - heading "Nasser Hussain Salman" [level=3] [ref=e397]
+                - paragraph [ref=e398]: Project Member
+                - generic [ref=e399]:
+                  - generic [ref=e400]: University ID
+                  - strong [ref=e401]: "202206918"
+                - generic [ref=e402]:
+                  - generic [ref=e403]: Phone
+                  - strong [ref=e404]:
+                    - link "+973 37223372" [ref=e405] [cursor=pointer]:
+                      - /url: tel:+97337223372
+                - generic [ref=e406]:
+                  - link "Nasser Hussain Salman LinkedIn" [ref=e407] [cursor=pointer]:
+                    - /url: https://www.linkedin.com/in/nasser-hussain-b94a972a2
+                    - img [ref=e408]
+                  - link "Nasser Hussain Salman GitHub" [ref=e410] [cursor=pointer]:
+                    - /url: https://github.com/nxsoos
+                    - img [ref=e411]
+            - article [ref=e413]:
+              - img "S. Salman Adnan Abdullah" [ref=e415]
+              - generic [ref=e416]:
+                - heading "S. Salman Adnan Abdullah" [level=3] [ref=e417]
+                - paragraph [ref=e418]: Project Member
+                - generic [ref=e419]:
+                  - generic [ref=e420]: University ID
+                  - strong [ref=e421]: "202201576"
+                - generic [ref=e422]:
+                  - generic [ref=e423]: Phone
+                  - strong [ref=e424]:
+                    - link "+973 33300410" [ref=e425] [cursor=pointer]:
+                      - /url: tel:+97333300410
+                - generic [ref=e426]:
+                  - link "S. Salman Adnan Abdullah LinkedIn" [ref=e427] [cursor=pointer]:
+                    - /url: https://www.linkedin.com/in/sayed-salman-sharaf-0b783b341
+                    - img [ref=e428]
+                  - link "S. Salman Adnan Abdullah GitHub" [ref=e430] [cursor=pointer]:
+                    - /url: https://github.com/Sayed-Salman
+                    - img [ref=e431]
+      - region "Get In Touch." [ref=e433]:
+        - generic [ref=e434]:
+          - generic [ref=e435]:
+            - paragraph [ref=e436]: Contact
+            - heading "Get In Touch." [level=2] [ref=e437]
+          - generic [ref=e438]:
+            - article [ref=e439]:
+              - img [ref=e440]
+              - generic [ref=e443]:
+                - generic [ref=e444]: Email
+                - strong [ref=e445]: admin@kahrabaiq.com
+            - generic [ref=e446]:
+              - generic [ref=e447]: Name
+              - textbox "Name" [ref=e448]:
+                - /placeholder: Your name
+              - generic [ref=e449]: Email
+              - textbox "Email" [ref=e450]:
+                - /placeholder: you@example.com
+              - generic [ref=e451]: Message
+              - textbox "Message" [ref=e452]:
+                - /placeholder: Tell us what you want to explore
+              - button "Send Message" [ref=e453] [cursor=pointer]
+    - contentinfo [ref=e454]:
+      - generic [ref=e455]:
+        - generic [ref=e456]:
+          - button "KAHRABAIQ wordmark" [ref=e458] [cursor=pointer]:
+            - img "KAHRABAIQ wordmark" [ref=e459]
+          - navigation "Section links" [ref=e460]:
+            - button "Home" [ref=e461] [cursor=pointer]
+            - button "Features" [ref=e462] [cursor=pointer]
+            - button "Architecture" [ref=e463] [cursor=pointer]
+            - button "Technology" [ref=e464] [cursor=pointer]
+            - button "Demo" [ref=e465] [cursor=pointer]
+            - button "Team" [ref=e466] [cursor=pointer]
+            - button "Contact" [ref=e467] [cursor=pointer]
+          - generic [ref=e469]:
+            - img [ref=e470]
+            - generic [ref=e472]: "Full project repository: Link coming soon"
+        - generic [ref=e473]:
+          - generic [ref=e474]: © 2026 KAHRABAIQ. University of Bahrain Senior Project.
+          - generic [ref=e475]: KAHRABAIQ system online

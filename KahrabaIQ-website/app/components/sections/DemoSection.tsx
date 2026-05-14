@@ -1,3 +1,4 @@
+import Image from "next/image";
 import type React from "react";
 import type { SiteContent } from "../../../types/site";
 import { SectionHeader } from "../ui/SectionHeader";
@@ -38,14 +39,15 @@ function MobileMockup({ content }: { content: SiteContent }) {
   );
 }
 
-function HardwareMockup({ label, chip }: { label: string; chip: string }) {
+function HardwareMockup({ label, chip, imageAlt }: { label: string; chip: string; imageAlt: string }) {
   return (
     <Frame className="hardware-frame">
-      <div className="board">
+      <div className="hardware-caption">
         <span className="chip">{chip}</span>
-        <i className="trace t1" /><i className="trace t2" /><i className="trace t3" />
-        <span className="relay r1" /><span className="relay r2" /><span className="sensor-dot s1" /><span className="sensor-dot s2" />
         <strong>{label}</strong>
+      </div>
+      <div className="board">
+        <Image src="/prototype-hardware.jpg" alt={imageAlt} fill sizes="(max-width: 768px) 100vw, 33vw" className="prototype-photo" />
       </div>
     </Frame>
   );
@@ -59,7 +61,7 @@ export function DemoSection({ content }: { content: SiteContent }) {
         <div className="showcase-grid">
           <DashboardMockup content={content} />
           <MobileMockup content={content} />
-          <HardwareMockup label={content.mockup.hardwareLabel} chip={content.mockup.hardwareChip} />
+          <HardwareMockup label={content.mockup.hardwareLabel} chip={content.mockup.hardwareChip} imageAlt={content.mockup.hardwareImageAlt} />
         </div>
       </div>
     </section>
