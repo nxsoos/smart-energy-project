@@ -506,31 +506,58 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #04061b;
-      --panel: #15182b;
-      --panel-2: #1c2238;
-      --text: #f7f8ff;
-      --muted: #9da3b8;
-      --cyan: #11d9ff;
+      --bg: #050505;
+      --panel: #101010;
+      --panel-2: #181818;
+      --panel-3: #1f1f1f;
+      --text: #e8eaed;
+      --muted: #7c838d;
+      --muted-2: #4b5563;
+      --cyan: #ff2d2d;
+      --cyan-bright: #ff5555;
       --green: #12c48b;
       --yellow: #ffb020;
       --red: #ff5c7a;
-      --border: rgba(17, 217, 255, 0.28);
+      --border: rgba(255, 255, 255, 0.075);
+      --border-strong: rgba(255, 45, 45, 0.34);
+      --glow: rgba(255, 45, 45, 0.18);
     }
 
     * { box-sizing: border-box; }
+
+    [hidden] { display: none !important; }
+
+    html { background: var(--bg); }
+
     body {
       margin: 0;
       min-height: 100vh;
-      background: radial-gradient(circle at 50% -20%, #1b2a57 0, var(--bg) 42%);
+      background:
+        radial-gradient(circle 46rem at 78% -12%, rgba(255, 45, 45, 0.13), transparent 58%),
+        radial-gradient(circle 38rem at 10% 16%, rgba(255, 107, 26, 0.07), transparent 55%),
+        linear-gradient(180deg, #080808 0%, var(--bg) 58%, #070505 100%);
       color: var(--text);
       font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      text-rendering: geometricPrecision;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background: linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+      background-size: 100% 4px;
+      opacity: 0.18;
     }
 
     .shell {
-      width: min(1180px, calc(100vw - 40px));
+      width: min(1220px, calc(100vw - 36px));
       margin: 0 auto;
-      padding: 28px 0 40px;
+      padding: 24px 0 42px;
     }
 
     header {
@@ -538,7 +565,13 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 24px;
-      margin-bottom: 24px;
+      min-height: 92px;
+      margin-bottom: 22px;
+      padding: 16px 18px;
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      background: rgba(10, 10, 10, 0.78);
+      box-shadow: 0 28px 80px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(191, 195, 201, 0.08);
     }
 
     .brand {
@@ -552,7 +585,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       width: 62px;
       height: 62px;
       flex: 0 0 auto;
-      filter: drop-shadow(0 0 22px rgba(17, 217, 255, 0.24));
+      filter: drop-shadow(0 0 22px var(--glow));
     }
 
     .brand-copy {
@@ -561,8 +594,9 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     h1 {
       margin: 0;
-      font-size: clamp(30px, 4vw, 54px);
+      font-size: clamp(28px, 4vw, 48px);
       line-height: 1;
+      letter-spacing: -0.02em;
     }
 
     .sub {
@@ -577,10 +611,10 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       gap: 8px;
       min-height: 38px;
       padding: 0 14px;
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-strong);
       border-radius: 999px;
-      background: rgba(17, 217, 255, 0.08);
-      color: var(--cyan);
+      background: rgba(255, 45, 45, 0.1);
+      color: var(--text);
       font-weight: 700;
       white-space: nowrap;
     }
@@ -600,11 +634,27 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     }
 
     .card {
-      background: linear-gradient(145deg, rgba(28, 34, 56, 0.98), rgba(14, 18, 34, 0.98));
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.045), transparent 38%),
+        var(--panel);
       border: 1px solid var(--border);
-      border-radius: 18px;
+      border-radius: 22px;
       padding: 22px;
-      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+      box-shadow: 0 20px 64px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(191, 195, 201, 0.055);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -80px;
+      bottom: -120px;
+      width: 320px;
+      height: 320px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(255, 45, 45, 0.2), transparent 68%);
+      pointer-events: none;
     }
 
     .hero { grid-column: span 7; }
@@ -622,8 +672,9 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .metric {
       min-height: 108px;
+      border: 1px solid rgba(255, 255, 255, 0.055);
       border-radius: 14px;
-      background: rgba(4, 6, 27, 0.5);
+      background: rgba(5, 5, 5, 0.48);
       padding: 16px;
     }
 
@@ -639,6 +690,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       font-size: clamp(28px, 4vw, 48px);
       font-weight: 900;
       letter-spacing: 0;
+      color: var(--text);
     }
 
     .unit {
@@ -662,7 +714,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     }
 
     .section-title {
-      color: var(--cyan);
+      color: var(--cyan-bright);
       font-size: 15px;
       font-weight: 900;
       letter-spacing: .04em;
@@ -681,8 +733,9 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .reading {
       min-height: 92px;
+      border: 1px solid rgba(255, 255, 255, 0.055);
       border-radius: 14px;
-      background: rgba(4, 6, 27, 0.5);
+      background: rgba(5, 5, 5, 0.48);
       padding: 14px;
     }
 
@@ -693,8 +746,9 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     }
 
     .device {
+      border: 1px solid rgba(255, 255, 255, 0.055);
       border-radius: 14px;
-      background: rgba(4, 6, 27, 0.5);
+      background: rgba(5, 5, 5, 0.48);
       padding: 18px;
       min-height: 138px;
     }
@@ -740,11 +794,11 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     }
 
     .command-actions button {
-      border: 1px solid rgba(17, 217, 255, 0.26);
+      border: 1px solid rgba(255, 45, 45, 0.28);
       border-radius: 999px;
       min-height: 40px;
       padding: 0 16px;
-      background: rgba(17, 217, 255, 0.12);
+      background: rgba(255, 45, 45, 0.1);
       color: var(--text);
       font-weight: 900;
     }
@@ -794,7 +848,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .note {
       border-radius: 12px;
-      background: rgba(4, 6, 27, 0.48);
+      background: rgba(5, 5, 5, 0.48);
       padding: 12px 14px;
     }
 

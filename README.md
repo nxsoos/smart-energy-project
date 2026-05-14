@@ -4,6 +4,10 @@ KahrabaIQ is an AI-powered smart energy and electrical safety platform that turn
 
 The project is designed for real-world smart-home behavior: monitor energy, detect unsafe conditions, understand occupancy, control connected breakers and switches, sync local hardware state to the cloud, and generate AI-driven recommendations from live and historical usage data.
 
+## esp32 connection to thr internet
+curl -i -X POST http://192.168.4.1/provision \
+  -H "Content-Type: application/json" \
+  -d '{"ssid":"Nassernxs","password":"nasser04","pi_base_url":"http://10.45.212.94:5000","home_id":"home_001","pi_id":"pi_home_001","device_id":"esp32_01","device_key":"esp32_01_key_123"}' 
 ## Why It Exists
 
 Most smart-home systems either focus on comfort or basic remote control. KahrabaIQ goes further: it treats energy, safety, occupancy, automation, and intelligence as one connected system.
