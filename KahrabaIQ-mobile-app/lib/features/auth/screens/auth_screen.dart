@@ -26,6 +26,10 @@ class _AuthScreenState extends State<AuthScreen>
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _verificationCodeController =
       TextEditingController();
+  final FocusNode _nameFocusNode = FocusNode();
+  final FocusNode _emailFocusNode = FocusNode();
+  final FocusNode _passwordFocusNode = FocusNode();
+  final FocusNode _verificationCodeFocusNode = FocusNode();
   late final AnimationController _logoController;
   AuthMode _mode = AuthMode.login;
   bool _isBusy = false;
@@ -50,6 +54,10 @@ class _AuthScreenState extends State<AuthScreen>
     _emailController.dispose();
     _passwordController.dispose();
     _verificationCodeController.dispose();
+    _nameFocusNode.dispose();
+    _emailFocusNode.dispose();
+    _passwordFocusNode.dispose();
+    _verificationCodeFocusNode.dispose();
     super.dispose();
   }
 
@@ -62,6 +70,7 @@ class _AuthScreenState extends State<AuthScreen>
         ? 'Enter the code sent to ${_pendingVerificationEmail ?? 'your email'}.'
         : 'AI-Powered Smart Energy Control';
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: Container(
           decoration: const BoxDecoration(
@@ -71,111 +80,100 @@ class _AuthScreenState extends State<AuthScreen>
               colors: [ColorTokens.accentGlow, ColorTokens.background],
             ),
           ),
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 440),
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      AuthAnimatedLogo(controller: _logoController),
-                      const SizedBox(height: 24),
-                      Text(
-                        title,
-                        style: AppTextStyles.h1,
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        subtitle,
-                        style: AppTextStyles.body.copyWith(
-                          color: ColorTokens.textSecondary,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 28),
-                      if (!isVerifying) ...[
-                        AuthModeTabs(
-                          mode: _mode,
-                          onChanged: (mode) => setState(() {
-                            _mode = mode;
-                            _message = null;
-                          }),
-                        ),
-                        const SizedBox(height: 18),
-                        if (isSignup) ...[
-                          AuthField(
-                            controller: _nameController,
-                            label: 'Name',
-                            icon: Icons.person_outline,
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        AuthField(
-                          controller: _emailController,
-                          label: 'Email',
-                          icon: Icons.email_outlined,
-                          keyboardType: TextInputType.emailAddress,
-                        ),
-                        const SizedBox(height: 12),
-                        AuthField(
-                          controller: _passwordController,
-                          label: 'Password',
-                          icon: Icons.lock_outline,
-                          obscureText: true,
-                        ),
-                      ] else ...[
-                        AuthField(
-                          controller: _verificationCodeController,
-                          label: 'Verification code',
-                          icon: Icons.verified_user_outlined,
-                          keyboardType: TextInputType.number,
-                        ),
-                      ],
-                      if (_message != null) ...[
-                        const SizedBox(height: 14),
-                        Text(
-                          _message!,
-                          style: AppTextStyles.caption.copyWith(
-                            color: ColorTokens.warning,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                      const SizedBox(height: 18),
-                      AuthGradientButton(
-                        label: isVerifying
-                            ? 'Verify account'
-                            : isSignup
-                            ? 'Create account'
-                            : 'Sign in',
-                        isBusy: _isBusy,
-                        onPressed: _submit,
-                      ),
-                      if (isVerifying) ...[
-                        const SizedBox(height: 12),
-                        TextButton(
-                          onPressed: _isBusy ? null : _resendVerificationCode,
-                          child: const Text('Resend code'),
-                        ),
-                        TextButton(
-                          onPressed: _isBusy
-                              ? null
-                              : () => setState(() {
-                                  _mode = AuthMode.signup;
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+              final keyboardOpen = bottomInset > 0;
+              final viewportHeight = constraints.maxHeight + bottomInset;
+              final compact = viewportHeight < 760;
+              final topPadding = compact ? 12.0 : 16.0;
+              final bottomPadding = 24.0 + bottomInset;
+              final minHeight =
+                  constraints.maxHeight - topPadding - bottomPadding;
+              final contentMinHeight = minHeight < 0 ? 0.0 : minHeight;
+              final logoGap = compact ? 8.0 : 12.0;
+              final animationGap = compact ? 14.0 : 18.0;
+              final titleGap = compact ? 20.0 : 24.0;
+              final tabsGap = compact ? 14.0 : 18.0;
+              final submitGap = compact ? 16.0 : 18.0;
+
+              return SingleChildScrollView(
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                physics: keyboardOpen
+                    ? const ClampingScrollPhysics()
+                    : const NeverScrollableScrollPhysics(),
+                padding: EdgeInsets.fromLTRB(
+                  24,
+                  topPadding,
+                  24,
+                  bottomPadding,
+                ),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: contentMinHeight),
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 440),
+                      child: Form(
+                        key: _formKey,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            AuthHeader(screenHeight: viewportHeight),
+                            SizedBox(height: logoGap),
+                            ElectricityAnimation(
+                              controller: _logoController,
+                              screenHeight: viewportHeight,
+                            ),
+                            SizedBox(height: animationGap),
+                            _AuthTitle(title: title, subtitle: subtitle),
+                            SizedBox(height: titleGap),
+                            if (!isVerifying) ...[
+                              AuthModeTabs(
+                                mode: _mode,
+                                onChanged: (mode) => setState(() {
+                                  _mode = mode;
                                   _message = null;
                                 }),
-                          child: const Text('Use a different email'),
+                              ),
+                              SizedBox(height: tabsGap),
+                            ],
+                            AuthForm(
+                              mode: _mode,
+                              nameController: _nameController,
+                              emailController: _emailController,
+                              passwordController: _passwordController,
+                              verificationCodeController:
+                                  _verificationCodeController,
+                              nameFocusNode: _nameFocusNode,
+                              emailFocusNode: _emailFocusNode,
+                              passwordFocusNode: _passwordFocusNode,
+                              verificationCodeFocusNode:
+                                  _verificationCodeFocusNode,
+                              onSubmit: _submit,
+                            ),
+                            SizedBox(height: submitGap),
+                            AuthSubmitSection(
+                              message: _message,
+                              isSignup: isSignup,
+                              isVerifying: isVerifying,
+                              isBusy: _isBusy,
+                              onSubmit: _submit,
+                              onResendCode: _resendVerificationCode,
+                              onUseDifferentEmail: () => setState(() {
+                                _mode = AuthMode.signup;
+                                _message = null;
+                              }),
+                            ),
+                          ],
                         ),
-                      ],
-                    ],
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ),
       ),
@@ -335,5 +333,195 @@ class _AuthScreenState extends State<AuthScreen>
   Future<void> _clearPendingConfirmation() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_pendingEmailKey);
+  }
+}
+
+class _AuthTitle extends StatelessWidget {
+  const _AuthTitle({required this.title, required this.subtitle});
+
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(title, style: AppTextStyles.h1, textAlign: TextAlign.center),
+        const SizedBox(height: 8),
+        Text(
+          subtitle,
+          style: AppTextStyles.body.copyWith(color: ColorTokens.textSecondary),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    );
+  }
+}
+
+class AuthForm extends StatelessWidget {
+  const AuthForm({
+    super.key,
+    required this.mode,
+    required this.nameController,
+    required this.emailController,
+    required this.passwordController,
+    required this.verificationCodeController,
+    required this.nameFocusNode,
+    required this.emailFocusNode,
+    required this.passwordFocusNode,
+    required this.verificationCodeFocusNode,
+    required this.onSubmit,
+  });
+
+  final AuthMode mode;
+  final TextEditingController nameController;
+  final TextEditingController emailController;
+  final TextEditingController passwordController;
+  final TextEditingController verificationCodeController;
+  final FocusNode nameFocusNode;
+  final FocusNode emailFocusNode;
+  final FocusNode passwordFocusNode;
+  final FocusNode verificationCodeFocusNode;
+  final VoidCallback onSubmit;
+
+  @override
+  Widget build(BuildContext context) {
+    final isSignup = mode == AuthMode.signup;
+    final isVerifying = mode == AuthMode.verifySignup;
+    return AutofillGroup(
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.topCenter,
+        child: Column(
+          key: ValueKey<AuthMode>(mode),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (isVerifying)
+              AuthField(
+                controller: verificationCodeController,
+                focusNode: verificationCodeFocusNode,
+                label: 'Verification code',
+                icon: Icons.verified_user_outlined,
+                keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.done,
+                onFieldSubmitted: (_) => onSubmit(),
+              )
+            else ...[
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, animation) => SizeTransition(
+                  sizeFactor: animation,
+                  axisAlignment: -1,
+                  child: FadeTransition(opacity: animation, child: child),
+                ),
+                child: isSignup
+                    ? Padding(
+                        key: const ValueKey('name-field'),
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: AuthField(
+                          controller: nameController,
+                          focusNode: nameFocusNode,
+                          label: 'Name',
+                          icon: Icons.person_outline,
+                          textInputAction: TextInputAction.next,
+                          autofillHints: const [AutofillHints.name],
+                          onFieldSubmitted: (_) =>
+                              emailFocusNode.requestFocus(),
+                        ),
+                      )
+                    : const SizedBox.shrink(key: ValueKey('no-name-field')),
+              ),
+              AuthField(
+                controller: emailController,
+                focusNode: emailFocusNode,
+                label: 'Email',
+                icon: Icons.email_outlined,
+                keyboardType: TextInputType.emailAddress,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [
+                  AutofillHints.email,
+                  AutofillHints.username,
+                ],
+                onFieldSubmitted: (_) => passwordFocusNode.requestFocus(),
+              ),
+              const SizedBox(height: 12),
+              AuthField(
+                controller: passwordController,
+                focusNode: passwordFocusNode,
+                label: 'Password',
+                icon: Icons.lock_outline,
+                obscureText: true,
+                textInputAction: TextInputAction.done,
+                autofillHints: isSignup
+                    ? const [AutofillHints.newPassword]
+                    : const [AutofillHints.password],
+                onFieldSubmitted: (_) => onSubmit(),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class AuthSubmitSection extends StatelessWidget {
+  const AuthSubmitSection({
+    super.key,
+    required this.message,
+    required this.isSignup,
+    required this.isVerifying,
+    required this.isBusy,
+    required this.onSubmit,
+    required this.onResendCode,
+    required this.onUseDifferentEmail,
+  });
+
+  final String? message;
+  final bool isSignup;
+  final bool isVerifying;
+  final bool isBusy;
+  final VoidCallback onSubmit;
+  final VoidCallback onResendCode;
+  final VoidCallback onUseDifferentEmail;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (message != null) ...[
+          Text(
+            message!,
+            style: AppTextStyles.caption.copyWith(color: ColorTokens.warning),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 14),
+        ],
+        AuthGradientButton(
+          label: isVerifying
+              ? 'Verify account'
+              : isSignup
+              ? 'Create account'
+              : 'Sign in',
+          isBusy: isBusy,
+          onPressed: onSubmit,
+        ),
+        if (isVerifying) ...[
+          const SizedBox(height: 12),
+          TextButton(
+            onPressed: isBusy ? null : onResendCode,
+            child: const Text('Resend code'),
+          ),
+          TextButton(
+            onPressed: isBusy ? null : onUseDifferentEmail,
+            child: const Text('Use a different email'),
+          ),
+        ],
+      ],
+    );
   }
 }

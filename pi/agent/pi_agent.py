@@ -225,7 +225,16 @@ def require_admin() -> tuple[bool, str]:
 
 
 def run_admin_command(args: list[str], timeout: int = 20) -> dict[str, Any]:
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    except Exception as error:
+        return {
+            "command": args,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": str(error),
+            "success": False,
+        }
     return {
         "command": args,
         "returncode": result.returncode,
@@ -233,6 +242,34 @@ def run_admin_command(args: list[str], timeout: int = 20) -> dict[str, Any]:
         "stderr": result.stderr.strip(),
         "success": result.returncode == 0,
     }
+
+
+def read_service_logs(lines: int = 160) -> dict[str, Any]:
+    count = str(max(20, min(int(lines or 160), 500)))
+    services = [
+        "kahrabaiq-agent.service",
+        "kahrabaiq-kiosk-browser.service",
+        "kahrabaiq-sensor-receiver.service",
+        "kahrabaiq-iot-live-publisher.service",
+        "kahrabaiq-command-runner.service",
+        "kahrabaiq-summary-sync.service",
+    ]
+    args = [
+        "sudo",
+        "-n",
+        "/usr/bin/journalctl",
+        "--no-pager",
+        "--utc",
+        "-n",
+        count,
+    ]
+    for service in services:
+        args.extend(["-u", service])
+    result = run_admin_command(args, timeout=12)
+    if result["success"] or result["stdout"] or result["stderr"]:
+        return {"lines": int(count), "services": services, **result}
+    fallback = run_admin_command(["/usr/bin/journalctl", "--no-pager", "--utc", "-n", count], timeout=12)
+    return {"lines": int(count), "services": services, **fallback}
 
 
 def current_wifi_ssid() -> str:
@@ -981,7 +1018,16 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .admin-panel button.primary { background: var(--cyan); color: var(--text); }
     .admin-panel button.danger { background: var(--red); color: white; }
-    .admin-log { margin-top: 14px; color: var(--muted); white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+    .admin-log {
+      max-height: 340px;
+      margin-top: 14px;
+      overflow: auto;
+      color: var(--muted);
+      white-space: pre-wrap;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+    }
 
     .invite-card {
       grid-column: span 12;
@@ -1072,6 +1118,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
         <div class="admin-actions">
           <button class="primary" type="button" id="lockDashboardButton">Lock Dashboard</button>
           <button type="button" id="refreshAdminStatusButton">Refresh Status</button>
+          <button type="button" id="viewLogsButton">View Logs</button>
           <button type="button" id="restartDashboardButton">Restart Dashboard</button>
           <button type="button" id="exitKioskButton">Exit Kiosk To Desktop</button>
           <button type="button" id="returnKioskButton">Return To Kiosk</button>
@@ -1550,6 +1597,14 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       hideAdminOverlay();
     };
     document.getElementById("refreshAdminStatusButton").onclick = refreshAdminStatus;
+    document.getElementById("viewLogsButton").onclick = async () => {
+      const data = await adminFetch("/api/admin/logs?lines=180");
+      const output = [
+        data.stdout || "",
+        data.stderr ? `\n[stderr]\n${data.stderr}` : "",
+      ].join("").trim();
+      adminLog(output || "No service logs returned.");
+    };
     document.getElementById("restartDashboardButton").onclick = async () => adminLog(await adminFetch("/api/admin/services/restart-dashboard", { method: "POST" }));
     document.getElementById("exitKioskButton").onclick = async () => adminLog(await adminFetch("/api/admin/kiosk/exit", { method: "POST" }));
     document.getElementById("returnKioskButton").onclick = async () => adminLog(await adminFetch("/api/admin/kiosk/start", { method: "POST" }));
@@ -1669,6 +1724,20 @@ def admin_status() -> Any:
             "esp32": esp32_link(),
         }
     )
+
+
+@app.get("/api/admin/logs")
+def admin_logs() -> Any:
+    ok, message = require_admin()
+    if not ok:
+        return jsonify({"success": False, "message": message}), 401
+    try:
+        lines = int(request.args.get("lines", "160"))
+    except ValueError:
+        lines = 160
+    logs = read_service_logs(lines)
+    command_success = bool(logs.pop("success", False))
+    return jsonify({"success": True, "command_success": command_success, **logs})
 
 
 @app.post("/api/admin/maintenance/start")

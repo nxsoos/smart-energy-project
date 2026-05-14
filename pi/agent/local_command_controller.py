@@ -10,7 +10,7 @@ from typing import Any
 from dotenv import load_dotenv
 from tuya_connector import TUYA_LOGGER, TuyaOpenAPI
 
-from local_state_store import home_ref
+from local_state_store import add_history, home_ref
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -35,6 +35,7 @@ TUYA_API_ENDPOINT = os.environ.get("TUYA_API_ENDPOINT", "https://openapi.tuyaeu.
 TUYA_VERIFY_ATTEMPTS = int(os.environ.get("TUYA_VERIFY_ATTEMPTS", "7"))
 LOCAL_COMMAND_VERIFY_DELAY_SECONDS = float(os.environ.get("LOCAL_COMMAND_VERIFY_DELAY_SECONDS", "0.5"))
 LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS = float(os.environ.get("LOCAL_HA_STATE_SYNC_INTERVAL_SECONDS", "2"))
+LOCAL_HISTORY_MAX_RECORDS = int(os.environ.get("LOCAL_HISTORY_MAX_RECORDS", "5000"))
 USE_HOME_ASSISTANT_FOR_BREAKERS = os.environ.get("USE_HOME_ASSISTANT_FOR_BREAKERS", "true").strip().lower() in {
     "1",
     "true",
@@ -596,6 +597,37 @@ def read_ha_breaker_metering(device_id: str) -> dict[str, float]:
     return metering
 
 
+def write_ha_breaker_history(
+    device_id: str,
+    payload: dict[str, Any],
+    *,
+    switch_on: bool | None,
+    online: bool,
+) -> None:
+    if not device_id.startswith("breaker_"):
+        return
+    timestamp_ms = int(payload.get("updated_at_ms") or now_ms())
+    record = {
+        **payload,
+        **as_dict(payload.get("metering")),
+        "id": device_id,
+        "device_id": device_id,
+        "timestamp_ms": timestamp_ms,
+        "timestamp_iso": payload.get("updated_at_iso") or ms_to_iso(timestamp_ms),
+        "updated_at_ms": timestamp_ms,
+        "updated_at_iso": payload.get("updated_at_iso") or ms_to_iso(timestamp_ms),
+        "online_state": "online" if online else "offline",
+    }
+    if switch_on is not None:
+        record["switch"] = switch_on
+    add_history(
+        device_id,
+        f"{device_id}_{timestamp_ms}",
+        record,
+        max_records=LOCAL_HISTORY_MAX_RECORDS,
+    )
+
+
 def log_ha_config(device_id: str, entity_id: str) -> None:
     env_key = HA_ENTITY_ENV.get(device_id, "")
     print(
@@ -658,40 +690,40 @@ def sync_home_assistant_device_state(device_id: str) -> None:
     try:
         state = get_entity_state(str(base_payload["ha_entity_id"]))
         switch_on = state == "on"
-        local_ref(f"devices/{device_id}").update(
-            {
-                **base_payload,
+        payload = {
+            **base_payload,
+            "online": True,
+            "local_online": True,
+            "state": state,
+            "display_state": state,
+            "status": {
+                **as_dict(current_device.get("status")),
                 "online": True,
-                "local_online": True,
-                "state": state,
-                "display_state": state,
-                "status": {
-                    **as_dict(current_device.get("status")),
-                    "online": True,
-                    "switch": switch_on,
-                    "relay_status": state,
-                    "lastSeenMs": timestamp_ms,
-                    "last_seen_ms": timestamp_ms,
-                    "last_seen_iso": timestamp_iso,
-                },
-            }
-        )
+                "switch": switch_on,
+                "relay_status": state,
+                "lastSeenMs": timestamp_ms,
+                "last_seen_ms": timestamp_ms,
+                "last_seen_iso": timestamp_iso,
+            },
+        }
+        local_ref(f"devices/{device_id}").update(payload)
+        write_ha_breaker_history(device_id, payload, switch_on=switch_on, online=True)
     except HomeAssistantError as error:
-        local_ref(f"devices/{device_id}").update(
-            {
-                **base_payload,
-                "online": False,
-                "local_online": False,
-                "state": "unknown",
-                "display_state": "unknown",
-                "last_command_message": error.user_message,
-                "last_command": {
-                    "status": "failed",
-                    "user_message": error.user_message,
-                    "error_code": error.code,
-                },
-            }
-        )
+        payload = {
+            **base_payload,
+            "online": False,
+            "local_online": False,
+            "state": "unknown",
+            "display_state": "unknown",
+            "last_command_message": error.user_message,
+            "last_command": {
+                "status": "failed",
+                "user_message": error.user_message,
+                "error_code": error.code,
+            },
+        }
+        local_ref(f"devices/{device_id}").update(payload)
+        write_ha_breaker_history(device_id, payload, switch_on=None, online=False)
 
 
 def sync_home_assistant_device_states(force: bool = False) -> None:

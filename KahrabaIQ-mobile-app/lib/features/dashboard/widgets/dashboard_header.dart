@@ -25,16 +25,17 @@ class DashboardHeader extends StatelessWidget {
         Container(
           width: 48,
           height: 48,
-          decoration: const BoxDecoration(
+          padding: const EdgeInsets.all(7),
+          decoration: BoxDecoration(
             shape: BoxShape.circle,
-            gradient: LinearGradient(
-              colors: [ColorTokens.primary, ColorTokens.accent],
-            ),
+            color: Colors.black,
+            border: Border.all(color: ColorTokens.primaryGlow),
           ),
-          child: Center(
-            child: Text(
-              name.characters.first.toUpperCase(),
-              style: AppTextStyles.h3,
+          child: ClipOval(
+            child: Image.asset(
+              'assets/brand/kahrabaiq-emblem.png',
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
             ),
           ),
         ),

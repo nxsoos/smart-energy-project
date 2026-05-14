@@ -65,6 +65,10 @@ class AuthField extends StatelessWidget {
     required this.icon,
     this.obscureText = false,
     this.keyboardType,
+    this.focusNode,
+    this.textInputAction,
+    this.autofillHints,
+    this.onFieldSubmitted,
   });
 
   final TextEditingController controller;
@@ -72,13 +76,27 @@ class AuthField extends StatelessWidget {
   final IconData icon;
   final bool obscureText;
   final TextInputType? keyboardType;
+  final FocusNode? focusNode;
+  final TextInputAction? textInputAction;
+  final Iterable<String>? autofillHints;
+  final ValueChanged<String>? onFieldSubmitted;
 
   @override
   Widget build(BuildContext context) {
     return TextFormField(
       controller: controller,
+      focusNode: focusNode,
       obscureText: obscureText,
       keyboardType: keyboardType,
+      textInputAction: textInputAction,
+      autofillHints: autofillHints,
+      onFieldSubmitted: onFieldSubmitted,
+      onTap: () => Scrollable.ensureVisible(
+        context,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+      ),
       decoration: InputDecoration(labelText: label, prefixIcon: Icon(icon)),
       validator: (value) =>
           (value ?? '').trim().isEmpty ? '$label is required.' : null,
@@ -127,22 +145,66 @@ class AuthGradientButton extends StatelessWidget {
   }
 }
 
-/// Animated KahrabaIQ lightning-ring logo.
-class AuthAnimatedLogo extends StatelessWidget {
-  const AuthAnimatedLogo({super.key, required this.controller});
+/// Top KahrabaIQ brand mark.
+class AuthHeader extends StatelessWidget {
+  const AuthHeader({super.key, required this.screenHeight});
 
-  final AnimationController controller;
+  final double screenHeight;
 
   @override
   Widget build(BuildContext context) {
+    final logoHeight = screenHeight < 720
+        ? 98.0
+        : screenHeight < 860
+        ? 118.0
+        : 138.0;
+    return SizedBox(
+      height: logoHeight,
+      child: Center(
+        child: Image.asset(
+          'assets/brand/kahrabaiq-brand-identity.png',
+          height: logoHeight,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.high,
+        ),
+      ),
+    );
+  }
+}
+
+/// Animated electricity gauge.
+class ElectricityAnimation extends StatelessWidget {
+  const ElectricityAnimation({
+    super.key,
+    required this.controller,
+    required this.screenHeight,
+  });
+
+  final AnimationController controller;
+  final double screenHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    final animationSize = screenHeight < 720
+        ? 82.0
+        : screenHeight < 860
+        ? 96.0
+        : 110.0;
+    final iconSize = screenHeight < 720 ? 34.0 : 42.0;
     return AnimatedBuilder(
       animation: controller,
-      builder: (context, _) => CustomPaint(
-        painter: _LogoPainter(progress: controller.value),
-        child: const SizedBox(
-          height: 120,
-          child: Center(
-            child: Icon(Icons.bolt, color: ColorTokens.primary, size: 44),
+      builder: (context, _) => Center(
+        child: CustomPaint(
+          painter: _LogoPainter(progress: controller.value),
+          child: SizedBox.square(
+            dimension: animationSize,
+            child: Center(
+              child: Icon(
+                Icons.bolt,
+                color: ColorTokens.primary,
+                size: iconSize,
+              ),
+            ),
           ),
         ),
       ),
@@ -159,20 +221,27 @@ class _LogoPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
     final radius = math.min(size.width, size.height) / 2 - 10;
+    final rect = Rect.fromCircle(center: center, radius: radius);
     final paint = Paint()
       ..shader = const LinearGradient(
         colors: [ColorTokens.primary, ColorTokens.accent],
-      ).createShader(Rect.fromCircle(center: center, radius: radius))
+      ).createShader(rect)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 5
       ..strokeCap = StrokeCap.round;
+    final glowPaint = Paint()
+      ..color = ColorTokens.primaryGlow
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 12
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
     canvas.drawArc(
-      Rect.fromCircle(center: center, radius: radius),
+      rect,
       progress * math.pi * 2,
       math.pi * 1.45,
       false,
-      paint,
+      glowPaint,
     );
+    canvas.drawArc(rect, progress * math.pi * 2, math.pi * 1.45, false, paint);
   }
 
   @override
