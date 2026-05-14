@@ -66,6 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<String, DateTime> _localOptimisticDeviceStartedAt = {};
   final Set<String> _dismissedAlertIds = {};
   final Set<String> _notifiedSmokeAlertIds = {};
+  String? _acknowledgedSmokeAlertId;
   bool _smokeDialogVisible = false;
 
   @override
@@ -532,6 +533,8 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     final smokeAlert = _activeSmokeAlert(alerts);
     if (smokeAlert == null) {
+      _acknowledgedSmokeAlertId = null;
+      _notifiedSmokeAlertIds.clear();
       if (_smokeDialogVisible) {
         _smokeDialogVisible = false;
         Navigator.of(context, rootNavigator: true).maybePop();
@@ -550,6 +553,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_smokeDialogVisible) {
       return;
     }
+    if (_acknowledgedSmokeAlertId == smokeAlert.id) {
+      return;
+    }
     _smokeDialogVisible = true;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted ||
@@ -562,11 +568,15 @@ class _HomeScreenState extends State<HomeScreen> {
         barrierDismissible: false,
         builder: (context) => _SmokeAlertDialog(alert: smokeAlert),
       );
+      _acknowledgedSmokeAlertId = smokeAlert.id;
       _smokeDialogVisible = false;
     });
   }
 
   Alert? _activeSmokeAlert(List<Alert> alerts) {
+    if (!_currentSmokeConditionActive()) {
+      return null;
+    }
     for (final alert in alerts) {
       final type = alert.backendType.toLowerCase();
       if (alert.isActive &&
@@ -577,6 +587,41 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
     return null;
+  }
+
+  bool _currentSmokeConditionActive() {
+    final dashboard = _dashboard;
+    if (dashboard == null) {
+      return false;
+    }
+    final smokeStatus = dashboard.sensors.smokeStatus.toLowerCase();
+    final sensorReportsSmoke =
+        smokeStatus.contains('detect') ||
+        smokeStatus.contains('smoke') ||
+        smokeStatus.contains('gas') ||
+        smokeStatus.contains('alarm') ||
+        dashboard.sensors.smokeRaw == 1;
+    final smokeState = dashboard.safety['smoke_state'];
+    final emergencyMode = dashboard.safety['emergency_mode'];
+    final safetyStatus = smokeState is Map
+        ? '${smokeState['status'] ?? ''}'.toLowerCase()
+        : '';
+    final emergencyActive =
+        emergencyMode is Map &&
+        emergencyMode['active'] == true &&
+        '${emergencyMode['reason'] ?? ''}'.toLowerCase().contains('smoke');
+    final safetyReportsSmoke =
+        safetyStatus == 'pending' || safetyStatus == 'confirmed';
+    final explicitlyClear =
+        smokeStatus.contains('clear') ||
+        smokeStatus.contains('normal') ||
+        smokeStatus.contains('safe') ||
+        safetyStatus == 'clear' ||
+        safetyStatus == 'resolved';
+    if (explicitlyClear && !safetyReportsSmoke && !emergencyActive) {
+      return false;
+    }
+    return sensorReportsSmoke || safetyReportsSmoke || emergencyActive;
   }
 
   void _handleLiveError(Object error) {
@@ -1031,6 +1076,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _localCommandErrors.clear();
       _dismissedAlertIds.clear();
       _notifiedSmokeAlertIds.clear();
+      _acknowledgedSmokeAlertId = null;
     });
     _syncSafetyPopup(scenario.dashboard.alerts);
     if (!NetworkConfig.useBackendScenarioAi) {
@@ -1078,6 +1124,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _dashboardNotice = 'Returning to live home data...';
       _dismissedAlertIds.clear();
       _notifiedSmokeAlertIds.clear();
+      _acknowledgedSmokeAlertId = null;
     });
     await _loadDashboard();
   }

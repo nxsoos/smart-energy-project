@@ -3772,13 +3772,24 @@ class KahrabaIqApiService {
     final emergencyReason = _asString(
       _pick(emergency, ['reason']),
     ).toLowerCase();
+    final sensorSmokeStatus = sensors.smokeStatus.toLowerCase();
+    final sensorReportsClear =
+        sensorSmokeStatus.contains('clear') ||
+        sensorSmokeStatus.contains('normal') ||
+        sensorSmokeStatus.contains('safe');
+    final safetyReportsClear =
+        smokeStatus == 'clear' || smokeStatus == 'resolved';
+    final emergencyActive =
+        _asBool(_pick(emergency, ['active'])) &&
+        (emergencyReason.contains('smoke') || emergencyReason.contains('gas'));
+    if (sensorReportsClear && safetyReportsClear && !emergencyActive) {
+      return sensors;
+    }
     final smokeActive =
         alerts.any(_isSmokeAlert) ||
         smokeStatus == 'confirmed' ||
         smokeStatus == 'pending' ||
-        (_asBool(_pick(emergency, ['active'])) &&
-            (emergencyReason.contains('smoke') ||
-                emergencyReason.contains('gas')));
+        emergencyActive;
 
     if (!smokeActive) {
       return sensors;

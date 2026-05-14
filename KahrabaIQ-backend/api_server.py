@@ -3187,6 +3187,9 @@ def upsert_cloud_alert_from_pi(home_id: str, alert: dict[str, Any], *, timestamp
     alert_id = normalized["alert_id"]
     if not alert_id:
         return normalized
+    if alert_id == SMOKE_ALERT_ID and latest_smoke_is_clear_for(home_id, clear_delay_ms=0):
+        safe_set(f"/homes/{home_id}/alerts/active/{alert_id}", None)
+        return {**normalized, "status": "RESOLVED", "resolved_at_ms": timestamp_ms, "resolved_at_iso": iso_from_ms(timestamp_ms)}
     path = f"/homes/{home_id}/alerts/active/{alert_id}"
     existing = as_dict(safe_get(path, {}))
     if existing:
@@ -3218,6 +3221,8 @@ def upsert_cloud_alert_from_pi(home_id: str, alert: dict[str, Any], *, timestamp
             alert_type=normalized["alert_type"],
             severity=normalized["severity"],
             alert_id=alert_id,
+            dedupe_key=SMOKE_ALERT_ID if alert_id == SMOKE_ALERT_ID else f"alert:{alert_id}",
+            urgent=alert_id == SMOKE_ALERT_ID,
         )
     return normalized
 

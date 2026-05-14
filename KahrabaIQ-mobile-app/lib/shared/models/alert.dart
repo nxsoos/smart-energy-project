@@ -45,6 +45,8 @@ class Alert {
             ? 'Smoke or gas was detected in Room 1. Check immediately.'
             : 'System alert');
 
+    final status = (json['status'] as String? ?? '').trim().toLowerCase();
+
     return Alert(
       id: alertId,
       type: _parseAlertType(backendType),
@@ -65,7 +67,16 @@ class Alert {
           (json['severity'] as String?) ??
           (json['level'] as String?) ??
           (isSmokeAlert ? 'critical' : 'medium'),
-      isActive: json['isActive'] as bool? ?? json['status'] != 'resolved',
+      isActive:
+          json['isActive'] as bool? ??
+          !{
+            'resolved',
+            'auto_resolved',
+            'cleared',
+            'clear',
+            'dismissed',
+            'closed',
+          }.contains(status),
       affectedBranch:
           json['affectedBranch'] as String? ??
           json['room_id'] as String? ??
