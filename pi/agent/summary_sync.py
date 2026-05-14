@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from local_state_store import (
+    cleanup_old_data,
     history_between,
     home_ref,
     mark_summary_sync_failed,
@@ -36,6 +37,7 @@ AWS_DYNAMODB_SUMMARIES_TABLE = os.environ.get(
 )
 SUMMARY_LOOKBACK_HOURS = int(os.environ.get("SUMMARY_LOOKBACK_HOURS", "48"))
 SUMMARY_LOOKBACK_DAYS = int(os.environ.get("SUMMARY_LOOKBACK_DAYS", "7"))
+LOCAL_SQLITE_RETENTION_DAYS = int(os.environ.get("LOCAL_SQLITE_RETENTION_DAYS", "7"))
 SUMMARY_SYNC_BATCH_SIZE = int(os.environ.get("SUMMARY_SYNC_BATCH_SIZE", "25"))
 AWS_SUMMARY_SYNC_INTERVAL_SECONDS = int(os.environ.get("AWS_SUMMARY_SYNC_INTERVAL_SECONDS", "300"))
 SUMMARY_SYNC_DESTINATION = os.environ.get("SUMMARY_SYNC_DESTINATION", "ec2").strip().lower()
@@ -550,7 +552,15 @@ def sync_pending_summaries_to_dynamodb() -> int:
 
 def run_once() -> int:
     generate_recent_summaries()
-    return sync_pending_summaries()
+    synced = sync_pending_summaries()
+    cleanup = cleanup_old_data(LOCAL_SQLITE_RETENTION_DAYS)
+    deleted = cleanup["history_deleted"] + cleanup["summaries_deleted"]
+    if deleted:
+        log(
+            "Cleaned local SQLite retention data "
+            f"history={cleanup['history_deleted']} summaries={cleanup['summaries_deleted']}"
+        )
+    return synced
 
 
 def main() -> int:

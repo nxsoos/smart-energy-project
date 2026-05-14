@@ -95,16 +95,16 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_dashboard == null) {
       final cached = await _loadCachedDashboard();
       if (mounted && cached != null) {
+        final cachedForDisplay = _dashboardForCacheRestore(cached);
         debugPrint(
           '[KahrabaIQ DASHBOARD CACHE] restored cached dashboard '
           'home=${_homeId ?? NetworkConfig.defaultHomeId} '
           'power=${cached.reading.power} devices=${cached.devices.length}',
         );
         setState(() {
-          _dashboard = cached;
+          _dashboard = cachedForDisplay;
           _isLoading = false;
-          _dashboardNotice =
-              'Showing latest saved dashboard while refreshing live data...';
+          _dashboardNotice = _feedPauseNotice(cachedForDisplay);
         });
       }
     }
@@ -113,7 +113,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _error = null;
       _dashboardNotice = _dashboard == null
           ? 'Loading latest dashboard...'
-          : 'Refreshing latest dashboard while keeping current data visible...';
+          : _feedPauseNotice(_dashboard!);
     });
 
     String? pairedHomeId;
@@ -240,7 +240,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _isLoading = false;
       _error = null;
       _dashboardNotice = NetworkConfig.useAwsIotLive
-          ? 'Showing latest cloud data. Live updates will merge in as they arrive.'
+          ? _feedPauseNotice(mergedDashboard)
           : null;
     });
   }
@@ -412,6 +412,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   bool _isOperationalDowngrade(DashboardData previous, DashboardData incoming) {
+    if (incoming.hubStatus['online'] == false) {
+      return false;
+    }
     final previousOnline = _onlineControlDeviceCount(previous.devices);
     final incomingOnline = _onlineControlDeviceCount(incoming.devices);
     final previousPower = _effectivePower(previous);
@@ -444,6 +447,45 @@ class _HomeScreenState extends State<HomeScreen> {
       (sum, device) => sum + device.currentPower,
     );
     return dashboard.reading.power > 0 ? dashboard.reading.power : devicePower;
+  }
+
+  DashboardData _dashboardForCacheRestore(DashboardData dashboard) {
+    if (dashboard.scenarioId != null) {
+      return dashboard;
+    }
+    return dashboard.copyWith(
+      reading: EnergyReading(
+        timestamp: dashboard.reading.timestamp,
+        voltage: 0,
+        current: 0,
+        power: 0,
+        energyToday: dashboard.reading.energyToday,
+        energyMonth: dashboard.reading.energyMonth,
+        energyTotal: dashboard.reading.energyTotal,
+        costToday: dashboard.reading.costToday,
+        costMonth: dashboard.reading.costMonth,
+        monthDataAvailable: dashboard.reading.monthDataAvailable,
+        monthSource: dashboard.reading.monthSource,
+      ),
+      sensors: dashboard.sensors.copyWith(online: false),
+      devices: dashboard.devices
+          .map(
+            (device) => device.copyWith(
+              online: false,
+              localOnline: false,
+              stale: true,
+              commandInProgress: false,
+              statusLabel: 'cached',
+            ),
+          )
+          .toList(),
+      hubStatus: {
+        ...dashboard.hubStatus,
+        'online': false,
+        'stale': true,
+        'status_label': 'cached',
+      },
+    );
   }
 
   EnergyReading _readingWithPreviousLiveValues({
@@ -481,6 +523,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _syncSafetyPopup(List<Alert> alerts) {
+    if (_selectedDemoScenario != null) {
+      if (_smokeDialogVisible) {
+        _smokeDialogVisible = false;
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+      return;
+    }
     final smokeAlert = _activeSmokeAlert(alerts);
     if (smokeAlert == null) {
       if (_smokeDialogVisible) {
@@ -520,13 +569,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Alert? _activeSmokeAlert(List<Alert> alerts) {
     for (final alert in alerts) {
       final type = alert.backendType.toLowerCase();
-      final message = alert.message.toLowerCase();
       if (alert.isActive &&
           (alert.id == 'smoke_detected_room1' ||
               type.contains('smoke') ||
-              type.contains('gas') ||
-              message.contains('smoke') ||
-              message.contains('gas'))) {
+              type.contains('gas'))) {
         return alert;
       }
     }
@@ -543,15 +589,32 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_dashboard == null) {
       setState(() {
         _isLoading = false;
-        _dashboardNotice =
-            'Live updates are paused. Waiting for the latest dashboard snapshot.';
+        _dashboardNotice = 'Waiting for the latest dashboard snapshot.';
       });
       return;
     }
     setState(() {
-      _dashboardNotice =
-          'Live updates are paused. Showing the latest available dashboard data.';
+      _dashboardNotice = _feedPauseNotice(_dashboard!);
     });
+  }
+
+  String? _feedPauseNotice(DashboardData dashboard) {
+    if (dashboard.scenarioId != null) {
+      return null;
+    }
+    final breakersPaused = dashboard.devices
+        .where((device) => device.id.startsWith('breaker_'))
+        .any((device) => !device.online || device.stale);
+    final sensorsPaused = !dashboard.sensors.online;
+    final paused = <String>[
+      if (breakersPaused) 'breakers',
+      if (sensorsPaused) 'sensors',
+    ];
+    if (paused.isEmpty) {
+      return null;
+    }
+    final label = paused.join(' and ');
+    return '${label[0].toUpperCase()}${label.substring(1)} data updates are paused. Showing the latest available dashboard data.';
   }
 
   Future<DashboardData?> _loadCachedDashboard() async {

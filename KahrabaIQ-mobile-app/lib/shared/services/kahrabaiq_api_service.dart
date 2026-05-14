@@ -741,6 +741,10 @@ class KahrabaIqApiService {
         'scenario_name': ?scenarioName,
         'context': ?context,
       },
+      options: Options(
+        sendTimeout: const Duration(seconds: 20),
+        receiveTimeout: const Duration(seconds: 45),
+      ),
     );
     final data = _asMap(response.data);
     return ChatSendResult(
@@ -1199,7 +1203,8 @@ class KahrabaIqApiService {
     final rawState = _asString(
       _pick(data, ['displayState', 'display_state', 'state']),
     ).toLowerCase();
-    final state = commandInProgress &&
+    final state =
+        commandInProgress &&
             (pendingTargetState == 'on' || pendingTargetState == 'off')
         ? pendingTargetState!
         : rawState;
@@ -1629,7 +1634,8 @@ class KahrabaIqApiService {
     final rawDisplayState = _asString(
       _pick(data, ['display_state', 'state']),
     ).toLowerCase();
-    final displayState = commandInProgress &&
+    final displayState =
+        commandInProgress &&
             (pendingTargetState == 'on' || pendingTargetState == 'off')
         ? pendingTargetState!
         : rawDisplayState;

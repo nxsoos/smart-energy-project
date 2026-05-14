@@ -386,6 +386,33 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
       if (!mounted) {
         return;
       }
+      try {
+        final recoveredMessages = await _api.fetchChatMessages(
+          homeId: widget.homeId,
+          sessionId: session.id,
+        );
+        final hasRecoveredAssistant = recoveredMessages.any(
+          (message) =>
+              !message.isUser &&
+              message.createdAt.isAfter(
+                optimistic.createdAt.subtract(const Duration(minutes: 1)),
+              ),
+        );
+        if (!mounted) {
+          return;
+        }
+        if (hasRecoveredAssistant) {
+          setState(() {
+            _messages = recoveredMessages;
+            _isSending = false;
+            _error = null;
+          });
+          _scrollToBottom();
+          return;
+        }
+      } catch (_) {
+        // Keep the original send error visible if recovery also fails.
+      }
       setState(() {
         _isSending = false;
         _error = error.toString().replaceFirst('Exception: ', '');
@@ -412,7 +439,8 @@ class _AiChatbotScreenState extends State<AiChatbotScreen> {
       return null;
     }
     final sensorAge = DateTime.now().difference(dashboard.sensors.timestamp);
-    final sensorStale = !dashboard.sensors.online ||
+    final sensorStale =
+        !dashboard.sensors.online ||
         dashboard.sensors.timestamp.year < 2024 ||
         sensorAge.inSeconds > 45;
     return {

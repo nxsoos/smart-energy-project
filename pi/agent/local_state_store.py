@@ -303,6 +303,30 @@ def summaries_between(period: str, start_at_ms: int, end_at_ms: int) -> list[dic
     return [value for row in rows if isinstance((value := _decode(row[0])), dict)]
 
 
+def cleanup_old_data(retention_days: int = 7) -> dict[str, int]:
+    days = max(1, int(retention_days or 7))
+    cutoff_ms = _now_ms() - days * 24 * 60 * 60 * 1000
+    with _LOCK, _connect() as conn:
+        history_deleted = conn.execute(
+            "DELETE FROM history WHERE created_at_ms < ?",
+            (cutoff_ms,),
+        ).rowcount
+        summaries_deleted = conn.execute(
+            """
+            DELETE FROM summaries
+            WHERE end_at_ms < ?
+              AND synced_at_ms IS NOT NULL
+            """,
+            (cutoff_ms,),
+        ).rowcount
+        conn.execute("PRAGMA optimize")
+    return {
+        "cutoff_ms": cutoff_ms,
+        "history_deleted": max(0, history_deleted),
+        "summaries_deleted": max(0, summaries_deleted),
+    }
+
+
 def mark_summary_synced(summary_id: str) -> None:
     with _LOCK, _connect() as conn:
         conn.execute(

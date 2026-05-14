@@ -341,7 +341,10 @@ IconData _iconFor(String type) {
   if (normalized.contains('energy')) {
     return Icons.bolt_outlined;
   }
-  if (normalized.contains('device') || normalized.contains('sensor') || normalized.contains('offline') || normalized.contains('stale')) {
+  if (normalized.contains('device') ||
+      normalized.contains('sensor') ||
+      normalized.contains('offline') ||
+      normalized.contains('stale')) {
     return Icons.devices_other_outlined;
   }
   if (normalized.contains('ai')) {
@@ -396,12 +399,9 @@ List<Alert> _dedupeAlerts(List<Alert> alerts) {
 bool _isSmokeAlert(Alert alert) {
   final id = alert.id.toLowerCase();
   final type = alert.backendType.toLowerCase();
-  final message = alert.message.toLowerCase();
   return id == 'smoke_detected_room1' ||
       type.contains('smoke') ||
-      type.contains('gas') ||
-      message.contains('smoke') ||
-      message.contains('gas');
+      type.contains('gas');
 }
 
 String _titleFor(Alert alert) {
