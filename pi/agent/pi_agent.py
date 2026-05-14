@@ -14,7 +14,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from local_state_store import get_path, home_snapshot, set_path
 try:
@@ -47,6 +47,7 @@ LIVE_SYNC_INTERVAL_SECONDS = float(os.environ.get("PI_LIVE_SYNC_INTERVAL_SECONDS
 COMMAND_POLL_SECONDS = float(os.environ.get("PI_COMMAND_POLL_SECONDS", "3"))
 KIOSK_TOKEN_REFRESH_MARGIN_SECONDS = float(os.environ.get("KIOSK_TOKEN_REFRESH_MARGIN_SECONDS", "240"))
 PI_CLOUD_ADMIN_UNLOCK_ENABLED = os.environ.get("PI_CLOUD_ADMIN_UNLOCK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 COGNITO_REGION = os.environ.get("COGNITO_REGION") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "")
 COGNITO_APP_CLIENT_ID = os.environ.get("COGNITO_APP_CLIENT_ID", "")
 ESP32_SETUP_URL = os.environ.get("ESP32_SETUP_URL", "").rstrip("/")
@@ -503,6 +504,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>KahrabaIQ Dashboard</title>
+  <link rel="icon" href="/assets/favicon.ico" sizes="any">
   <style>
     :root {
       color-scheme: dark;
@@ -515,8 +517,8 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       --muted-2: #4b5563;
       --cyan: #ff2d2d;
       --cyan-bright: #ff5555;
-      --green: #12c48b;
-      --yellow: #ffb020;
+      --green: #22c55e;
+      --yellow: #f59e0b;
       --red: #ff5c7a;
       --border: rgba(255, 255, 255, 0.075);
       --border-strong: rgba(255, 45, 45, 0.34);
@@ -537,7 +539,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
         radial-gradient(circle 38rem at 10% 16%, rgba(255, 107, 26, 0.07), transparent 55%),
         linear-gradient(180deg, #080808 0%, var(--bg) 58%, #070505 100%);
       color: var(--text);
-      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: Sora, Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.55;
       text-rendering: geometricPrecision;
       -webkit-font-smoothing: antialiased;
@@ -552,6 +554,22 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       background: linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px);
       background-size: 100% 4px;
       opacity: 0.18;
+    }
+
+    .ambient-grid {
+      position: fixed;
+      inset: auto -10vw 0;
+      z-index: -1;
+      height: 46vh;
+      pointer-events: none;
+      transform: perspective(700px) rotateX(56deg) scale(1.25);
+      transform-origin: bottom center;
+      background-image:
+        linear-gradient(to right, rgba(255, 255, 255, 0.055) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 45, 45, 0.14) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.88), transparent 72%);
+      opacity: 0.7;
     }
 
     .shell {
@@ -582,9 +600,10 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     }
 
     .brand-mark {
-      width: 62px;
-      height: 62px;
+      width: clamp(128px, 16vw, 176px);
+      height: auto;
       flex: 0 0 auto;
+      object-fit: contain;
       filter: drop-shadow(0 0 22px var(--glow));
     }
 
@@ -594,9 +613,21 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     h1 {
       margin: 0;
-      font-size: clamp(28px, 4vw, 48px);
+      font-family: Orbitron, Sora, Inter, sans-serif;
+      font-size: 24px;
+      font-weight: 700;
       line-height: 1;
       letter-spacing: -0.02em;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--cyan-bright);
+      font-family: Orbitron, Sora, Inter, sans-serif;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
     }
 
     .sub {
@@ -615,7 +646,9 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       border-radius: 999px;
       background: rgba(255, 45, 45, 0.1);
       color: var(--text);
-      font-weight: 700;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 800;
       white-space: nowrap;
     }
 
@@ -687,9 +720,10 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .value {
       font-family: "SFMono-Regular", Consolas, monospace;
-      font-size: clamp(28px, 4vw, 48px);
-      font-weight: 900;
-      letter-spacing: 0;
+      font-size: clamp(56px, 8vw, 104px);
+      font-weight: 800;
+      letter-spacing: -0.08em;
+      line-height: 0.92;
       color: var(--text);
     }
 
@@ -715,6 +749,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .section-title {
       color: var(--cyan-bright);
+      font-family: Orbitron, Sora, Inter, sans-serif;
       font-size: 15px;
       font-weight: 900;
       letter-spacing: .04em;
@@ -805,7 +840,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .command-actions button.primary {
       background: var(--cyan);
-      color: #001018;
+      color: var(--text);
     }
 
     .command-actions button.danger {
@@ -908,8 +943,8 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     .admin-panel {
       width: min(620px, 100%);
-      background: #0f172a;
-      border: 1px solid rgba(17, 217, 255, 0.42);
+      background: #101010;
+      border: 1px solid rgba(255, 45, 45, 0.34);
       border-radius: 20px;
       padding: 24px;
       box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
@@ -939,12 +974,12 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       border: none;
       border-radius: 999px;
       padding: 12px 16px;
-      background: rgba(17, 217, 255, 0.16);
+      background: rgba(255, 45, 45, 0.12);
       color: var(--text);
       font-weight: 800;
     }
 
-    .admin-panel button.primary { background: var(--cyan); color: #001018; }
+    .admin-panel button.primary { background: var(--cyan); color: var(--text); }
     .admin-panel button.danger { background: var(--red); color: white; }
     .admin-log { margin-top: 14px; color: var(--muted); white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
 
@@ -974,7 +1009,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       border-radius: 999px;
       padding: 12px 16px;
       background: var(--cyan);
-      color: #001018;
+      color: var(--text);
       font-weight: 900;
     }
 
@@ -989,7 +1024,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       display: grid;
       place-items: center;
       border-radius: 18px;
-      background: white;
+      background: #f7f4ef;
       color: #111827;
       padding: 12px;
       overflow: hidden;
@@ -1004,7 +1039,8 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
 
     @media (max-width: 820px) {
       header { align-items: flex-start; flex-direction: column; }
-      .brand-mark { width: 52px; height: 52px; }
+      .brand { align-items: flex-start; flex-direction: column; gap: 12px; }
+      .brand-mark { width: 132px; }
       .hero, .room, .sensors, .notes { grid-column: span 12; }
       .invite-card { grid-template-columns: 1fr; }
       .invite-qr { width: min(240px, 100%); margin: 0 auto; }
@@ -1013,6 +1049,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   </style>
 </head>
 <body>
+  <div class="ambient-grid" aria-hidden="true"></div>
   <div class="admin-hotspot" id="adminHotspot" aria-label="Admin unlock area"></div>
   <div class="overlay" id="alertOverlay">
     <div class="modal">
@@ -1047,19 +1084,10 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
   <main class="shell">
     <header>
       <div class="brand">
-        <svg class="brand-mark" viewBox="0 0 64 64" role="img" aria-label="KahrabaIQ logo">
-          <defs>
-            <linearGradient id="brandBolt" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
-              <stop stop-color="#11d9ff" />
-              <stop offset="1" stop-color="#12c48b" />
-            </linearGradient>
-          </defs>
-          <rect x="5" y="5" width="54" height="54" rx="17" fill="#071024" stroke="rgba(17,217,255,.42)" stroke-width="2" />
-          <path d="M35.4 8.8 16.8 35.1h13.4l-3.5 20.1 20.5-28H33.9l1.5-18.4Z" fill="url(#brandBolt)" />
-          <path d="M22.5 39.7c4.9 5.3 13.5 5.7 18.9.8" fill="none" stroke="#f7f8ff" stroke-opacity=".82" stroke-width="3" stroke-linecap="round" />
-        </svg>
+        <img class="brand-mark" src="/assets/kahrabaiq-wordmark.png" alt="KahrabaIQ logo">
         <div class="brand-copy">
-          <h1>KahrabaIQ</h1>
+          <p class="eyebrow">Home Energy Command</p>
+          <h1>Live Dashboard</h1>
           <div class="sub" id="subtitle">Loading dashboard...</div>
         </div>
       </div>
@@ -1192,6 +1220,20 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       return Number.isFinite(parsed) ? parsed : fallback;
     }
 
+    function firstPresent(...values) {
+      for (const value of values) {
+        if (value !== null && value !== undefined && value !== "") return value;
+      }
+      return undefined;
+    }
+
+    function boolValue(value) {
+      if (typeof value === "boolean") return value;
+      if (typeof value === "number") return value !== 0;
+      if (typeof value === "string") return ["true", "1", "yes", "on", "detected", "motion", "smoke", "gas"].includes(value.trim().toLowerCase());
+      return false;
+    }
+
     function valueOrDash(value, suffix = "") {
       if (value === null || value === undefined || value === "") return "--";
       const parsed = Number(value);
@@ -1243,10 +1285,10 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       const room = dashboard.room || {};
       const devices = dashboard.devices || {};
       const sensorHub = sensorDevice(devices);
-      const sensorPayload = sensorHub.sensors || {};
+      const sensorPayload = Object.keys(sensorHub.sensors || {}).length ? sensorHub.sensors : room;
       const sensorStatus = sensorHub.status || {};
-      const sensorTimestamp = sensorPayload.timestamp_ms || sensorPayload.timestampMs || sensorStatus.last_seen_ms || sensorStatus.lastSeenMs || room.timestamp_ms || room.timestampMs;
-      const sensorOnline = Boolean(sensorHub.online) && room.stale !== true;
+      const sensorTimestamp = firstPresent(sensorPayload.timestamp_ms, sensorPayload.timestampMs, sensorStatus.last_seen_ms, sensorStatus.lastSeenMs, room.timestamp_ms, room.timestampMs);
+      const sensorOnline = boolValue(firstPresent(sensorHub.online, sensorPayload.sensorOnline, sensorPayload.sensor_online, sensorPayload.online, room.sensorOnline, room.sensor_online, room.online)) && sensorPayload.stale !== true && room.stale !== true;
       const deviceList = Object.values(devices).filter((device) => {
         const type = String(device.type || "");
         const id = String(device.id || device.device_id || "");
@@ -1264,16 +1306,16 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       text("breakerCount", `${activeBreakers}/${breakers.length || 0}`);
       text("roomStatus", sensorOnline ? "Online" : room.stale ? "Stale" : "Offline");
       document.getElementById("roomStatus").className = `state ${sensorOnline ? "" : room.stale ? "stale" : "offline"}`;
-      text("temperature", currentSensorValue(sensorOnline, sensorPayload.temperature ?? room.temperature, " C"));
-      text("humidity", currentSensorValue(sensorOnline, sensorPayload.humidity ?? room.humidity, " %"));
-      text("motion", sensorOnline ? (room.motion_text || (number(room.motion) ? "Motion" : "Clear")) : "Unavailable");
-      text("smoke", sensorOnline ? (room.smoke_text || (number(room.smoke) ? "Detected" : "Clear")) : "Unavailable");
+      text("temperature", currentSensorValue(sensorOnline, firstPresent(sensorPayload.temperature, room.temperature), " C"));
+      text("humidity", currentSensorValue(sensorOnline, firstPresent(sensorPayload.humidity, room.humidity), " %"));
+      text("motion", sensorOnline ? (firstPresent(sensorPayload.motion_text, room.motion_text) || (boolValue(firstPresent(sensorPayload.motion, sensorPayload.motionDetected, sensorPayload.motion_detected, room.motion)) ? "Motion" : "Clear")) : "Unavailable");
+      text("smoke", sensorOnline ? (firstPresent(sensorPayload.smoke_text, sensorPayload.smoke_status, room.smoke_text, room.smoke_status) || (boolValue(firstPresent(sensorPayload.smoke, sensorPayload.smokeDetected, sensorPayload.smoke_detected, sensorPayload.gasDetected, sensorPayload.gas_detected, room.smoke)) ? "Detected" : "Clear")) : "Unavailable");
       text("sensorUpdated", timestampText(sensorTimestamp));
-      text("aqi", currentSensorValue(sensorOnline, sensorPayload.aqi ?? room.aqi));
-      text("eco2", currentSensorValue(sensorOnline, sensorPayload.eco2 ?? room.eco2, " ppm"));
-      text("tvoc", currentSensorValue(sensorOnline, sensorPayload.tvoc ?? room.tvoc, " ppb"));
-      text("light", currentSensorValue(sensorOnline, sensorPayload.light_raw ?? room.light_raw));
-      text("sound", currentSensorValue(sensorOnline, sensorPayload.sound_raw ?? sensorPayload.sound_level ?? room.sound_level));
+      text("aqi", currentSensorValue(sensorOnline, firstPresent(sensorPayload.aqi, sensorPayload.airQuality, sensorPayload.air_quality, room.aqi, room.airQuality, room.air_quality)));
+      text("eco2", currentSensorValue(sensorOnline, firstPresent(sensorPayload.eco2, room.eco2), " ppm"));
+      text("tvoc", currentSensorValue(sensorOnline, firstPresent(sensorPayload.tvoc, room.tvoc), " ppb"));
+      text("light", currentSensorValue(sensorOnline, firstPresent(sensorPayload.light_raw, sensorPayload.lightLevel, sensorPayload.light_level, room.light_raw, room.lightLevel, room.light_level)));
+      text("sound", currentSensorValue(sensorOnline, firstPresent(sensorPayload.sound_raw, sensorPayload.soundLevel, sensorPayload.sound_level, sensorPayload.noise, room.sound_raw, room.soundLevel, room.sound_level, room.noise)));
       text("sensorFeed", sensorOnline ? "Online" : room.stale ? "Stale" : "Offline");
 
       const devicesNode = document.getElementById("devices");
@@ -1743,6 +1785,11 @@ def local_kiosk_device_command() -> Any:
 @app.get("/dashboard")
 def local_dashboard() -> Response:
     return Response(KIOSK_DASHBOARD_HTML, mimetype="text/html")
+
+
+@app.get("/assets/<path:filename>")
+def local_dashboard_asset(filename: str) -> Any:
+    return send_from_directory(ASSETS_DIR, filename)
 
 
 @app.get("/api/agent/status")
