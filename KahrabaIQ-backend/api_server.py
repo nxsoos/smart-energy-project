@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import html
+import io
 import json
 import ipaddress
 import hashlib
@@ -17,6 +18,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import jwt
+import qrcode
+import qrcode.image.svg
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -77,6 +80,7 @@ DEFAULT_HOME_ID = os.environ.get("DEFAULT_HOME_ID", "home_001")
 HOME_MEMBER_LIMIT = int(os.environ.get("HOME_MEMBER_LIMIT", "3"))
 PAIRING_TOKEN_TTL_MS = int(os.environ.get("PAIRING_TOKEN_TTL_SECONDS", "900")) * 1000
 HOME_INVITE_TTL_MS = int(os.environ.get("HOME_INVITE_TTL_SECONDS", str(7 * 24 * 60 * 60))) * 1000
+DASHBOARD_INVITE_TTL_MS = int(os.environ.get("DASHBOARD_INVITE_TTL_SECONDS", "600")) * 1000
 KIOSK_SESSION_TTL_SECONDS = int(os.environ.get("KIOSK_SESSION_TTL_SECONDS", "600"))
 KIOSK_COMMAND_TTL_SECONDS = int(os.environ.get("KIOSK_COMMAND_TTL_SECONDS", "300"))
 KIOSK_SESSION_SECRET = os.environ.get("KIOSK_SESSION_SECRET") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "dev-kiosk-session-secret"
@@ -4996,6 +5000,55 @@ def dashboard_latest_state(access: dict[str, Any]) -> dict[str, Any]:
     return as_dict(safe_get(f"/homes/{home_id}/latest_state", {}))
 
 
+def qr_svg(payload: str) -> str:
+    image = qrcode.make(payload, image_factory=qrcode.image.svg.SvgPathImage)
+    stream = io.BytesIO()
+    image.save(stream)
+    return stream.getvalue().decode("utf-8")
+
+
+def create_dashboard_home_invite(home_id: str) -> dict[str, Any]:
+    if not home_id:
+        raise HTTPException(status_code=409, detail="Dashboard is not paired to a home yet.")
+    remaining_slots = remaining_home_invite_slots(home_id)
+    if remaining_slots <= 0:
+        raise HTTPException(status_code=409, detail=f"This home already has the maximum {HOME_MEMBER_LIMIT} invited users.")
+
+    timestamp_ms = now_ms()
+    raw_token = secrets.token_urlsafe(24)
+    invite_id = f"dashboard_invite_{timestamp_ms}_{secrets.token_hex(3)}"
+    expires_at_ms = timestamp_ms + DASHBOARD_INVITE_TTL_MS
+    safe_set(
+        f"/home_invites/{invite_id}",
+        {
+            "invite_id": invite_id,
+            "home_id": home_id,
+            "role": "member",
+            "token_hash": hash_secret(raw_token),
+            "created_by_uid": "pi_dashboard",
+            "created_by_role": "dashboard",
+            "expires_at_ms": expires_at_ms,
+            "max_uses": 1,
+            "used_count": 0,
+            "active": True,
+            "created_at_ms": timestamp_ms,
+            "created_at_iso": iso_from_ms(timestamp_ms),
+        },
+    )
+    payload = f"kahrabaiq://invite?invite_id={invite_id}&token={raw_token}"
+    return {
+        "success": True,
+        "home_id": home_id,
+        "invite_id": invite_id,
+        "token": raw_token,
+        "expires_at_ms": expires_at_ms,
+        "role": "member",
+        "max_uses": 1,
+        "qr_payload": payload,
+        "qr_svg": qr_svg(payload),
+    }
+
+
 def request_is_https(request: Request) -> bool:
     proto = str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
     return proto == "https" or request.url.scheme == "https"
@@ -5111,6 +5164,13 @@ def dashboard_state(request: Request) -> dict[str, Any]:
         "updated_at_ms": payload["updated_at_ms"],
         "updated_at_iso": payload["updated_at_iso"],
     }
+
+
+@app.post("/api/dashboard/home-invite")
+def dashboard_home_invite(request: Request) -> dict[str, Any]:
+    access = require_dashboard_pi_access(request)
+    home_id = str(access.get("home_id") or "")
+    return create_dashboard_home_invite(home_id)
 
 
 @app.get("/api/dashboard/iot/live-config")

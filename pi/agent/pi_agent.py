@@ -358,6 +358,14 @@ def kiosk_dashboard_data() -> dict[str, Any]:
     return data
 
 
+def kiosk_home_invite_qr() -> dict[str, Any]:
+    response = api_request("POST", "/api/dashboard/home-invite")
+    data = response.json()
+    if not response.ok or data.get("success") is False:
+        raise RuntimeError(data.get("detail") or data.get("message") or response.text)
+    return data
+
+
 def normalize_url(value: str) -> str:
     text = str(value or "").strip().rstrip("/")
     if text and not text.startswith(("http://", "https://")):
@@ -886,10 +894,66 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     .admin-panel button.danger { background: var(--red); color: white; }
     .admin-log { margin-top: 14px; color: var(--muted); white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
 
+    .invite-card {
+      grid-column: span 12;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 240px;
+      gap: 18px;
+      align-items: center;
+    }
+
+    .invite-copy {
+      color: var(--muted);
+      line-height: 1.5;
+      margin: 0 0 14px;
+    }
+
+    .invite-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .invite-actions button {
+      border: none;
+      border-radius: 999px;
+      padding: 12px 16px;
+      background: var(--cyan);
+      color: #001018;
+      font-weight: 900;
+    }
+
+    .invite-status {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .invite-qr {
+      min-height: 220px;
+      display: grid;
+      place-items: center;
+      border-radius: 18px;
+      background: white;
+      color: #111827;
+      padding: 12px;
+      overflow: hidden;
+      font-weight: 900;
+    }
+
+    .invite-qr svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
     @media (max-width: 820px) {
       header { align-items: flex-start; flex-direction: column; }
       .brand-mark { width: 52px; height: 52px; }
       .hero, .room, .sensors, .notes { grid-column: span 12; }
+      .invite-card { grid-template-columns: 1fr; }
+      .invite-qr { width: min(240px, 100%); margin: 0 auto; }
       .metric-row { grid-template-columns: 1fr; }
     }
   </style>
@@ -1043,6 +1107,18 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
           <div class="muted">Active items only</div>
         </div>
         <div id="alerts">No active alerts.</div>
+      </article>
+
+      <article class="card invite-card">
+        <div>
+          <div class="section-title">Mobile App Access</div>
+          <p class="invite-copy">Generate a one-use QR code. When scanned in the KahrabaIQ app, the user joins this dashboard home.</p>
+          <div class="invite-actions">
+            <button type="button" id="generateInviteQrButton">Show QR Code</button>
+            <span class="invite-status" id="inviteQrStatus">QR not generated yet.</span>
+          </div>
+        </div>
+        <div class="invite-qr" id="inviteQrBox">QR</div>
       </article>
     </section>
   </main>
@@ -1252,6 +1328,30 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function generateInviteQr() {
+      const button = document.getElementById("generateInviteQrButton");
+      const status = document.getElementById("inviteQrStatus");
+      const qrBox = document.getElementById("inviteQrBox");
+      button.disabled = true;
+      status.textContent = "Generating QR...";
+      qrBox.textContent = "Loading";
+      try {
+        const response = await fetch("/api/kiosk/home-invite-qr", { method: "POST", cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.success === false) {
+          throw new Error(data.message || data.detail || "Could not generate QR.");
+        }
+        qrBox.innerHTML = data.qr_svg || "QR unavailable";
+        const expiry = data.expires_at_ms ? new Date(data.expires_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+        status.textContent = expiry ? `Ready. Expires at ${expiry}.` : "Ready.";
+      } catch (error) {
+        qrBox.textContent = "--";
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     async function executeDeviceCommand(deviceId, command, container) {
       const buttons = Array.from(container.querySelectorAll("button"));
       const status = document.getElementById(`commandStatus-${deviceId}`);
@@ -1357,6 +1457,7 @@ KIOSK_DASHBOARD_HTML = """<!doctype html>
     document.getElementById("restartDashboardButton").onclick = async () => adminLog(await adminFetch("/api/admin/services/restart-dashboard", { method: "POST" }));
     document.getElementById("exitKioskButton").onclick = async () => adminLog(await adminFetch("/api/admin/kiosk/exit", { method: "POST" }));
     document.getElementById("returnKioskButton").onclick = async () => adminLog(await adminFetch("/api/admin/kiosk/start", { method: "POST" }));
+    document.getElementById("generateInviteQrButton").onclick = generateInviteQr;
     document.getElementById("maintenanceButton").onclick = async () => {
       if (!confirm("This will stop the dashboard and return the Pi to setup mode. Continue?")) return;
       adminLog(await adminFetch("/api/admin/maintenance/start", { method: "POST" }));
@@ -1550,6 +1651,14 @@ def local_kiosk_dashboard_data() -> Any:
         if sync_home_assistant_device_states is not None:
             sync_home_assistant_device_states(force=True)
         return jsonify(kiosk_dashboard_data())
+    except Exception as error:
+        return jsonify({"success": False, "message": str(error)}), 503
+
+
+@app.post("/api/kiosk/home-invite-qr")
+def local_kiosk_home_invite_qr() -> Any:
+    try:
+        return jsonify(kiosk_home_invite_qr())
     except Exception as error:
         return jsonify({"success": False, "message": str(error)}), 503
 

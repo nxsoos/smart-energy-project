@@ -33,6 +33,25 @@ async function refreshDashboardSession() {
   return data;
 }
 
+async function loadHomeInviteQr() {
+  const status = document.getElementById("inviteStatus");
+  const qr = document.getElementById("inviteQr");
+  if (!status || !qr) return;
+  try {
+    status.textContent = "Generating secure invite QR...";
+    const response = await fetch("/api/dashboard/home-invite", { method: "POST", cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.success === false) throw new Error(data.detail || data.message || "Invite QR unavailable");
+    qr.innerHTML = data.qr_svg || "--";
+    const expiry = data.expires_at_ms ? new Date(data.expires_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    status.textContent = expiry ? `QR ready. Expires at ${expiry}.` : "QR ready.";
+  } catch (error) {
+    qr.textContent = "--";
+    status.textContent = error.message;
+    status.classList.add("error");
+  }
+}
+
 function renderBootstrap(data) {
   text("subtitle", data.paired ? `${data.home_id} - live cloud dashboard` : "Pi is online, waiting for pairing");
   document.getElementById("pairingPanel").hidden = data.paired;
@@ -196,6 +215,7 @@ async function start() {
     renderBootstrap(bootstrap);
     sessionRefreshTimer = setInterval(() => refreshDashboardSession().catch(() => setStatus("Session expiring", "warn")), 300000);
     if (bootstrap.paired) {
+      loadHomeInviteQr();
       connectIotLive().catch(() => document.getElementById("liveMode").textContent = "Polling fallback");
       statePollTimer = setInterval(pollState, 3000);
     } else {
