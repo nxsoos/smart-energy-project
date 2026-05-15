@@ -19,7 +19,9 @@ _LOCK = threading.RLock()
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=float(os.environ.get("LOCAL_SQLITE_BUSY_TIMEOUT_SECONDS", "30")))
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS state (

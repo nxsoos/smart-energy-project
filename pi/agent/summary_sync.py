@@ -44,6 +44,13 @@ SUMMARY_SYNC_DESTINATION = os.environ.get("SUMMARY_SYNC_DESTINATION", "ec2").str
 KAHRABAIQ_API_URL = os.environ.get("KAHRABAIQ_API_URL", "").rstrip("/")
 PI_ID = os.environ.get("PI_ID", "pi_home_001")
 PI_DEVICE_TOKEN = os.environ.get("PI_DEVICE_TOKEN", "")
+ENABLE_PARTIAL_CURRENT_HOUR_SUMMARY = os.environ.get(
+    "ENABLE_PARTIAL_CURRENT_HOUR_SUMMARY",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
+SUMMARY_POWER_INTEGRATION_MAX_GAP_SECONDS = int(
+    os.environ.get("SUMMARY_POWER_INTEGRATION_MAX_GAP_SECONDS", "300")
+)
 
 
 def log(message: str) -> None:
@@ -116,6 +123,35 @@ def first_last_delta(values: list[float]) -> float | None:
     return round(delta, 6)
 
 
+def estimated_energy_from_power(records: list[dict[str, Any]]) -> float | None:
+    samples: list[tuple[int, float]] = []
+    for record in records:
+        timestamp = as_number(
+            record.get("timestamp_ms")
+            or record.get("created_at_ms")
+            or record.get("updated_at_ms")
+        )
+        power = as_number(record.get("power_W"))
+        if timestamp is None or power is None:
+            continue
+        samples.append((int(timestamp), max(0.0, power)))
+
+    samples.sort(key=lambda item: item[0])
+    if len(samples) < 2:
+        return None
+
+    max_gap_ms = max(1, SUMMARY_POWER_INTEGRATION_MAX_GAP_SECONDS) * 1000
+    energy_kwh = 0.0
+    for (left_ms, left_power), (right_ms, right_power) in zip(samples, samples[1:]):
+        elapsed_ms = right_ms - left_ms
+        if elapsed_ms <= 0 or elapsed_ms > max_gap_ms:
+            continue
+        average_power_w = (left_power + right_power) / 2
+        energy_kwh += average_power_w * (elapsed_ms / 3600000) / 1000
+
+    return round(energy_kwh, 6) if energy_kwh > 0 else None
+
+
 def timestamp_in_window(item: dict[str, Any], start_at_ms: int, end_at_ms: int) -> bool:
     for key in (
         "timestamp_ms",
@@ -178,13 +214,19 @@ def summarize_sensors(records: list[dict[str, Any]]) -> dict[str, Any]:
 def summarize_breaker(records: list[dict[str, Any]]) -> dict[str, Any]:
     power_values = numeric_values(records, "power_W")
     energy_values = numeric_values(records, "energy_kWh")
+    energy_delta = first_last_delta(energy_values)
+    estimated_energy = estimated_energy_from_power(records)
+    usable_energy = energy_delta if energy_delta is not None and energy_delta > 0 else estimated_energy
     return {
         "sampleCount": len(records),
         "avgPowerW": average(power_values),
         "peakPowerW": round(max(power_values), 3) if power_values else None,
         "avgVoltageV": average(numeric_values(records, "voltage_V")),
         "avgCurrentA": average(numeric_values(records, "current_A")),
-        "energyDeltaKwh": first_last_delta(energy_values),
+        "energyDeltaKwh": usable_energy,
+        "meterEnergyDeltaKwh": energy_delta,
+        "estimatedEnergyKwh": estimated_energy,
+        "energySource": "meter" if energy_delta is not None and energy_delta > 0 else "power_integration" if estimated_energy is not None else "unavailable",
         "onlineSamples": sum(1 for record in records if str(record.get("online_state", "")).lower() == "online"),
         "switchOnSamples": bool_count(records, "switch"),
     }
@@ -431,6 +473,17 @@ def daily_summary_id(start: datetime) -> str:
 def generate_recent_summaries() -> None:
     now = datetime.now(BAHRAIN_TZ)
     latest_complete_hour = hour_start(now)
+    if ENABLE_PARTIAL_CURRENT_HOUR_SUMMARY and now > latest_complete_hour:
+        start = latest_complete_hour
+        upsert_summary(
+            hourly_summary_id(start),
+            HOME_ID,
+            "hourly",
+            dt_to_ms(start),
+            dt_to_ms(now),
+            build_summary("hourly", dt_to_ms(start), dt_to_ms(now)),
+        )
+
     for offset in range(1, max(1, SUMMARY_LOOKBACK_HOURS) + 1):
         start = latest_complete_hour - timedelta(hours=offset)
         end = start + timedelta(hours=1)
